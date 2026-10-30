@@ -121,7 +121,7 @@ fn superblob_entitlements<R: Read + Seek>(
     }
     let count = be32(&header, 8).unwrap_or(0).min(64).min((len - 12) / 8);
     let index = read_at(file, start + 12, count as usize * 8)?;
-    for slot in index.chunks_exact(8) {
+    for slot in index.as_chunks::<8>().0 {
         if be32(slot, 0) != Some(CSSLOT_ENTITLEMENTS) {
             continue;
         }

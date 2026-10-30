@@ -35,10 +35,22 @@ RFC 3339 strings in UTC. All `/api` responses are `application/json` with
 
 ## Kiwi Builds (automation)
 
-Kiwi patches and signs App Store apps on the Mac from the recipes in
-`automation/recipes.json`: `youtube`, `youtube-music`, `twitch`, `x` and `reddit`. `:app` below is one
+Kiwi builds and signs apps on the Mac from the recipes in
+`automation/recipes.json`: `youtube`, `youtube-music`, `twitch`, `x`, `reddit`, `rambler` and `gboard`. `:app` below is one
 of those ids; an unknown id returns 404. Responses contain no credentials, models, raw
 Apple responses, file paths or private logs.
+
+`rambler` is an experimental native Swift app, version 0.1.0, compiled from sources
+embedded in Kiwi. It uses full Xcode without App Store enrollment or tweak tools. Its
+build verifies a synthetic speech correction before the usual signing and publication.
+It has no included or optional patches. Other recipes patch App Store apps.
+
+`gboard` is an experimental integration into Gboard 2.3.19. It embeds the native
+Rambler client, preserves and validates the keyboard extension, and requires both
+bundles' signing profiles to grant the recipe's shared App Groups. It has no optional
+patches. Its plan includes the native source digest and Xcode toolchain in addition
+to the Apple build id. A successful publication does not imply an actual keyboard
+runtime test on an iPhone.
 
 Kiwi Builds is off until the owner turns it on (`Settings.kiwi_builds`). While it is off,
 every `/api/automation` endpoint answers `409 builds_off` and nothing is built; turning it
@@ -69,7 +81,8 @@ newest 3 `jobs`) in display order, and the shared Mac setup `checks` (`{name,rea
 - `configuration_changed`: true when saved patch choices or the app name differ from the
   published build. Schedule changes alone never require rebuilding.
 - `next_check_at`: scheduled UTC time, or null when not added, disabled or a job is active.
-- `checks`: the shared Mac setup checks.
+- `checks`: the app's most recently reported requirements. Native apps report their
+  Xcode check separately and do not overwrite the overview's App Store setup checks.
 
 Preferences, for `PATCH /api/automation/:app` (replaces them) and `POST .../add`:
 
@@ -99,9 +112,12 @@ job has `id`, `app`, `sequence`, `stage`, `created_at`, nullable `finished_at`, 
 `preferences` it was started with; changing preferences never changes a queued or running
 job. Poll while `finished_at` is null. A `ready` job has passed package and signing checks;
 it does not imply a test on a physical device.
+`external_id` is Apple's build identifier for App Store recipes, and
+`native-<source digest prefix>` for native apps. Native build identity also includes
+the bundled sources, recipe, dependency pins, runner and Xcode toolchain.
 
 Published builds use source `kiwi-youtube` (its id predates the other apps) with each
-app's original bundle id, and the usual app/prepare/install APIs. Its source URL is an
+app's recipe bundle id, and the usual app/prepare/install APIs. Its source URL is an
 internal identifier; refreshing it returns the saved local catalogue without fetching the
 network. Raw artifacts and provenance files have no HTTP download route. See
 [kiwi-builds.md](kiwi-builds.md) for Mac setup and operational details.

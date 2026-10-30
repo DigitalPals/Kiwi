@@ -47,8 +47,8 @@ describe("mock api", () => {
   it("lists the apps Kiwi builds and saves each app's settings", () => {
     const { request } = setup();
     const overview = request("GET", "/api/automation").json as AutomationOverview;
-    expect(overview.apps.map((a) => a.id)).toEqual(["youtube", "youtube-music", "twitch", "x", "reddit"]);
-    expect(overview.apps.map((a) => a.added)).toEqual([true, false, false, false, false]);
+    expect(overview.apps.map((a) => a.id)).toEqual(["youtube", "youtube-music", "twitch", "x", "reddit", "rambler", "gboard"]);
+    expect(overview.apps.map((a) => a.added)).toEqual([true, false, false, false, false, false, false]);
     const initial = request("GET", "/api/automation/youtube").json as AutomationState;
     expect(initial.available_tweaks.map((t) => t.id)).toContain("youpip");
     expect(initial.included.map((t) => t.name)).toEqual(["YouMod"]);
@@ -79,6 +79,111 @@ describe("mock api", () => {
     expect((added.json as AutomationState).jobs[0]?.app).toBe("x");
     expect((request("DELETE", "/api/automation/x").json as AutomationState).added).toBe(false);
     expect(request("GET", "/api/automation/instagram").status).toBe(404);
+  });
+
+  it("simulates builds that publish Kiwi revisions in the Kiwi Builds source", () => {
+    let now = Date.parse("2026-10-29T12:00:00Z");
+    const api = createMockApi(() => now, { builds: "simulated" });
+    const request = (method: string, path: string, body?: unknown) =>
+      api.handle({
+        method,
+        path,
+        query: new URLSearchParams(),
+        headers: method === "GET" ? {} : { "x-kiwi": "1", "content-type": "application/json" },
+        body: body === undefined ? "" : JSON.stringify(body),
+        origin: "http://localhost:5173",
+      });
+    const youtube = () => request("GET", "/api/automation/youtube").json as AutomationState;
+    const music = request("GET", "/api/automation/youtube-music").json as AutomationState;
+
+    request("POST", "/api/automation/youtube/check", { force: false });
+    expect(youtube().jobs[0]).toMatchObject({ status: "running", stage: "Checking build setup" });
+    request("POST", "/api/automation/youtube-music/add", music.preferences);
+    expect((request("GET", "/api/automation/youtube-music").json as AutomationState).jobs[0]?.stage).toBe("Waiting for YouTube");
+    expect(request("POST", "/api/automation/youtube/check", {}).status).toBe(409);
+    now += 5 * 2600;
+    expect(youtube().jobs[0]).toMatchObject({ status: "running", stage: "Injecting tweaks", version: "21.44.0" });
+    expect((request("GET", "/api/automation").json as AutomationOverview).checks.every((c) => c.ready)).toBe(true);
+    now += 3 * 2600;
+    const built = youtube();
+    expect(built.jobs[0]).toMatchObject({ status: "ready", stage: "Signed and available in Kiwi" });
+    expect(built.published).toMatchObject({ version: "21.44.0", revision: 1 });
+    expect((request("GET", "/api/automation/youtube-music").json as AutomationState).jobs[0]?.status).toBe("running");
+    const sources = request("GET", "/api/sources").json as Source[];
+    expect(sources.find((s) => s.id === "kiwi-youtube")).toMatchObject({ kind: "local_build", name: "Kiwi Builds" });
+    const app = request("GET", "/api/apps/kiwi-youtube/com.google.ios.youtube").json as AppDetail;
+    expect(app.name).toBe("YouTube");
+    expect(app.state.action).toBe("install");
+
+    // Unchanged recipes are skipped; changed patches make a new revision of the same version.
+    now += 60_000;
+    request("POST", "/api/automation/youtube/check", {});
+    now += 3 * 2600;
+    expect(youtube().jobs[0]).toMatchObject({ status: "unchanged", stage: "Already up to date" });
+    request("PATCH", "/api/automation/youtube", { ...built.preferences, tweaks: ["youpip"] });
+    expect(youtube().configuration_changed).toBe(true);
+    request("POST", "/api/automation/youtube/check", {});
+    now += 8 * 2600;
+    expect(youtube()).toMatchObject({ configuration_changed: false, published: { revision: 3, tweaks: ["youpip"] } });
+    const detail = request("GET", "/api/apps/kiwi-youtube/com.google.ios.youtube").json as AppDetail;
+    expect(detail.releases.map((r) => r.revision)).toEqual([3, 1]);
+
+    // A new App Store version is built on the next check.
+    expect(api.releaseOnAppStore("com.google.ios.youtube", "21.45.0")).toBe(true);
+    request("POST", "/api/automation/youtube/check", {});
+    now += 8 * 2600;
+    expect(youtube().published).toMatchObject({ version: "21.45.0", revision: 4 });
+
+    request("POST", "/api/automation/youtube/check", { force: true });
+    request("POST", "/api/automation/youtube/cancel");
+    expect(youtube().jobs[0]).toMatchObject({ status: "cancelled", stage: "Cancelled" });
+  });
+
+  it("publishes the native Rambler app without claiming App Store setup is ready", () => {
+    let now = Date.parse("2026-10-29T12:00:00Z");
+    const api = createMockApi(() => now, { builds: "simulated" });
+    const request = (method: string, path: string, body?: unknown) => api.handle({
+      method, path, query: new URLSearchParams(),
+      headers: method === "GET" ? {} : { "x-kiwi": "1", "content-type": "application/json" },
+      body: body === undefined ? "" : JSON.stringify(body), origin: "http://localhost:5173",
+    });
+    const initial = request("GET", "/api/automation/rambler").json as AutomationState;
+    expect(initial).toMatchObject({ added: false, experimental: true, included: [], available_tweaks: [] });
+    expect(initial.preferences.tweaks).toEqual([]);
+    expect(request("POST", "/api/automation/rambler/add", initial.preferences).status).toBe(202);
+    now += 9 * 2600;
+    const ready = request("GET", "/api/automation/rambler").json as AutomationState;
+    expect(ready.jobs[0]).toMatchObject({ status: "ready", external_id: expect.stringMatching(/^native-/) });
+    expect(ready.published).toMatchObject({ version: "0.1.0", build: "1", revision: 1 });
+    expect(ready.checks).toEqual([{ name: "Native iOS build tools", ready: true }]);
+    expect((request("GET", "/api/automation").json as AutomationOverview).checks).toEqual([]);
+    const app = request("GET", "/api/apps/kiwi-youtube/com.kiwi.ramblerpoc").json as AppDetail;
+    expect(app.state.action).toBe("install");
+    expect(app.releases[0]).toMatchObject({ version: "0.1.0", build: "1", min_os: "16.0" });
+    expect(app.state.install_url).toBeTruthy();
+    expect(request("POST", "/api/automation/rambler/check", {}).status).toBe(202);
+    now += 3 * 2600;
+    expect((request("GET", "/api/automation/rambler").json as AutomationState).jobs[0]?.status).toBe("unchanged");
+  });
+
+  it("publishes experimental Gboard with its original version and separate Apple build number", () => {
+    let now = Date.parse("2026-10-29T12:00:00Z");
+    const api = createMockApi(() => now, { builds: "simulated" });
+    const request = (method: string, path: string, body?: unknown) => api.handle({
+      method, path, query: new URLSearchParams(),
+      headers: method === "GET" ? {} : { "x-kiwi": "1", "content-type": "application/json" },
+      body: body === undefined ? "" : JSON.stringify(body), origin: "http://localhost:5173",
+    });
+    const initial = request("GET", "/api/automation/gboard").json as AutomationState;
+    expect(initial).toMatchObject({ added: false, experimental: true, app_version: "2.3.19", available_tweaks: [] });
+    expect(request("POST", "/api/automation/gboard/add", initial.preferences).status).toBe(202);
+    now += 12 * 2600;
+    const ready = request("GET", "/api/automation/gboard").json as AutomationState;
+    expect(ready.jobs[0]?.status).toBe("ready");
+    expect(ready.published).toMatchObject({ version: "2.3.19", build: "2.3.19.444584732", revision: 1 });
+    const app = request("GET", "/api/apps/kiwi-youtube/com.google.keyboard").json as AppDetail;
+    expect(app.name).toBe("Gboard Rambler");
+    expect(app.releases[0]?.min_os).toBe("16.0");
   });
 
   it("covers every action in the fixtures", () => {

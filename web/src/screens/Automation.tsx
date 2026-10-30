@@ -44,6 +44,7 @@ function Options({ data, preferences, edit, disabled, footer }: {
   disabled: boolean;
   footer?: string;
 }) {
+  if (data.names.length === 0 && data.included.length === 0 && data.available_tweaks.length === 0) return null;
   return (
     <Section title="Patches" footer={footer}>
       {data.names.length > 0 && (
@@ -89,7 +90,7 @@ function AddApp({ data, onAdded }: { data: AutomationState; onAdded: (state: Aut
         {add.pending ? <Spinner /> : `Add ${data.name} to Kiwi Builds`}
       </button>
       <p class="build-caption">
-        Downloads {data.name} from the App Store, then checks for updates {intervalLabel(preferences.interval_minutes).toLowerCase()}.
+        Builds and signs {data.name} on your Mac, then checks for updates {intervalLabel(preferences.interval_minutes).toLowerCase()}.
       </p>
     </>
   );
@@ -138,7 +139,7 @@ function Added({ data, state }: { data: AutomationState; state: ReturnType<typeo
             <a class="link" href={builtAppPath(data)}>View App</a>
           </Cell>
           <Cell label="Built">{formatDateTime(published.date)}</Cell>
-          {published.tweaks && <Cell label="Included Features" sub={selectedFeatures(data, published.tweaks, published.name)} />}
+          {published.tweaks && (data.included.length > 0 || data.available_tweaks.length > 0) && <Cell label="Included Features" sub={selectedFeatures(data, published.tweaks, published.name)} />}
         </> : <Cell label="No build yet" sub={active ? "The first build is on its way." : "Choose Build Now to start the first build."} />}
         {data.source_enabled === false && <Cell label="Kiwi Builds is hidden" sub="Show this source to browse and install its builds.">
           <button class="text-button" type="button" disabled={showSource.pending} onClick={() => void showSource.run()}>Show</button>
@@ -166,7 +167,7 @@ function Added({ data, state }: { data: AutomationState; state: ReturnType<typeo
       </Section>
 
       <form onSubmit={(e) => { e.preventDefault(); if (dirty && !save.pending) void save.run(preferences); }}>
-        <Section title="Schedule" footer={`The Mac checks Apple for new ${data.name} versions, applies your saved patches and signs the result. Installation still needs your confirmation on the iPhone.`}>
+        <Section title="Schedule" footer={`The Mac checks for new ${data.name} versions, builds with your saved choices and signs the result. Installation still needs your confirmation on the iPhone.`}>
           <Cell label="Build Updates Automatically">
             <Toggle checked={preferences.enabled} onChange={(enabled) => edit({ enabled })} label={`Build ${data.name} updates automatically`} disabled={save.pending} />
           </Cell>
@@ -191,7 +192,7 @@ function Added({ data, state }: { data: AutomationState; state: ReturnType<typeo
 
       <Limitations data={data} title="Known Limitations" />
 
-      <Section title="Mac Setup" footer="Apple account sign-in and enrollment stay on the Mac. Choose Check Now or Build Now above to refresh these checks.">
+      <Section title="Mac Setup" footer="Requirements depend on the app. Choose Check Now or Build Now above to refresh these checks.">
         <SetupCells checks={data.checks} />
       </Section>
 
@@ -202,7 +203,7 @@ function Added({ data, state }: { data: AutomationState; state: ReturnType<typeo
           <div class="cell-sub" role={job.finished_at ? undefined : "status"}>{job.stage}{job.status === "ready" ? ` · Kiwi ${job.sequence}` : ""}</div>
           <div class="cell-sub">{formatDateTime(job.created_at)}</div>
           {job.error && <div class="cell-sub danger">{job.error}</div>}
-          {job.preferences && <details class="cell-details"><summary class="cell-sub">Included features</summary>
+          {job.preferences && (data.names.length > 0 || data.included.length > 0 || data.available_tweaks.length > 0) && <details class="cell-details"><summary class="cell-sub">Included features</summary>
             <div class="cell-sub">{selectedFeatures(data, job.preferences.tweaks, job.preferences.name)}</div>
           </details>}
         </div>)}

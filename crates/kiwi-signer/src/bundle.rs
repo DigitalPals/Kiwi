@@ -132,6 +132,7 @@ pub(crate) fn prepare(
         .insert("CFBundleIdentifier".into(), bundle_id.into());
     if let Some(scheme) = url_scheme {
         add_url_scheme(&mut info.dict, scheme);
+        containing_app_scheme(&mut info.dict, scheme);
     }
     let mut bundles = vec![finish(app, info, old_main.clone(), bundle_id.to_owned())?];
 
@@ -142,6 +143,9 @@ pub(crate) fn prepare(
         let new_id = map_bundle_id(&old_main, bundle_id, &old_id);
         info.dict
             .insert("CFBundleIdentifier".into(), new_id.clone().into());
+        if let Some(scheme) = url_scheme {
+            containing_app_scheme(&mut info.dict, scheme);
+        }
         if let Some(Value::String(id)) = info.dict.get_mut("WKCompanionAppBundleIdentifier") {
             *id = map_bundle_id(&old_main, bundle_id, id);
         }
@@ -173,6 +177,24 @@ pub(crate) fn prepare(
     })
 }
 
+fn containing_app_scheme(info: &mut Dictionary, scheme: &str) {
+    if info
+        .get("KiwiRedirectContainingAppURLs")
+        .and_then(Value::as_boolean)
+        != Some(true)
+    {
+        return;
+    }
+    let schemes = info
+        .entry("LSApplicationQueriesSchemes")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(items) = schemes.as_array_mut()
+        && !items.iter().any(|v| v.as_string() == Some(scheme))
+    {
+        items.push(scheme.into());
+    }
+}
+
 fn finish(path: &Path, mut info: InfoPlist, old_id: String, new_id: String) -> Result<BundleInfo> {
     info.dict.remove("UISupportedDevices");
     info.save()?;
@@ -187,6 +209,45 @@ fn finish(path: &Path, mut info: InfoPlist, old_id: String, new_id: String) -> R
         new_id,
         executable,
     })
+}
+
+/// Builds which depend on shared storage must not silently lose App Groups.
+/// Resolve their aliases against the signing team and the granted entitlements;
+/// the native hooks read these concrete aliases from each bundle's Info.plist.
+pub(crate) fn resolve_app_groups(app: &Path, team: &str, entitlements: &Dictionary) -> Result<()> {
+    let mut info = InfoPlist::load(app)?;
+    let Some(required) = info.dict.get("KiwiRequiredAppGroups") else {
+        return Ok(());
+    };
+    let invalid = || Error::InvalidIpa(format!("Invalid KiwiRequiredAppGroups in {}", short(app)));
+    let required = required.as_dictionary().ok_or_else(invalid)?;
+    if required.is_empty() || required.len() > 16 {
+        return Err(invalid());
+    }
+    let granted = entitlements
+        .get("com.apple.security.application-groups")
+        .and_then(Value::as_array);
+    let mut aliases = Dictionary::new();
+    for (original, template) in required {
+        let template = template.as_string().ok_or_else(invalid)?;
+        if !original.starts_with("group.")
+            || !template.starts_with("group.")
+            || template.len() > 255
+        {
+            return Err(invalid());
+        }
+        let resolved = template.replace("{team}", team);
+        if !granted.is_some_and(|items| items.iter().any(|g| g.as_string() == Some(&resolved))) {
+            return Err(Error::NoProfile(format!(
+                "{} requires App Group {resolved}. Provision the app and keyboard with matching App Group profiles, then rescan Signing.",
+                short(app)
+            )));
+        }
+        aliases.insert(original.clone(), resolved.into());
+    }
+    info.dict
+        .insert("KiwiAppGroupAliases".into(), aliases.into());
+    info.save()
 }
 
 /// New id of a nested bundle: `OLD.suffix` becomes `NEW.suffix`, anything else
@@ -377,6 +438,80 @@ mod tests {
                 .map(Vec::len),
             Some(1)
         );
+    }
+
+    #[test]
+    fn required_shared_groups_must_be_granted_to_every_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("Host.app");
+        let keyboard = app.join("PlugIns/Keyboard.appex");
+        let required = dict(&[
+            (
+                "group.com.google.keyboard",
+                "group.com.kiwi.gboard.{team}.keyboard".into(),
+            ),
+            (
+                "group.com.google.common",
+                "group.com.kiwi.gboard.{team}.common".into(),
+            ),
+        ]);
+        let groups = Value::Array(vec![
+            "group.com.kiwi.gboard.A1B2C3D4E5.keyboard".into(),
+            "group.com.kiwi.gboard.A1B2C3D4E5.common".into(),
+        ]);
+        let entitlements = dict(&[("com.apple.security.application-groups", groups)]);
+        for path in [&app, &keyboard] {
+            write_bundle(
+                path,
+                &[("KiwiRequiredAppGroups", required.clone().into())],
+                true,
+            );
+            let error = resolve_app_groups(path, "A1B2C3D4E5", &Dictionary::new()).unwrap_err();
+            assert!(matches!(error, Error::NoProfile(_)));
+            assert!(error.to_string().contains("matching App Group profiles"));
+            assert!(!read_info(path).0.contains_key("KiwiAppGroupAliases"));
+            resolve_app_groups(path, "A1B2C3D4E5", &entitlements).unwrap();
+            let (info, binary) = read_info(path);
+            assert!(binary);
+            let aliases = info["KiwiAppGroupAliases"].as_dictionary().unwrap();
+            assert_eq!(
+                get(aliases, "group.com.google.keyboard"),
+                Some("group.com.kiwi.gboard.A1B2C3D4E5.keyboard")
+            );
+            assert_eq!(
+                get(aliases, "group.com.google.common"),
+                Some("group.com.kiwi.gboard.A1B2C3D4E5.common")
+            );
+        }
+        let mut partial = entitlements;
+        partial.insert(
+            "com.apple.security.application-groups".into(),
+            Value::Array(vec!["group.com.kiwi.gboard.A1B2C3D4E5.keyboard".into()]),
+        );
+        assert!(resolve_app_groups(&keyboard, "A1B2C3D4E5", &partial).is_err());
+    }
+
+    #[test]
+    fn containing_app_urls_are_queryable_by_the_preserved_keyboard() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = sample_app(dir.path());
+        for path in [&app, &app.join("PlugIns/Share.appex")] {
+            let mut info = InfoPlist::load(path).unwrap();
+            info.dict
+                .insert("KiwiRedirectContainingAppURLs".into(), true.into());
+            info.dict.insert(
+                "LSApplicationQueriesSchemes".into(),
+                Value::Array(vec!["existing".into()]),
+            );
+            info.save().unwrap();
+        }
+        let prepared = prepare(&app, "com.example.demo.T", Some("kiwi-123"), true).unwrap();
+        for bundle in prepared.bundles.iter().take(2) {
+            assert_eq!(
+                read_info(&bundle.path).0["LSApplicationQueriesSchemes"],
+                Value::Array(vec!["existing".into(), "kiwi-123".into()])
+            );
+        }
     }
 
     fn sample_app(root: &Path) -> PathBuf {

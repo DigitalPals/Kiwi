@@ -9,6 +9,7 @@ import { useOnForeground, useResource } from "../lib/hooks";
 import { buildPath, sourcePath } from "../lib/routes";
 
 export const SETUP_HELP: Record<string, string> = {
+  "Native iOS build tools": "Install full Xcode and its iOS SDK on the Mac.",
   "Mac build tools": "Install Xcode and Kiwi's build tools on the Mac.",
   "Tweak toolchain": "Install the patch compiler using Kiwi's Mac setup instructions.",
   "App Store sign-in": "Sign in to Kiwi's App Store downloader on the Mac. Apple may ask for a verification code.",
@@ -67,7 +68,7 @@ export function Builds() {
   let content;
   if (overview.error instanceof ApiError && overview.error.code === "builds_off") {
     content = (
-      <Empty icon="wrench" title="Kiwi Builds Is Off" message="Turn it on in Settings to patch App Store apps on this Mac.">
+      <Empty icon="wrench" title="Kiwi Builds Is Off" message="Turn it on in Settings to build and sign apps on this Mac.">
         <a class="button" href="/settings">
           Open Settings
         </a>
@@ -87,7 +88,7 @@ export function Builds() {
           </Section>
         )}
         {available.length > 0 && (
-          <Section title="Add an App" footer="Downloaded with your Apple account, patched from pinned open-source tweaks and signed on the Mac.">
+          <Section title="Add an App" footer="Native apps are compiled from source. App Store apps are downloaded with your Apple account and patched. Every build is signed on the Mac.">
             {available.map((app) => <BuildRow key={app.id} app={app} />)}
           </Section>
         )}
@@ -117,7 +118,7 @@ export function Builds() {
       <header class="page-header">
         <h1 class="large-title">Kiwi Builds</h1>
       </header>
-      <p class="page-summary">Patched and signed on your Mac</p>
+      <p class="page-summary">Built and signed on your Mac</p>
       {content}
     </main>
   );

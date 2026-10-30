@@ -5,7 +5,9 @@ import type {
   AppDetail,
   AppState,
   AppSummary,
+  AutomationJob,
   AutomationPreferences,
+  AutomationState,
   Build,
   DevicesResponse,
   Installed,
@@ -15,6 +17,7 @@ import type {
   OtherVersion,
   Release,
   Settings,
+  SetupCheck,
   Source,
   StoreApp,
   Warning,
@@ -33,7 +36,7 @@ import {
   type MockSource,
   type MockStoreApp,
 } from "./fixtures.ts";
-import { createBuilds } from "./builds.ts";
+import { buildStages, catalogOf, createBuilds, integrationOf, nativeBuildOf } from "./builds.ts";
 
 export interface MockRequest {
   method: string;
@@ -42,6 +45,14 @@ export interface MockRequest {
   headers: Record<string, string | undefined>;
   body: string;
   origin: string;
+}
+
+export interface MockOptions {
+  /**
+   * "blocked" (default): every Kiwi Builds check ends needing the Mac. "simulated": a build runs
+   * through the Mac's stages and publishes a signed release in the Kiwi Builds source.
+   */
+  builds?: "blocked" | "simulated";
 }
 
 export interface MockResponse {
@@ -55,6 +66,11 @@ export interface MockResponse {
 const VERSION = "0.2.0";
 const INSTALL_WINDOW = 10 * 60_000;
 const ORPHAN_SOURCE_NAME = "Removed source";
+/** The built-in Kiwi Builds source. */
+const BUILD_SOURCE = "kiwi-youtube";
+/** How long each stage of a simulated Kiwi Build takes; the web app polls every 2 seconds. */
+const BUILD_STAGE_MS = 2600;
+const SETUP_CHECKS = ["Mac build tools", "Tweak toolchain", "App Store sign-in", "Private decryption enrollment"];
 
 class HttpError extends Error {
   constructor(
@@ -96,10 +112,17 @@ function vapidPublicKey(): string {
   return raw.toString("base64url");
 }
 
-export function createMockApi(clock: () => number = Date.now) {
+/** A Kiwi Builds release is newer than the installed copy: a newer version or a later revision of it. */
+function newerThanInstalled(target: Release, installed: Installed): boolean {
+  const c = compareVersions(target.version, installed.version);
+  return c > 0 || (c === 0 && (target.revision ?? 0) > (installed.revision ?? 0));
+}
+
+export function createMockApi(clock: () => number = Date.now, options: MockOptions = {}) {
   const db: MockDb = createDb(clock());
   const vapid = vapidPublicKey();
   const builds = createBuilds(iso(clock()));
+  const simulated = options.builds === "simulated";
 
   // ---- derived state ------------------------------------------------------------------
 
@@ -128,6 +151,10 @@ export function createMockApi(clock: () => number = Date.now) {
   }
 
   function sourceJson(source: MockSource): Source {
+    if (source.id === BUILD_SOURCE) {
+      const apps = db.apps.filter((a) => a.source_id === source.id);
+      return { ...source, kind: "local_build", app_count: apps.length, shown_count: apps.filter(isShown).length, new_count: 0 };
+    }
     const apps = db.apps.filter((a) => a.source_id === source.id);
     // Sources without fixture apps keep their stated count, as if every app were shown.
     if (apps.length === 0) return { ...source, kind: "feed", shown_count: source.browse === "all" ? source.app_count : 0, new_count: 0 };
@@ -234,8 +261,8 @@ export function createMockApi(clock: () => number = Date.now) {
     };
   }
 
-  function latestBuild(key: string, version: string): MockBuild | undefined {
-    return db.builds.filter((b) => b.app_key === key && b.version === version).at(-1);
+  function latestBuild(key: string, version: string, revision?: number): MockBuild | undefined {
+    return db.builds.filter((b) => b.app_key === key && b.version === version && b.revision === revision).at(-1);
   }
 
   function activeAttempt(buildId: string, now: number): MockAttempt | undefined {
@@ -251,6 +278,7 @@ export function createMockApi(clock: () => number = Date.now) {
     return {
       version: i.version,
       build: i.build,
+      ...(i.revision === undefined ? {} : { revision: i.revision }),
       signed_bundle_id: i.origin === "kiwi" ? `${bundleId}.${TEAM_ID}` : bundleId,
       origin: i.origin,
       verified: i.verified,
@@ -295,13 +323,13 @@ export function createMockApi(clock: () => number = Date.now) {
     };
     if (!target) return { ...base, action: inst ? "open" : "unavailable", target: null, build: null };
 
-    const mockBuild = latestBuild(key, target.version);
+    const mockBuild = latestBuild(key, target.version, target.revision);
     const build = mockBuild ? buildJson(mockBuild, now, origin) : null;
     let action: AppState["action"];
     let reason: AppState["update_reason"] = null;
     if (build && build.status !== "ready" && build.status !== "failed") action = "preparing";
     else if (build?.status === "failed") action = "retry";
-    else if (inst && compareVersions(target.version, inst.version) > 0) {
+    else if (inst && newerThanInstalled(target, inst)) {
       action = "update";
       reason = "new_version";
     } else if (inst && needsResign(key, now)) {
@@ -367,7 +395,7 @@ export function createMockApi(clock: () => number = Date.now) {
     const inst = installed(key);
     if (!inst) return false;
     const target = app.releases.map(release).find((r) => r.compatible);
-    return (!!target && compareVersions(target.version, inst.version) > 0) || needsResign(key, now);
+    return (!!target && newerThanInstalled(target, inst)) || needsResign(key, now);
   }
 
   const visibleApps = () => db.apps.filter((a) => db.sources.some((s) => s.id === a.source_id && s.enabled));
@@ -423,8 +451,9 @@ export function createMockApi(clock: () => number = Date.now) {
     return { devices: [db.device], core_devices: db.core_devices };
   }
 
-  /** Completes simulated installs whose time has come. */
+  /** Completes simulated installs and builds whose time has come. */
   function tick(now: number) {
+    advanceBuilds(now);
     for (const attempt of db.attempts) {
       if (attempt.manifest_at === null || attempt.completed_at || now - attempt.manifest_at < attempt.install_ms) continue;
       attempt.completed_at = now;
@@ -438,6 +467,7 @@ export function createMockApi(clock: () => number = Date.now) {
         app_key: build.app_key,
         version: build.version,
         build: build.build,
+        ...(build.revision === undefined ? {} : { revision: build.revision }),
         origin: "kiwi",
         verified: false,
         installed_at: now,
@@ -446,6 +476,159 @@ export function createMockApi(clock: () => number = Date.now) {
       });
       db.device.os_version_source = db.device.os_version_source === "manual" ? "manual" : "installer";
     }
+  }
+
+  // ---- Kiwi Builds ----------------------------------------------------------------------
+
+  /** App Store setup checks, reported once a simulated App Store build checks them. */
+  let setupChecks: SetupCheck[] = [];
+  /** When each simulated job got the Mac's single build worker, and the jobs Rebuild forced. */
+  const jobStarts = new Map<string, number>();
+  const forcedJobs = new Set<string>();
+  let workerFreeAt = 0;
+
+  /** The App Store version a build uses: the one its tweak supports, or the storefront's newest. */
+  const buildVersion = (app: AutomationState) => nativeBuildOf(app.id)?.version ?? app.app_version ?? findStore(app.bundle_id)?.version ?? "1.0";
+
+  const recipeKey = (app: AutomationState, version: string, p: AutomationPreferences) =>
+    createHash("sha256").update(JSON.stringify([app.id, version, [...p.tweaks].sort(), p.name ?? null])).digest("hex");
+
+  /** An app's state as the server reports it, with what follows from the published build. */
+  function automationView(app: AutomationState): AutomationState {
+    const view = structuredClone(app);
+    const published = app.published;
+    view.configuration_changed = !!published && (
+      [...(published.tweaks ?? [])].sort().join(",") !== [...app.preferences.tweaks].sort().join(",")
+      || (app.names.length > 0 && published.name !== null && published.name !== (app.preferences.name ?? null)));
+    view.source_enabled = db.sources.find((s) => s.id === BUILD_SOURCE)?.enabled ?? null;
+    // The server shows the App Store icon.
+    const store = simulated ? findStore(app.bundle_id) : undefined;
+    if (store) view.icon_url = `/__mock/icon/${store.slug}.svg`;
+    return view;
+  }
+
+  /** Simulated builds: the Mac's one worker takes the oldest job through its stages, then publishes it. */
+  function advanceBuilds(now: number) {
+    if (!simulated) return;
+    for (;;) {
+      const queue = builds
+        .flatMap((app) => app.jobs.filter((j) => !j.finished_at).map((job) => ({ app, job })))
+        .sort((a, b) => a.job.created_at.localeCompare(b.job.created_at));
+      const next = queue[0];
+      if (!next) return;
+      const { app, job } = next;
+      const start = jobStarts.get(job.id) ?? Math.max(Date.parse(job.created_at), workerFreeAt);
+      jobStarts.set(job.id, start);
+      const stages = buildStages(app);
+      const step = Math.floor((now - start) / BUILD_STAGE_MS);
+      if (step >= 1 && !nativeBuildOf(app.id) && setupChecks.length === 0) {
+        setupChecks = SETUP_CHECKS.map((name) => ({ name, ready: true }));
+        for (const b of builds) if (!nativeBuildOf(b.id)) b.checks = structuredClone(setupChecks);
+      }
+      if (step >= 1 && nativeBuildOf(app.id)) app.checks = [{ name: "Native iOS build tools", ready: true }];
+      if (step >= 2 && job.recipe_key === null) {
+        const version = buildVersion(app);
+        const key = recipeKey(app, version, job.preferences ?? app.preferences);
+        Object.assign(job, { version, external_id: nativeBuildOf(app.id) ? `native-${key.slice(0, 16)}` : String(880_000_000 + (Number.parseInt(key.slice(0, 6), 16) % 9_000_000)), recipe_key: key });
+      }
+      if (step >= 2 && !forcedJobs.has(job.id) && job.recipe_key === app.last_success_key) {
+        finishJob(app, job, start + 2 * BUILD_STAGE_MS, "unchanged");
+        continue;
+      }
+      if (step < stages.length) {
+        job.status = "running";
+        job.stage = stages[step] ?? "";
+        for (const waiting of queue.slice(1)) {
+          waiting.job.status = "queued";
+          waiting.job.stage = `Waiting for ${app.name}`;
+        }
+        return;
+      }
+      finishJob(app, job, start + stages.length * BUILD_STAGE_MS, "ready");
+    }
+  }
+
+  function finishJob(app: AutomationState, job: AutomationJob, at: number, status: "ready" | "unchanged" | "cancelled") {
+    workerFreeAt = Math.max(workerFreeAt, at);
+    job.status = status;
+    job.finished_at = iso(at);
+    if (status === "unchanged") job.stage = "Already up to date";
+    else if (status === "cancelled") {
+      job.stage = "Cancelled";
+      job.error = "The build was cancelled. The previous release is still available.";
+    } else {
+      job.stage = "Signed and available in Kiwi";
+      publishBuild(app, job, at);
+    }
+  }
+
+  const BUILD_SIZES: Record<string, number> = { youtube: 152.6, "youtube-music": 98.4, twitch: 121.7, x: 164.2, reddit: 139.5, rambler: 0.3 };
+
+  /** Signs a finished build and lists it in the Kiwi Builds source, like the Mac does. */
+  function publishBuild(app: AutomationState, job: AutomationJob, at: number) {
+    const preferences = job.preferences ?? app.preferences;
+    const version = job.version ?? buildVersion(app);
+    const catalog = catalogOf(app.id, preferences.name);
+    let source = db.sources.find((s) => s.id === BUILD_SOURCE);
+    if (!source) {
+      source = {
+        id: BUILD_SOURCE, url: "https://kiwi.invalid/automation/builds", name: "Kiwi Builds", subtitle: "Built on your Mac",
+        icon_url: null, enabled: true, browse: "all", app_count: 0, added_at: iso(at), last_attempt_at: null,
+        last_success_at: null, error: null, diagnostics: [],
+      };
+      db.sources.push(source);
+    }
+    source.last_attempt_at = source.last_success_at = iso(at);
+    let entry = db.apps.find((a) => a.source_id === BUILD_SOURCE && a.bundle_id === app.bundle_id);
+    if (!entry) {
+      entry = {
+        source_id: BUILD_SOURCE, bundle_id: app.bundle_id, slug: findStore(app.bundle_id)?.slug ?? `kiwi-${app.id}`,
+        name: catalog.name, developer: null, subtitle: null, tint_color: null, category: null, description: null,
+        screenshots: 0, releases: [],
+        permissions: { entitlements: ["application-identifier", "keychain-access-groups", "aps-environment"], privacy: [] },
+        dropped_entitlements: ["aps-environment"],
+      };
+      db.apps.push(entry);
+    }
+    Object.assign(entry, {
+      name: catalog.name, developer: catalog.developer, subtitle: catalog.subtitle, tint_color: catalog.tint_color,
+      category: catalog.category, description: catalog.description,
+    });
+    const native = nativeBuildOf(app.id);
+    const integration = integrationOf(app.id);
+    if (native) {
+      entry.permissions = { entitlements: ["application-identifier", "keychain-access-groups"], privacy: [] };
+      entry.dropped_entitlements = [];
+    }
+    const size = Math.round((BUILD_SIZES[app.id] ?? 100) * 1e6);
+    const buildNumber = native?.build ?? integration?.build ?? version;
+    const notes = (native ? `${app.name} ${version} · Native iOS client\nBuilt from Kiwi's bundled Swift sources. Synthetic Rambler speech correction verified.\n`
+      : `${app.name} ${version} · Apple build ${job.external_id}\n${app.tweak.split(" ")[0]} and tweaks compiled from pinned sources.\n`)
+      + `Recipe ${(job.recipe_key ?? "").slice(0, 12)}. Not yet tested on a physical device.`;
+    entry.releases = [
+      { version, build: buildNumber, revision: job.sequence, date: iso(at), notes, size, min_os: native || integration ? "16.0" : "15.0", max_os: null },
+      ...entry.releases,
+    ].slice(0, catalog.retain);
+    const signed: MockBuild = {
+      id: `b-${randomBytes(6).toString("hex")}`, app_key: appKey(entry), version, build: buildNumber, revision: job.sequence,
+      started: at - 2000, duration: 2000, error: null, size, dropped: entry.dropped_entitlements,
+      token: `t-${randomBytes(9).toString("base64url")}`,
+    };
+    db.builds.push(signed);
+    job.signed_build_id = signed.id;
+    Object.assign(app, {
+      published: { version, build: buildNumber, revision: job.sequence, date: iso(at), tweaks: [...preferences.tweaks], name: preferences.name ?? null },
+      last_success_key: job.recipe_key,
+      last_success_tweaks: [...preferences.tweaks],
+      last_success_name: preferences.name ?? null,
+      failed_recipe: null,
+      failed_attempts: 0,
+    });
+  }
+
+  function cancelBuild(app: AutomationState, now: number) {
+    const job = app.jobs.find((j) => !j.finished_at);
+    if (job) finishJob(app, job, now, "cancelled");
   }
 
   // ---- request handling ---------------------------------------------------------------
@@ -472,13 +655,14 @@ export function createMockApi(clock: () => number = Date.now) {
     if (!wanted) throw new HttpError(400, "bad_request", "No matching release to prepare.");
     if (!wanted.compatible) throw new HttpError(400, "bad_request", wanted.incompatibility ?? "Incompatible release.");
     const key = appKey(app);
-    const existing = latestBuild(key, wanted.version);
+    const existing = latestBuild(key, wanted.version, wanted.revision);
     if (existing && buildStatus(existing, now).status !== "failed") return existing;
     const build: MockBuild = {
       id: `b-${randomBytes(6).toString("hex")}`,
       app_key: key,
       version: wanted.version,
       build: wanted.build,
+      ...(wanted.revision === undefined ? {} : { revision: wanted.revision }),
       started: now,
       duration: 9000 + Math.round(Math.random() * 4000),
       error: null,
@@ -545,7 +729,7 @@ export function createMockApi(clock: () => number = Date.now) {
     if (resource === "automation" && !db.settings.kiwi_builds) {
       throw new HttpError(409, "builds_off", "Kiwi Builds is off. Turn it on in Settings.");
     }
-    if (is("GET", "automation")) return ok({ apps: structuredClone(builds), checks: [] });
+    if (is("GET", "automation")) return ok({ apps: builds.map(automationView), checks: structuredClone(setupChecks) });
     if (parts[1] === "automation" && parts[2] !== undefined) {
       const build = builds.find((b) => b.id === parts[2]);
       if (!build) throw new HttpError(404, "not_found", "Kiwi doesn't build that app.");
@@ -566,11 +750,26 @@ export function createMockApi(clock: () => number = Date.now) {
         build.next_check_at = build.added && build.preferences.enabled
           ? iso(now + build.preferences.interval_minutes * 60_000) : null;
       };
-      // Mock mode cannot run the Mac pipeline: every check ends blocked.
-      const check = () => {
+      // Without simulated builds the mock cannot run the Mac pipeline: every check ends blocked.
+      const check = (force = false) => {
         if (!build.added) throw new HttpError(400, "bad_request", `Add ${build.name} to Kiwi Builds first.`);
+        if (build.jobs.some((j) => !j.finished_at)) throw new HttpError(409, "conflict", `A ${build.name} build job is already running.`);
         build.sequence++;
         build.last_checked_at = iso(now);
+        if (simulated) {
+          const running = builds.find((b) => b.jobs.some((j) => !j.finished_at));
+          build.jobs.unshift({
+            id: `mock-${build.id}-${build.sequence}`, app: build.id, sequence: build.sequence, status: "queued",
+            stage: running ? `Waiting for ${running.name}` : "Checking build setup", version: null, external_id: null,
+            recipe_key: null, signed_build_id: null, error: null, created_at: iso(now), finished_at: null,
+            preferences: structuredClone(build.preferences),
+          });
+          build.jobs = build.jobs.slice(0, 30);
+          if (force) forcedJobs.add(`mock-${build.id}-${build.sequence}`);
+          schedule();
+          advanceBuilds(now);
+          return;
+        }
         build.checks = [{ name: "Mac build tools", ready: false }];
         build.jobs.unshift({
           id: `mock-${build.id}-${build.sequence}`, app: build.id, sequence: build.sequence, status: "blocked",
@@ -581,29 +780,35 @@ export function createMockApi(clock: () => number = Date.now) {
         build.jobs = build.jobs.slice(0, 30);
         schedule();
       };
-      if (is("GET", "automation", undefined)) return ok(structuredClone(build));
+      if (is("GET", "automation", undefined)) return ok(automationView(build));
       if (is("PATCH", "automation", undefined)) {
         build.preferences = preferences();
         schedule();
-        return ok(structuredClone(build));
+        return ok(automationView(build));
       }
       if (is("POST", "automation", undefined, "add")) {
         build.preferences = preferences();
         build.added = true;
         check();
-        return ok(structuredClone(build), 202);
+        return ok(automationView(build), 202);
       }
       if (is("DELETE", "automation", undefined)) {
+        cancelBuild(build, now);
         build.added = false;
         build.published = null;
+        // Installed copies keep working; the source no longer offers the app.
+        db.apps = db.apps.filter((a) => !(a.source_id === BUILD_SOURCE && a.bundle_id === build.bundle_id));
         schedule();
-        return ok(structuredClone(build));
+        return ok(automationView(build));
       }
       if (is("POST", "automation", undefined, "check")) {
-        check();
-        return ok(structuredClone(build), 202);
+        check(body.force === true);
+        return ok(automationView(build), 202);
       }
-      if (is("POST", "automation", undefined, "cancel")) return ok(structuredClone(build));
+      if (is("POST", "automation", undefined, "cancel")) {
+        cancelBuild(build, now);
+        return ok(automationView(build));
+      }
     }
     if (is("GET", "me")) return ok(me(now));
     if (is("PATCH", "me")) {
@@ -768,6 +973,8 @@ export function createMockApi(clock: () => number = Date.now) {
       }
       if (settings.refresh_interval_minutes < 15) throw new HttpError(400, "bad_request", "Refresh interval must be at least 15 minutes.");
       if (settings.devicectl_sync_minutes < 5) throw new HttpError(400, "bad_request", "Sync interval must be at least 5 minutes.");
+      // Turning Kiwi Builds off cancels its queued and running builds.
+      if (!settings.kiwi_builds) for (const b of builds) cancelBuild(b, now);
       db.settings = settings;
       return ok(db.settings);
     }
@@ -872,6 +1079,12 @@ export function createMockApi(clock: () => number = Date.now) {
         if (error instanceof HttpError) return { status: error.status, json: { error: { code: error.code, message: error.message } } };
         return { status: 500, json: { error: { code: "internal", message: String(error) } } };
       }
+    },
+    /** A new version of an app on the App Store, so Kiwi Builds has something to update to. */
+    releaseOnAppStore(bundleId: string, version: string): boolean {
+      const listings = Object.values(db.store).flat().filter((a) => a.bundle_id.toLowerCase() === bundleId.toLowerCase());
+      for (const listing of listings) Object.assign(listing, { version, released_at: iso(clock()) });
+      return listings.length > 0;
     },
     /** Looks up an app for the generated placeholder artwork. */
     artwork(slug: string): { name: string; tint: string } | null {

@@ -270,6 +270,7 @@ fn sign_with(
             None => Default::default(),
         };
         let (ent, dropped) = entitlements::build(profile, &b.new_id, &original);
+        bundle::resolve_app_groups(&b.path, &profile.team_id, &ent)?;
         original_keys.extend(original.keys().cloned());
         dropped_keys.extend(dropped);
         let path = work.path().join(format!("entitlements-{i}.plist"));

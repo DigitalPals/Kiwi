@@ -35,7 +35,7 @@ cd ..
 python3 -m pytest automation/test_runner.py
 
 # Scripts
-shellcheck install.sh uninstall.sh deploy/deploy.sh
+shellcheck install.sh uninstall.sh deploy/deploy.sh experiments/gboard-rambler/*.sh
 ```
 
 The same checks run in CI (`.github/workflows/ci.yml`). Keep them passing.
@@ -58,6 +58,16 @@ KIWI_SIGN_BUNDLE_ID=com.example.app.<TEAMID> \
 Tailscale JSON in `crates/kiwi-device/tests/fixtures`, AltStore feeds in
 `crates/kiwi-source/tests/fixtures`) and fakes (signer, devices, push, App Store and App Store
 Connect servers in `crates/kiwi-server/tests/common`).
+
+The `rambler` and `gboard` recipes embed their Swift sources, Gboard hooks and build
+scripts from [`experiments/gboard-rambler`](../experiments/gboard-rambler/README.md) in the
+Kiwi binary, so changing one changes the source digest of the recipes that use it and
+rebuilds those apps. Runner tests cover source and dependency identity and the publication
+gates with fixtures. Real builds run the Swift protocol tests and a synthetic speech
+correction on the Mac before signing. `test-speech.sh` checks speech detection, end-of-speech timing, the
+filter and that the full recording is kept, with synthetic audio; `test-gboard.sh` also
+builds an iOS Simulator harness around the real client with stand-in classes for Gboard's.
+Neither replaces a test of the actual keyboard on an iPhone.
 
 ## The web app without a server
 
@@ -85,6 +95,12 @@ cd scripts/screenshots && npm install && npm run shoot   # KIWI_DEMO=http://loca
 
 It saves every screen in light and dark at iPhone size and renders `hero.png` from
 `hero.html`.
+
+Kiwi Builds jobs in the demo stop at the Mac's setup. Start it with
+`KIWI_MOCK_BUILDS=simulate VITE_MOCK=1 npm run dev` and builds run through the Mac's stages
+(about 20 seconds each) and publish signed releases in the Kiwi Builds source, ready to install
+and update. For a new version to build, release one in the demo's App Store with
+`POST /__mock/app-store` and `{"bundle_id": "com.google.ios.youtube", "version": "21.45.0"}`.
 
 ## Running the server locally
 

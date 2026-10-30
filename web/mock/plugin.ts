@@ -49,10 +49,22 @@ export function mockApi(): Plugin {
     name: "kiwi-mock-api",
     apply: "serve",
     configureServer(server) {
-      api = createMockApi();
-      server.config.logger.info("  Kiwi mock API enabled (VITE_MOCK=1)");
+      // KIWI_MOCK_BUILDS=simulate runs Kiwi Builds through the Mac's stages instead of stopping at setup.
+      const builds = process.env.KIWI_MOCK_BUILDS === "simulate" ? "simulated" : "blocked";
+      api = createMockApi(Date.now, { builds });
+      server.config.logger.info(`  Kiwi mock API enabled (VITE_MOCK=1${builds === "simulated" ? ", simulated Kiwi Builds" : ""})`);
       server.middlewares.use((req, res, next) => {
         const url = new URL(req.url ?? "/", "http://localhost");
+        // POST {"bundle_id", "version"}: the App Store releases a new version, for Kiwi Builds to update to.
+        if (req.method === "POST" && url.pathname === "/__mock/app-store") {
+          void readBody(req)
+            .then((body) => {
+              const { bundle_id, version } = JSON.parse(body) as { bundle_id: string; version: string };
+              send(res, api.releaseOnAppStore(bundle_id, version) ? 200 : 404, "text/plain", "");
+            })
+            .catch((error: unknown) => send(res, 400, "text/plain", String(error)));
+          return;
+        }
         const art = /^\/__mock\/(icon|shot)\/([a-z0-9-]+?)(?:-(\d+))?\.svg$/.exec(url.pathname);
         if (art) {
           const info = api.artwork(art[2] ?? "");

@@ -18,6 +18,8 @@ export const CERT_EXPIRES = Date.parse("2027-10-25T18:12:09Z");
 export interface MockRelease {
   version: string;
   build: string | null;
+  /** Kiwi Builds' own revision of a version. */
+  revision?: number;
   date: string | null;
   notes: string | null;
   size: number | null;
@@ -60,6 +62,7 @@ export interface MockInstall {
   app_key: string;
   version: string;
   build: string | null;
+  revision?: number;
   origin: "kiwi" | "device";
   verified: boolean;
   installed_at: number;
@@ -72,6 +75,7 @@ export interface MockBuild {
   app_key: string;
   version: string;
   build: string | null;
+  revision?: number;
   started: number;
   duration: number;
   /** Fails during signing with this error. */

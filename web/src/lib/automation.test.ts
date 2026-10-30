@@ -52,7 +52,7 @@ describe("Kiwi Builds settings", () => {
     expect(overviewSummary({ apps: [state(), music, twitch, x], checks: [] })).toBe("YouTube Music: Decrypting YouTube Music");
     expect(overviewSummary({ apps: [state(), twitch, x], checks: [] })).toBe("YouTube and Twitch");
     expect(overviewSummary({ apps: [state(), state({ id: "a" }), twitch], checks: [] })).toBe("3 apps");
-    expect(overviewSummary({ apps: [x], checks: [] })).toBe("Patch and sign App Store apps on your Mac");
+    expect(overviewSummary({ apps: [x], checks: [] })).toBe("Build and sign apps on your Mac");
   });
 
   it("names the tweak and the app version it is built on", () => {

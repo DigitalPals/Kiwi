@@ -84,6 +84,10 @@ iCloud and similar; extensions such as widgets and share sheets may not work.
 **The install hangs**: iOS downloads the app from the Mac through Tailscale. Big apps take a
 while on a slow connection. Keep Kiwi open; if it stays stuck, tap the app's button again.
 
+**Kiwi shows Open for an app you deleted**: Kiwi can't see apps deleted on the iPhone unless
+the iPhone is linked to the Mac (Settings › This iPhone). Open the app's page and choose
+**•••** › **Reinstall**.
+
 ## Notifications
 
 - Notifications only work in the Home Screen app, on iOS 16.4 or later.

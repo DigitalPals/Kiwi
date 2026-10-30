@@ -15,8 +15,8 @@ interface Options {
   onState: (state: AppState) => void;
   /**
    * "app": the main button; a running server build is adopted and the app state is the source
-   * of truth once a build finishes. "version": a specific release; keeps its own build because
-   * the app's install_url points at the target release.
+   * of truth once a build finishes. "version": a specific release, or a reinstall; keeps its own
+   * build because the app's install_url points at the target release, and only for Install/Update.
    */
   mode: "app" | "version";
   prepareBody?: PrepareRequest;

@@ -1,7 +1,13 @@
 import type { JSX } from "preact";
-import { useCallback, useMemo } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import type { AppState, AppSummary, Release } from "../api/types";
-import { deriveAppButton, deriveVersionButton, isInstalledRelease, type ButtonView } from "../lib/action";
+import {
+  deriveAppButton,
+  deriveReinstallButton,
+  deriveVersionButton,
+  isInstalledRelease,
+  type ButtonView,
+} from "../lib/action";
 import { formatPercent } from "../lib/format";
 import { useInstallFlow } from "../lib/install-flow";
 import { Spinner } from "./ui";
@@ -161,4 +167,30 @@ export function VersionButton({ app, release, onState }: VersionButtonProps) {
     );
   }
   return <ActionView view={view} onPrepare={prepare} onInstallTap={installTapped} />;
+}
+
+interface ReinstallButtonProps extends ActionButtonProps {
+  /** The iPhone downloaded the app again (or Kiwi no longer has it as installed). */
+  onDone: () => void;
+}
+
+/** Installs the target release again although Kiwi has the app as installed; starts preparing right away. */
+export function ReinstallButton({ app, onState, onDone, large, caption, render }: ReinstallButtonProps) {
+  const handleState = useCallback((state: AppState) => onState(app, state), [app, onState]);
+  // A completed download records the install anew.
+  const [since] = useState(() => app.state.installed?.installed_at ?? null);
+  const isDone = useCallback((state: AppState) => state.installed?.installed_at !== since, [since]);
+  const { local, prepare, installTapped } = useInstallFlow({ app, onState: handleState, mode: "version", isDone });
+  useEffect(() => {
+    void prepare();
+  }, [prepare]);
+  const done = isDone(app.state);
+  useEffect(() => {
+    if (done) onDone();
+  }, [done, onDone]);
+  const view = deriveReinstallButton(local);
+  const button = (
+    <ActionView view={view} onPrepare={prepare} onInstallTap={installTapped} large={large} caption={caption} />
+  );
+  return render ? render(view, button) : button;
 }

@@ -61,6 +61,9 @@ you can leave the page while Kiwi prepares the app.
   signature gets closer to expiring.
 - **Edit** in My Apps lets you forget an app: Kiwi stops tracking it, and the app stays on
   the iPhone until you delete it there.
+- **Reinstall** (**•••** on an app's page) installs an app again that Kiwi still lists as
+  installed, for example after you deleted it on the iPhone. Kiwi only notices deleted apps
+  when the iPhone is linked to the Mac (see [This iPhone and devicectl](#this-iphone-and-devicectl)).
 
 ## Signing and expiry
 

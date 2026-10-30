@@ -18,7 +18,7 @@ export const IDLE: LocalFlow = { build: null, error: null, busy: false, watching
 export type ButtonView =
   | { kind: "prepare"; label: "Get" | "Update" | "Retry" | "Install"; caption: string | null; error: boolean }
   | { kind: "progress"; progress: number | null; caption: string | null }
-  | { kind: "link"; label: "Install" | "Update"; href: string; caption: string | null }
+  | { kind: "link"; label: "Install" | "Update" | "Reinstall"; href: string; caption: string | null }
   | { kind: "installing"; href: string | null }
   | { kind: "open"; href: string }
   | { kind: "disabled"; label: string; caption: string | null };
@@ -133,6 +133,25 @@ export function deriveVersionButton(release: Release, installed: Installed | nul
     }
   }
   return { kind: "prepare", label: "Install", caption: null, error: false };
+}
+
+/**
+ * Kiwi can't see an app deleted on the iPhone (without devicectl), so it still offers Open.
+ * Reinstall offers it again: an app that is installed and up to date, with a release to install.
+ */
+export function canReinstall(app: Pick<AppSummary, "unavailable" | "state">): boolean {
+  return app.state.action === "open" && !!app.state.installed && !!app.state.target && !app.unavailable;
+}
+
+/** The app page's button while reinstalling: it prepares the target release right away. */
+export function deriveReinstallButton(local: LocalFlow): ButtonView {
+  if (local.error) return failedView(local.error);
+  const { build } = local;
+  if (!build || isActiveBuild(build)) return progressView(build);
+  // Failed, or ready but expired since: Retry prepares a new build.
+  if (!build.install_url) return failedView(build.error);
+  if (local.watching) return { kind: "installing", href: build.install_url };
+  return { kind: "link", label: "Reinstall", href: build.install_url, caption: null };
 }
 
 /**

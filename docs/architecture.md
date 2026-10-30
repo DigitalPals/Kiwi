@@ -453,9 +453,15 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
   app with a link, this app's and the App Store's version and date, how it was matched; or
   "Not in the App Store" with "Link…"), other versions of the same app; then the installed
   build, version history (install a specific version), privacy descriptions and Information
-  (entitlements, with the ones signing removes). "•••" in the bar: "Hide from
-  Browse"/"Show in Browse" and "Change Original App…", a sheet with "Match by Bundle ID",
-  "Not Based on an App Store App" and an App Store search.
+  (entitlements, with the ones signing removes). "•••" in the bar: "Reinstall" (when the
+  action is `open` and there is a target release), "Hide from Browse"/"Show in Browse" and
+  "Change Original App…", a sheet with "Match by Bundle ID", "Not Based on an App Store App"
+  and an App Store search.
+- Reinstall: without devicectl Kiwi can't see an app deleted on the iPhone, so it keeps
+  showing Open. Reinstall prepares the target release right away (a ready build is reused),
+  replaces the button with Reinstall (the install link), Installing and Retry, and ends when
+  the install's `installed_at` changes (a completed download records it again) or on
+  "Cancel Reinstall".
 - Action button state machine: Get -> Preparing (step + progress, polling the build) ->
   Install (an `<a href=itms-services...>` that the user taps; iOS requires a real tap)
   -> Installing (polling) -> Open (`<a href=url_scheme://>`). Update behaves like Get

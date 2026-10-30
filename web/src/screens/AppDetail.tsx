@@ -2,11 +2,11 @@ import type { ComponentChildren } from "preact";
 import { useCallback, useEffect, useState } from "preact/hooks";
 import { ApiError, api } from "../api/client";
 import type { AppDetail, AppPatch, AppState, AppSummary, Release, StoreApp } from "../api/types";
-import { ActionButton, VersionButton } from "../components/ActionButton";
+import { ActionButton, ReinstallButton, VersionButton } from "../components/ActionButton";
 import { AppIcon } from "../components/AppIcon";
 import { Icon } from "../components/Icon";
 import { Empty, ErrorState, ExpandableText, LinkCell, Loading, Spinner, VersionChange } from "../components/ui";
-import { replacesLabel, versionChange, type ButtonView } from "../lib/action";
+import { canReinstall, replacesLabel, versionChange, type ButtonView } from "../lib/action";
 import { BUILD_SOURCE_ID } from "../lib/automation";
 import {
   expiryInfo,
@@ -58,9 +58,14 @@ function originalLabel(app: AppDetail): string {
   }
 }
 
-/** "•••": hide or show the app in Browse, change its original app. */
-function AppMenu(props: { app: AppDetail; onChange: (app: AppDetail) => void; onLink: () => void }) {
-  const { app } = props;
+/** "•••": reinstall the app, hide or show it in Browse, change its original app. */
+function AppMenu(props: {
+  app: AppDetail;
+  onChange: (app: AppDetail) => void;
+  onLink: () => void;
+  onReinstall: (() => void) | null;
+}) {
+  const { app, onReinstall } = props;
   const [open, setOpen] = useState(false);
   const toggle = useTask(async () => {
     setOpen(false);
@@ -83,6 +88,23 @@ function AppMenu(props: { app: AppDetail; onChange: (app: AppDetail) => void; on
         <>
           <div class="menu-scrim" onClick={() => setOpen(false)} />
           <div class="menu" role="menu">
+            {onReinstall && (
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                onClick={() => {
+                  setOpen(false);
+                  onReinstall();
+                }}
+              >
+                <span>
+                  Reinstall
+                  <span class="menu-sub">If it's no longer on this iPhone</span>
+                </span>
+                <Icon name="refresh" size={19} />
+              </button>
+            )}
             <button type="button" role="menuitem" class="menu-item" onClick={() => void toggle.run()}>
               <span>{app.hidden ? "Show in Browse" : "Hide from Browse"}</span>
               <Icon name={app.hidden ? "eye" : "eyeOff"} size={19} />
@@ -468,8 +490,10 @@ function Details(props: {
   onState: (app: AppSummary, state: AppState) => void;
   onChange: (app: AppDetail) => void;
   onLink: () => void;
+  reinstalling: boolean;
+  onReinstallEnd: () => void;
 }) {
-  const { app, onState } = props;
+  const { app, onState, reinstalling, onReinstallEnd } = props;
   const show = useTask(async () =>
     props.onChange(await api.updateApp(app.source_id, app.bundle_id, { hidden: false })),
   );
@@ -491,24 +515,45 @@ function Details(props: {
             <p class="detail-source">{[app.developer, app.source_name].filter(Boolean).join(" · ")}</p>
           </div>
         </header>
-        <ActionButton
-          app={app}
-          onState={onState}
-          large
-          caption={false}
-          render={(view, button) => (
-            <div>
-              <div class="detail-action">
-                {button}
-                {change && <VersionChange from={change.from} to={change.to} large />}
+        {reinstalling ? (
+          <ReinstallButton
+            app={app}
+            onState={onState}
+            onDone={onReinstallEnd}
+            large
+            caption={false}
+            render={(view, button) => (
+              <div>
+                <div class="detail-action">{button}</div>
+                <ActionStatus view={view} />
+                <p class="action-status">
+                  <button type="button" class="text-button small" onClick={onReinstallEnd}>
+                    Cancel Reinstall
+                  </button>
+                </p>
               </div>
-              {/* Why it is unavailable shows once, below. */}
-              {!(view.kind === "disabled" && view.caption === app.unavailable) && <ActionStatus view={view} />}
-              {replaces && <p class="action-status">{replaces}</p>}
-              {app.unavailable && <p class="action-status warn">{app.unavailable}</p>}
-            </div>
-          )}
-        />
+            )}
+          />
+        ) : (
+          <ActionButton
+            app={app}
+            onState={onState}
+            large
+            caption={false}
+            render={(view, button) => (
+              <div>
+                <div class="detail-action">
+                  {button}
+                  {change && <VersionChange from={change.from} to={change.to} large />}
+                </div>
+                {/* Why it is unavailable shows once, below. */}
+                {!(view.kind === "disabled" && view.caption === app.unavailable) && <ActionStatus view={view} />}
+                {replaces && <p class="action-status">{replaces}</p>}
+                {app.unavailable && <p class="action-status warn">{app.unavailable}</p>}
+              </div>
+            )}
+          />
+        )}
         {app.hidden && (
           <p class="hidden-note">
             <Icon name="eyeOff" size={15} />
@@ -659,11 +704,22 @@ export function AppDetailScreen({ sourceId, bundleId }: { sourceId: string; bund
   );
   const [linking, setLinking] = useState(false);
   const closeLink = useCallback(() => setLinking(false), []);
+  const [reinstalling, setReinstalling] = useState(false);
+  const endReinstall = useCallback(() => setReinstalling(false), []);
   useOnForeground(detail.reload);
 
   let content;
   if (detail.data) {
-    content = <Details app={detail.data} onState={onState} onChange={mutate} onLink={() => setLinking(true)} />;
+    content = (
+      <Details
+        app={detail.data}
+        onState={onState}
+        onChange={mutate}
+        onLink={() => setLinking(true)}
+        reinstalling={reinstalling}
+        onReinstallEnd={endReinstall}
+      />
+    );
   } else if (detail.error instanceof ApiError && detail.error.status === 404) {
     content = (
       <Empty icon="inbox" title="App Not Found" message="It may have been removed from its source.">
@@ -680,7 +736,16 @@ export function AppDetailScreen({ sourceId, bundleId }: { sourceId: string; bund
   return (
     <main class="page page-detail page-app" style={hero ? { "--hero": hero.base, "--hero-deep": hero.deep } : undefined}>
       <BackBar
-        trailing={detail.data && <AppMenu app={detail.data} onChange={mutate} onLink={() => setLinking(true)} />}
+        trailing={
+          detail.data && (
+            <AppMenu
+              app={detail.data}
+              onChange={mutate}
+              onLink={() => setLinking(true)}
+              onReinstall={!reinstalling && canReinstall(detail.data) ? () => setReinstalling(true) : null}
+            />
+          )
+        }
       />
       {content}
       {linking && detail.data && <LinkSheet app={detail.data} onChange={mutate} onClose={closeLink} />}

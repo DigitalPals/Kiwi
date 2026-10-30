@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { AppState, Build, Installed, Release } from "../api/types";
 import {
   IDLE,
+  canReinstall,
   deriveAppButton,
+  deriveReinstallButton,
   deriveVersionButton,
   isActiveBuild,
   libraryKey,
@@ -197,6 +199,37 @@ describe("deriveVersionButton", () => {
     expect(deriveVersionButton(r, null, local({ build: build({ status: "failed", error: "x" }) }))).toMatchObject({
       label: "Retry",
       caption: "x",
+    });
+  });
+});
+
+describe("reinstall", () => {
+  it("is offered for installed, up-to-date apps with a release to install", () => {
+    const inst = installed({ version: "2.0", build: "200" });
+    expect(canReinstall(app({ action: "open", installed: inst }))).toBe(true);
+    expect(canReinstall(app({ action: "open", installed: inst, target: null }))).toBe(false);
+    expect(canReinstall(app({ action: "open", installed: inst }, "Removed from the source"))).toBe(false);
+    expect(canReinstall(app({ action: "update", installed: installed() }))).toBe(false);
+    expect(canReinstall(app({ action: "get" }))).toBe(false);
+  });
+
+  it("walks preparing, reinstall link, installing and retry", () => {
+    expect(deriveReinstallButton(IDLE)).toEqual({ kind: "progress", progress: null, caption: "Preparing" });
+    expect(deriveReinstallButton(local({ busy: true }))).toMatchObject({ kind: "progress", progress: null });
+    expect(deriveReinstallButton(local({ build: build() }))).toMatchObject({ kind: "progress", progress: 0.5 });
+    const ready = build({ status: "ready", install_url: URL });
+    expect(deriveReinstallButton(local({ build: ready }))).toEqual({ kind: "link", label: "Reinstall", href: URL, caption: null });
+    expect(deriveReinstallButton(local({ build: ready, watching: true }))).toEqual({ kind: "installing", href: URL });
+    expect(deriveReinstallButton(local({ build: build({ status: "failed", error: "x" }) }))).toMatchObject({
+      kind: "prepare",
+      label: "Retry",
+      caption: "x",
+    });
+    // A ready build that expired has no link: prepare a new one.
+    expect(deriveReinstallButton(local({ build: build({ status: "ready" }) }))).toMatchObject({ label: "Retry" });
+    expect(deriveReinstallButton(local({ error: "Signing is unavailable." }))).toMatchObject({
+      label: "Retry",
+      caption: "Signing is unavailable.",
     });
   });
 });

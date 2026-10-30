@@ -1,0 +1,109 @@
+# Troubleshooting
+
+Start with the log, `~/Library/Logs/Kiwi/kiwi.log` on the Mac, and with
+`./install.sh --check`, which checks the whole setup without changing anything.
+
+## Installing Kiwi
+
+**"No desktop session for …"**: Kiwi runs in your login session, so someone has to be
+logged in to the Mac's desktop as you. Log in (or use Screen Sharing), then run the
+installer again.
+
+**"HTTPS certificates are off for your tailnet"**: turn on MagicDNS and HTTPS
+Certificates on the [DNS page](https://login.tailscale.com/admin/dns) of the Tailscale
+admin console.
+
+**"This Mac is tagged in Tailscale, so it has no owner"**: tagged machines belong to no
+user. Run `./install.sh --owner you@example.com` with your Tailscale login.
+
+**"tailscale serve already maps / of … to …"**: something else is published at the root
+of the Mac's Tailscale address. Remove it (`tailscale serve status`, then `tailscale serve
+--https=443 --set-path=/ off`), or give Kiwi another address with `--public-url`.
+
+**"Port 8742 is used by another program"**: stop that program or pick another port with
+`--port`.
+
+**The build fails**: make sure `cargo --version` and `node --version` (20 or later) work
+in the same Terminal. Rust's first build downloads crates and takes a few minutes.
+
+**"Kiwi … did not become healthy"**: the installer rolled back to the previous build. The
+end of the log printed above says why. Fix it and run `./install.sh` again.
+
+## Reaching Kiwi
+
+**"Can't reach Kiwi" on the iPhone**: check that Tailscale is connected on the iPhone,
+that the Mac is awake and logged in, and that Kiwi answers on the Mac:
+
+```sh
+curl -s http://127.0.0.1:8742/api/health
+launchctl print gui/$(id -u)/local.kiwi | head -30
+tailscale serve status
+```
+
+**"Couldn't identify this device through Tailscale"**: Kiwi couldn't ask tailscaled
+who's connecting. Make sure Tailscale is running on the Mac; the log says whether Kiwi uses
+the LocalAPI socket or the CLI, and why it failed.
+
+**Kiwi works in Safari but not from the Home Screen** (or the other way around): the
+Home Screen app and Safari are the same device for Kiwi when Tailscale identifies them.
+Delete the Home Screen icon and add it again from Safari.
+
+## Signing
+
+**Settings says "Can't sign apps"**: open Settings › Signing to see why:
+
+- No identity: create an Apple Development certificate in Xcode › Settings › Accounts ›
+  Manage Certificates, then **Rescan Profiles and Identities**.
+- No usable profile: the profile must be a development profile, contain your certificate,
+  belong to the same team and not be expired. See
+  [Install](install.md#2-signing-certificate-and-profile).
+
+**Signing fails with `errSecInternalComponent`**: `codesign` can't use the keychain.
+That happens when Kiwi doesn't run in your desktop session (for example, started by hand
+over SSH). Use the LaunchAgent the installer sets up, and make sure the login keychain is
+unlocked, which logging in to the desktop does.
+
+**"This iPhone isn't in the profile Kiwi signs with yet"** (`409 not_in_profile`): register
+the iPhone's UDID and add it to your wildcard profile, or let Kiwi do it with an App Store
+Connect key. See [Family](family.md#registering-iphones-with-apple).
+
+## Installing apps
+
+**iOS says "Unable to Install"**: usually the iPhone isn't in the profile, or the profile or
+certificate has expired. Check Settings › Signing. Then make sure the app supports the
+iPhone's iOS version (Settings › This iPhone shows the version Kiwi assumes).
+
+**The app installs but won't open ("Developer Mode Required")**: turn on Developer Mode
+once: Settings › Privacy & Security › Developer Mode, restart, then **Turn On**.
+
+**The app opens but some features don't work**: the app's page lists entitlements under
+**Removed When Signing**. A wildcard profile can't grant push notifications, App Groups,
+iCloud and similar; extensions such as widgets and share sheets may not work.
+
+**The install hangs**: iOS downloads the app from the Mac through Tailscale. Big apps take a
+while on a slow connection. Keep Kiwi open; if it stays stuck, tap the app's button again.
+
+## Notifications
+
+- Notifications only work in the Home Screen app, on iOS 16.4 or later.
+- Turn them on in Kiwi under Settings › Notifications, allow them when iOS asks, and use
+  **Send a Test**.
+- If `vapid.json` was lost or replaced (the log says so), turn notifications on again on
+  each iPhone.
+
+## After a rollback
+
+**"The database schema (version N) is newer than this Kiwi"**: an older build can't read a
+database a newer Kiwi migrated. Install the newer build again, or restore the backup taken
+before the upgrade, as described in [Operations](operations.md#roll-back).
+
+## Kiwi Builds
+
+See [Kiwi Builds](kiwi-builds.md). **Mac Setup** on the Kiwi Builds page shows what's
+missing, and `runner.py doctor` checks the toolchain, the App Store sign-in and enrollment.
+
+## Still stuck?
+
+Open an issue with what you tried, the output of `./install.sh --check` and the relevant
+lines of `~/Library/Logs/Kiwi/kiwi.log`. Remove addresses, logins and UDIDs you don't want
+to share.

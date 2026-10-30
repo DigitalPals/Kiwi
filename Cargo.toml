@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/kiwi-source",
+    "crates/kiwi-signer",
+    "crates/kiwi-device",
+    "crates/kiwi-push",
+    "crates/kiwi-appstore",
+    "crates/kiwi-server",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.2.0"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "gzip", "stream"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+thiserror = "2.0"
+tracing = "0.1"
+url = { version = "2", features = ["serde"] }
+# The event reader (`plist::stream`) checks the nesting of untrusted plists before they are
+# deserialized; it is behind this feature, so minor versions are pinned.
+plist = { version = "~1.10.3", features = ["enable_unstable_features_that_may_break_with_minor_version_bumps"] }
+sha2 = "0.11"
+hex = "0.4"
+base64 = "0.22"
+tempfile = "3"
+zip = "8.6"

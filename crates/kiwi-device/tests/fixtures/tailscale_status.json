@@ -1,0 +1,30 @@
+{
+  "Version": "1.90.4-t1234abcd",
+  "BackendState": "Running",
+  "TailscaleIPs": ["100.64.0.9", "fd7a:115c:a1e0::9"],
+  "Self": {
+    "ID": "nMACSTUDIO",
+    "PublicKey": "nodekey:abc",
+    "HostName": "Mac-Studio",
+    "DNSName": "mac-studio.example.ts.net.",
+    "OS": "macOS",
+    "UserID": 7012345678901234,
+    "TailscaleIPs": ["100.64.0.9"],
+    "Online": true
+  },
+  "Peer": {},
+  "User": {
+    "7012345678901234": {
+      "ID": 7012345678901234,
+      "LoginName": "alex@example.com",
+      "DisplayName": "Alex Morgan",
+      "ProfilePicURL": ""
+    },
+    "7099999999999999": {
+      "ID": 7099999999999999,
+      "LoginName": "noah@example.com",
+      "DisplayName": "Noah",
+      "ProfilePicURL": ""
+    }
+  }
+}

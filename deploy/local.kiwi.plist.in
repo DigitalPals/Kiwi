@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Kiwi LaunchAgent (template). install.sh fills in the @...@ values and installs the result
+  as ~/Library/LaunchAgents/local.kiwi.plist in your GUI (Aqua) session, where codesign can
+  use the login keychain.
+
+  /bin/sh only records the PID for log rotation (/etc/newsyslog.d/kiwi.conf sends SIGTERM
+  after rotating; launchd restarts Kiwi, which reopens kiwi.log) and then execs Kiwi.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.kiwi</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>echo $$ &gt;"@HOME@/Library/Logs/Kiwi/kiwi.pid"; exec "$@"</string>
+		<string>kiwi</string>
+		<string>@HOME@/Library/Application Support/Kiwi/app/kiwi</string>
+		<string>--listen</string>
+		<string>127.0.0.1:@PORT@</string>
+		<string>--data-dir</string>
+		<string>@HOME@/Library/Application Support/Kiwi</string>
+		<string>--web-dir</string>
+		<string>@HOME@/Library/Application Support/Kiwi/app/web</string>
+		<string>--public-url</string>
+		<string>@PUBLIC_URL@</string>
+		<string>--tailscale-socket</string>
+		<string>@TAILSCALE_SOCKET@</string>
+		<string>--tailscale-bin</string>
+		<string>@TAILSCALE_BIN@</string>
+		@OWNER_ARGS@
+	</array>
+	<key>WorkingDirectory</key>
+	<string>@HOME@/Library/Application Support/Kiwi</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+		<key>RUST_LOG</key>
+		<string>info</string>
+		<!-- Plain text log (no ANSI colors) -->
+		<key>NO_COLOR</key>
+		<string>1</string>
+	</dict>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>ProcessType</key>
+	<string>Standard</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- Always running: restarted after a crash and after the SIGTERM that follows log rotation. -->
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>15</integer>
+	<!-- Graceful shutdown waits up to 10 s for open connections, then cancels jobs. -->
+	<key>ExitTimeOut</key>
+	<integer>30</integer>
+	<!-- 077: data, logs and the PID file are private to you. -->
+	<key>Umask</key>
+	<integer>63</integer>
+	<key>StandardOutPath</key>
+	<string>@HOME@/Library/Logs/Kiwi/kiwi.log</string>
+	<key>StandardErrorPath</key>
+	<string>@HOME@/Library/Logs/Kiwi/kiwi.log</string>
+</dict>
+</plist>

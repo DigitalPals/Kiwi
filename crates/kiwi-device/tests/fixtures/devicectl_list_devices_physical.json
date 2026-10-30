@@ -1,0 +1,255 @@
+{
+  "info": {
+    "arguments": [
+      "devicectl",
+      "list",
+      "devices",
+      "--quiet",
+      "--timeout",
+      "30",
+      "--json-output",
+      "/tmp/out.json"
+    ],
+    "commandType": "devicectl.list.devices",
+    "environment": {},
+    "jsonVersion": 5,
+    "outcome": "success",
+    "version": "651.13.5"
+  },
+  "result": {
+    "devices": [
+      {
+        "_deprecationNotice": {
+          "deprecatedFields": [
+            "hardwareProperties",
+            "deviceProperties",
+            "connectionProperties"
+          ],
+          "message": "The 'hardwareProperties', 'deviceProperties', 'connectionProperties' fields are deprecated and will be removed in a future release. Use the 'properties' dictionary instead.",
+          "replacement": "properties"
+        },
+        "capabilities": [
+          {
+            "featureIdentifier": "com.apple.coredevice.feature.applicationcontrol",
+            "name": "Application Control"
+          },
+          {
+            "featureIdentifier": "com.apple.coredevice.feature.capturescreenshot",
+            "name": "Capture Screenshot"
+          },
+          {
+            "featureIdentifier": "com.apple.coredevice.feature.fetchappicons",
+            "name": "Fetch Application Icons"
+          }
+        ],
+        "connectionProperties": {
+          "authenticationType": "manualPairing",
+          "isMobileDeviceOnly": false,
+          "lastConnectionDate": "2026-10-29T08:05:12.000Z",
+          "localHostnames": [
+            "Alexs-iPhone.coredevice.local",
+            "00008150-000A1B2C3D4E001E.coredevice.local",
+            "A1B2C3D4-E5F6-4789-9ABC-DEF012345678.coredevice.local"
+          ],
+          "pairingState": "paired",
+          "potentialHostnames": [
+            "00008150-000A1B2C3D4E001E.coredevice.local",
+            "A1B2C3D4-E5F6-4789-9ABC-DEF012345678.coredevice.local"
+          ],
+          "transportType": "localNetwork",
+          "tunnelIPAddress": "fd71:1d2b:4c3e::1",
+          "tunnelState": "connected",
+          "tunnelTransportProtocol": "tcp"
+        },
+        "deviceProperties": {
+          "bootedFromSnapshot": true,
+          "bootedSnapshotName": "com.apple.os.update-0000000000000000000000000000000000000000000000000000000000000000",
+          "ddiServicesAvailable": true,
+          "developerModeStatus": "enabled",
+          "hasInternalOSBuild": false,
+          "name": "Alex’s iPhone",
+          "osBuildUpdate": "24A434",
+          "osVersionNumber": "27.0.1",
+          "rootFileSystemIsWritable": false,
+          "screenViewingURL": "devices://device/open?id=A1B2C3D4-E5F6-4789-9ABC-DEF012345678"
+        },
+        "hardwareProperties": {
+          "cpuType": {
+            "name": "arm64e",
+            "subType": 2,
+            "type": 16777228
+          },
+          "deviceType": "iPhone",
+          "ecid": 1234567890123456,
+          "hardwareModel": "D68AP",
+          "internalStorageCapacity": 256000000000,
+          "isProductionFused": true,
+          "marketingName": "iPhone Duo",
+          "platform": "iOS",
+          "productType": "iPhone19,4",
+          "reality": "physical",
+          "serialNumber": "XXXXXXXXXX",
+          "supportedCPUTypes": [
+            {
+              "name": "arm64e",
+              "subType": 2,
+              "type": 16777228
+            }
+          ],
+          "supportedDeviceFamilies": [
+            1
+          ],
+          "thinningProductType": "iPhone19,4",
+          "udid": "00008150-000A1B2C3D4E001E"
+        },
+        "identifier": "A1B2C3D4-E5F6-4789-9ABC-DEF012345678",
+        "properties": {
+          "connection": {
+            "authenticationType": "manualPairing",
+            "lastConnectionDate": 814953912,
+            "localHostnames": [
+              "Alexs-iPhone.coredevice.local"
+            ],
+            "pairingState": "paired",
+            "state": "connected",
+            "transportType": "localNetwork",
+            "tunnelIPAddress": "fd71:1d2b:4c3e::1",
+            "tunnelTransportProtocol": "tcp"
+          },
+          "hardware": {
+            "cpuType": {
+              "subtype": 2,
+              "type": 16777228
+            },
+            "deviceType": "iPhone",
+            "ecid": 1234567890123456,
+            "hardwareModel": "D68AP",
+            "hasActionButton": false,
+            "internalStorageCapacity": 256000000000,
+            "isProductionFused": true,
+            "marketingName": "iPhone Duo",
+            "platform": "iOS",
+            "productType": "iPhone19,4",
+            "reality": "physical",
+            "serialNumber": "XXXXXXXXXX",
+            "supportedBiometrics": [
+              "touchID"
+            ],
+            "supportedCPUTypes": [
+              {
+                "subtype": 2,
+                "type": 16777228
+              }
+            ],
+            "supportsSiri": true,
+            "udid": "00008150-000A1B2C3D4E001E"
+          },
+          "software": {
+            "osBuildVersions": {
+              "buildVersion": {
+                "majorLetterComponent": "A",
+                "majorNumberComponent": 24,
+                "name": "24A434",
+                "revisionVersion": {
+                  "components": [
+                    24,
+                    1,
+                    434,
+                    0,
+                    0
+                  ],
+                  "originalComponentsCount": 5,
+                  "stringValue": "24.1.434.0.0"
+                },
+                "updateNumberComponent": 434
+              }
+            },
+            "osVersionNumber": {
+              "components": [
+                27,
+                0,
+                1,
+                0,
+                0
+              ],
+              "originalComponentsCount": 3,
+              "stringValue": "27.0.1"
+            }
+          },
+          "state": {
+            "bootState": "booted",
+            "developerModeStatus": "enabled",
+            "name": "Alex’s iPhone",
+            "preparednessState": 15,
+            "visibilityClass": "default"
+          }
+        },
+        "propertyDisplayNames": null,
+        "visibilityClass": "default"
+      },
+      {
+        "capabilities": [],
+        "connectionProperties": {
+          "authenticationType": "manualPairing",
+          "isMobileDeviceOnly": false,
+          "lastConnectionDate": "2026-09-30T18:02:11.123Z",
+          "pairingState": "paired",
+          "potentialHostnames": [
+            "00008122-001C2D3E4F5A601E.coredevice.local"
+          ],
+          "tunnelState": "unavailable"
+        },
+        "deviceProperties": {
+          "name": "Kitchen iPad"
+        },
+        "hardwareProperties": {
+          "deviceType": "iPad",
+          "marketingName": "iPad Air 13-inch (M3)",
+          "platform": "iOS",
+          "productType": "iPad15,5",
+          "reality": "physical",
+          "udid": "00008122-001C2D3E4F5A601E"
+        },
+        "identifier": "B2C3D4E5-F6A7-4890-ABCD-EF0123456789",
+        "visibilityClass": "default"
+      },
+      {
+        "capabilities": [],
+        "identifier": "C3D4E5F6-A7B8-4901-BCDE-F01234567890",
+        "properties": {
+          "connection": {
+            "authenticationType": "manualPairing",
+            "pairingState": "unpaired",
+            "state": "disconnected",
+            "transportType": "wired"
+          },
+          "hardware": {
+            "deviceType": "iPhone",
+            "marketingName": "iPhone 16",
+            "platform": "iOS",
+            "productType": "iPhone17,3",
+            "reality": "physical",
+            "udid": "00008140-0011223344556677"
+          },
+          "software": {
+            "osVersionNumber": {
+              "components": [
+                26,
+                4,
+                0,
+                0,
+                0
+              ],
+              "originalComponentsCount": 2
+            }
+          },
+          "state": {
+            "name": "iPhone",
+            "visibilityClass": "default"
+          }
+        },
+        "visibilityClass": "default"
+      }
+    ]
+  }
+}

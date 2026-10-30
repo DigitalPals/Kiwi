@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  html, body { margin: 0; background: transparent; }
+  .stage {
+    width: 1200px; height: 660px; box-sizing: border-box; position: relative; overflow: hidden;
+    border-radius: 36px;
+    background:
+      radial-gradient(900px 520px at 12% 0%, rgba(181, 220, 82, 0.55), transparent 60%),
+      radial-gradient(800px 600px at 100% 100%, rgba(91, 191, 148, 0.45), transparent 60%),
+      linear-gradient(135deg, #e9f3d8 0%, #cfe6c9 45%, #1e6b4d 140%);
+    display: flex; align-items: center; justify-content: center; gap: 38px;
+  }
+  .phone {
+    width: 236px; padding: 7px; border-radius: 42px; background: #0d0f0e;
+    box-shadow: 0 30px 60px -18px rgba(9, 40, 26, 0.55), 0 10px 22px -10px rgba(9, 40, 26, 0.45),
+      inset 0 0 0 1.5px #3a3f3c;
+  }
+  .phone img { display: block; width: 236px; height: auto; border-radius: 35px; }
+  .up { transform: translateY(-26px); }
+  .down { transform: translateY(26px); }
+</style></head><body>
+  <div class="stage">
+    <div class="phone down"><img src="raw/browse-light.png"></div>
+    <div class="phone up"><img src="raw/app-light.png"></div>
+    <div class="phone down"><img src="raw/apps-dark.png"></div>
+    <div class="phone up"><img src="raw/builds-dark.png"></div>
+  </div>
+</body></html>

@@ -1,0 +1,52 @@
+{
+  "Node": {
+    "ID": 8832835329422562,
+    "StableID": "nPHONE1CNTRL",
+    "Name": "iphone194.example.ts.net.",
+    "User": 5147792796377837,
+    "Key": "nodekey:0000000000000000000000000000000000000000000000000000000000000000",
+    "KeyExpiry": "2027-04-23T17:55:58Z",
+    "DiscoKey": "discokey:0000000000000000000000000000000000000000000000000000000000000000",
+    "Addresses": [
+      "100.64.0.7/32",
+      "fd7a:115c:a1e0::f2b:912a/128"
+    ],
+    "AllowedIPs": [
+      "100.64.0.7/32",
+      "fd7a:115c:a1e0::f2b:912a/128"
+    ],
+    "Endpoints": [
+      "198.51.100.10:41641",
+      "[2001:db8::10]:41641",
+      "192.0.2.10:41641"
+    ],
+    "HomeDERP": 14,
+    "Hostinfo": {
+      "OS": "iOS",
+      "Hostname": "localhost",
+      "Services": [
+        {
+          "Proto": "peerapi4",
+          "Port": 50715
+        },
+        {
+          "Proto": "peerapi6",
+          "Port": 33438
+        }
+      ]
+    },
+    "Created": "2026-10-25T17:55:58.828954738Z",
+    "Cap": 148,
+    "LastSeen": "2026-10-29T08:00:00.1Z",
+    "Online": true,
+    "ComputedName": "iphone194",
+    "ComputedNameWithHost": "iphone194 (localhost)"
+  },
+  "UserProfile": {
+    "ID": 5147792796377837,
+    "LoginName": "user@example.com",
+    "DisplayName": "Alex Morgan",
+    "ProfilePicURL": "https://example.com/profile.png"
+  },
+  "CapMap": null
+}

@@ -1,0 +1,220 @@
+{
+  "schema": 2,
+  "toolchain": {
+    "repositories": {
+      "theos": ["roothide/theos", "3ac89c984ec652fd16bcd91b33ae16de45ce76fa"],
+      "cyan": ["asdfzxcvbn/pyzule-rw", "740d3716dcd98c20c000f12cdb88f1f0b2a533a4"],
+      "unfairplay": ["DrWhax/unfairplay", "2fad9dcb9506674b92aad5833fad8988d69edc75"],
+      "ipatool": ["majd/ipatool", "d9c0247daea564d3ec7d04a9b015d0a29af66b04"]
+    },
+    "logos_revision": "a62370066a97e36d59b200a9fa10c5091f5e8972",
+    "headers": {
+      "YouTubeHeader": ["PoomSmart/YouTubeHeader", "4b9977e2b243fcb143395e0a20d975a32eaa93e0"],
+      "PSHeader": ["PoomSmart/PSHeader", "1bb7d9c7d1bc40a57f83e1e58aa53bcf4acdcbfa"],
+      "YouTubeMusicHeader": ["PoomSmart/YouTubeMusicHeader", "ff3268971fdcd675a260d82cf1fa8aecc6583106"]
+    }
+  },
+  "apps": [
+    {
+      "id": "youtube",
+      "name": "YouTube",
+      "app_id": "544007664",
+      "bundle_id": "com.google.ios.youtube",
+      "display_name": "YouMod · Kiwi",
+      "tweak": "YouMod",
+      "summary": "No ads, background play, downloads",
+      "experimental": false,
+      "interval_minutes": 60,
+      "retain": 10,
+      "markers": ["youmod"],
+      "catalog": {
+        "name": "YouMod · Kiwi",
+        "developer": "Private Kiwi build",
+        "subtitle": "YouTube with your selected tweaks",
+        "description": "Built privately from the original App Store app and pinned YouMod sources. Each release records its patch recipe. Newly built versions have not been playback-tested on a physical device.",
+        "tint_color": "#FF0000",
+        "category": "photo-video"
+      },
+      "packages": [
+        {"id": "youmod", "repo": ["Tonwalter888/YouMod", "fb6a9f6f3bbfcbe8aa8b92debda6405f2b7be2d7"],
+         "name": "YouMod", "description": "Ad removal, background playback, downloads and SponsorBlock"},
+        {"id": "ygs", "repo": ["PoomSmart/YouGroupSettings", "4697fb3e277303e0d611362982d9ddaea0424485"]},
+        {"id": "ytvo", "repo": ["PoomSmart/YTVideoOverlay", "8fd630b455fa49050638b126034406705ba9a191"]},
+        {"id": "uncapped", "repo": ["PoomSmart/UncappedAVPlayer", "d3a64ff35cb4af9046ded3f2864d236cbeef9681"]},
+        {"id": "youpip", "repo": ["PoomSmart/YouPiP", "034477a48c8ec18736e26d054106df88c1f0deb3"],
+         "optional": true, "default": true, "name": "Picture in Picture",
+         "description": "Keep watching in a floating player while using other apps."},
+        {"id": "ryd", "repo": ["PoomSmart/Return-YouTube-Dislikes", "3347d770d699653fae6597bfe3b36ee896fbc9e8"],
+         "optional": true, "default": true, "name": "Return YouTube Dislikes",
+         "description": "Show estimated dislike counts below videos."},
+        {"id": "ytabconfig", "repo": ["PoomSmart/YTABConfig", "b171adb9f1595484eca2ecf9d53e6eb7612c95f3"],
+         "optional": true, "default": true, "name": "YouTube Experiment Settings",
+         "description": "Add controls for YouTube's experimental features."},
+        {"id": "youquality", "repo": ["PoomSmart/YouQuality", "3199d594bbec58f419107fc7b1d9c28f209bcd04"],
+         "optional": true, "default": true, "name": "Video Quality Controls",
+         "description": "Choose default video quality for Wi-Fi and mobile data."}
+      ],
+      "limitations": [
+        {"icon": "bell", "title": "No Push, Widgets or Share Sheet", "detail": "Re-signed apps lose these."},
+        {"icon": "phone", "title": "Try New Releases First", "detail": "Playback isn't tested automatically. Keep a working version until a new one plays."}
+      ]
+    },
+    {
+      "id": "youtube-music",
+      "name": "YouTube Music",
+      "app_id": "1017492454",
+      "bundle_id": "com.google.ios.youtubemusic",
+      "tweak": "YTMusicUltimate 2.4.1",
+      "summary": "No ads, background play, downloads",
+      "experimental": false,
+      "interval_minutes": 360,
+      "retain": 10,
+      "markers": ["ytmusicultimate"],
+      "catalog": {
+        "name": "YouTube Music · Kiwi",
+        "developer": "Private Kiwi build",
+        "subtitle": "YouTube Music with YTMusicUltimate",
+        "description": "Built privately from the original App Store app and pinned YTMusicUltimate sources. Each release records its patch recipe. Newly built versions have not been tested on a physical device.",
+        "tint_color": "#FF0033",
+        "category": "music"
+      },
+      "packages": [
+        {"id": "ytmusicultimate", "repo": ["mrdrvt99/YTMusicUltimate", "5d87a092b957a85dc69ffb4424d63de949404472"],
+         "make": ["SIDELOADING=1"],
+         "name": "YTMusicUltimate", "description": "No ads, background play, downloads, OLED theme"},
+        {"id": "rymd", "repo": ["PoomSmart/Return-YouTube-Music-Dislikes", "81d252f2f226591c3675e17d63cd0feea4a9ebc8"],
+         "siblings": [["PoomSmart/Return-YouTube-Dislikes", "3347d770d699653fae6597bfe3b36ee896fbc9e8"]],
+         "optional": true, "default": true, "name": "Return YouTube Music Dislikes",
+         "description": "Show dislike counts. Uses returnyoutubedislikeapi.com."},
+        {"id": "youmusicpip", "repo": ["PoomSmart/YouMusicPiP", "bf7750f18cb1564fbe7156d50d029da5288e08a4"],
+         "siblings": [["PoomSmart/YouPiP", "034477a48c8ec18736e26d054106df88c1f0deb3"]],
+         "optional": true, "default": false, "name": "Picture in Picture",
+         "description": "Floating player for music videos."},
+        {"id": "ytmabconfig", "repo": ["PoomSmart/YTMABConfig", "9812e03ba5cd7210d2a313239682648d9d257fee"],
+         "optional": true, "default": false, "name": "Experiment Settings",
+         "description": "Controls for YouTube Music's hidden experiments."}
+      ],
+      "limitations": [
+        {"icon": "key", "title": "Sign-In May Take Two Tries", "detail": "Sign in, reopen the app, then sign in again."},
+        {"icon": "bell", "title": "No CarPlay, Siri, Widgets or Push", "detail": "Re-signed apps lose these."}
+      ]
+    },
+    {
+      "id": "twitch",
+      "name": "Twitch",
+      "app_id": "460177396",
+      "bundle_id": "tv.twitch",
+      "tweak": "TwitchAdBlock 0.3.0",
+      "summary": "Blocks stream and feed ads",
+      "experimental": true,
+      "interval_minutes": 360,
+      "retain": 5,
+      "markers": ["twitchadblock"],
+      "catalog": {
+        "name": "Twitch · Kiwi",
+        "developer": "Private Kiwi build",
+        "subtitle": "Twitch with ad blocking",
+        "description": "Built privately from the original App Store app and pinned TwitchAdBlock sources. Ad blocking talks only to Twitch. Newly built versions have not been tested on a physical device.",
+        "tint_color": "#9146FF",
+        "category": "entertainment"
+      },
+      "packages": [
+        {"id": "twitchadblock", "repo": ["wkangg/TwitchAdBlock", "35a70e8c1da135516f4619e4d279670108763aeb"],
+         "submodules": true, "make": ["SIDELOADED=1"],
+         "patches": [{"file": "Makefile", "find": "ifeq ($(SIDELOADED),1)\nMODULES = jailed\nendif\n", "replace": ""}],
+         "name": "TwitchAdBlock", "description": "Blocks ads. Turn it off in the app's settings."}
+      ],
+      "limitations": [
+        {"icon": "refresh", "title": "Ad Blocking Can Break", "detail": "Twitch changes how it serves ads. A tweak update may be needed."},
+        {"icon": "bell", "title": "No Live Notifications or Widgets", "detail": "Re-signed apps lose these."},
+        {"icon": "info", "title": "New Maintainer", "detail": "This fork is new and has one maintainer."}
+      ]
+    },
+    {
+      "id": "x",
+      "name": "X",
+      "app_id": "333903271",
+      "bundle_id": "com.atebits.Tweetie2",
+      "names": ["Twitter", "X"],
+      "app_version": "12.38.1",
+      "tweak": "NeoFreeBird 7.3.0",
+      "summary": "Ad-free timeline, downloads",
+      "experimental": true,
+      "warning": "X's terms forbid modified clients. Your account could be restricted.",
+      "interval_minutes": 360,
+      "retain": 3,
+      "markers": ["bhtwitter", "zxpluginsinject"],
+      "catalog": {
+        "name": "{name} · Kiwi",
+        "developer": "Private Kiwi build",
+        "subtitle": "X with NeoFreeBird",
+        "description": "Built privately from the original App Store app and pinned NeoFreeBird sources. Sign in through x.com in the app. Newly built versions have not been tested on a physical device.",
+        "tint_color": "#1D9BF0",
+        "category": "social"
+      },
+      "packages": [
+        {"id": "neofreebird", "repo": ["NeoFreeBird/app", "734e7e0a16d77787f3e04b7389c8ce06e1c0ef31"],
+         "submodules": true, "make": ["SIDELOADED=1", "TARGET=iphone:clang:latest:15.0"], "timeout": 2400,
+         "target": "all",
+         "products": [".theos/obj/zxPluginsInject.dylib", ".theos/obj/libbhFLEX.dylib", ".theos/obj/BHTwitter.dylib",
+                      "layout/Library/Application Support/BHT/BHTwitter.bundle"],
+         "patches": [{"file": "deps/ffmpeg-kit-next/build-ffmpeg.sh",
+                      "find": "git clone --depth 1 https://github.com/openssl/openssl.git \"$OPENSSL_SRC\"",
+                      "replace": "test -d \"$OPENSSL_SRC/.git\""}],
+         "prebuild": {"kind": "ffmpeg-kit", "script": "deps/ffmpeg-kit-next/build-ffmpeg.sh",
+                      "kit": "deps/ffmpeg-kit-next/upstream", "output": "deps/ffmpeg-kit-next/build",
+                      "openssl": ["openssl/openssl", "2f4e3a5fec05394068cfa7379890ab552483a8a6"],
+                      "ffmpeg": ["arthenica/FFmpeg", "38b88335f99e76ed89ff3c93f877fdefce736c13"],
+                      "ffmpeg_tag": "n8.1.2"},
+         "name": "NeoFreeBird", "description": "No ads, downloads, classic Twitter options"}
+      ],
+      "limitations": [
+        {"icon": "key", "title": "Sign In on x.com", "detail": "In-app web login. Passkeys don't work."},
+        {"icon": "bell", "title": "No Push, Widgets or Share Sheet", "detail": "Re-signed apps lose these."},
+        {"icon": "clock", "title": "Follows NeoFreeBird", "detail": "Can trail the App Store by a few days."}
+      ]
+    },
+    {
+      "id": "reddit",
+      "name": "Reddit",
+      "app_id": "1064216828",
+      "bundle_id": "com.reddit.Reddit",
+      "app_version": "2026.43.0",
+      "tweak": "RedditFilter 1.3.0",
+      "summary": "No promoted posts or comment ads",
+      "experimental": false,
+      "interval_minutes": 360,
+      "retain": 10,
+      "markers": ["redditfilter", "redditsideloadfix"],
+      "catalog": {
+        "name": "Reddit · Kiwi",
+        "developer": "Private Kiwi build",
+        "subtitle": "Reddit with ad removal",
+        "description": "Built privately from the original App Store app and pinned RedditFilter sources. Promoted feed posts and comment ads are hidden by default. Extra filters are available under Profile → Settings → RedditFilter. Sign in using Other options → Log in with browser on the email or username login screen, or use an emailed login link. Each release records its patch recipe.",
+        "tint_color": "#FF4500",
+        "category": "social"
+      },
+      "packages": [
+        {"id": "redditfilter", "repo": ["and101/RedditFilter", "cdae1c0a7cd410a619b908033b48d415fdbac4c6"],
+         "submodules": true, "make": ["SIDELOADED=1"],
+         "target": "all",
+         "products": [".theos/obj/RedditFilter.dylib", ".theos/obj/RedditSideloadFix.dylib"],
+         "patches": [
+           {"file": "Makefile", "find": "  export MODULES = jailed\n", "replace": ""},
+           {"file": "Tweak.xm",
+            "find": "      return %orig([NSURLRequest requestWithURL:[NSURL URLWithString:@\"data:application/json,%7B%7D\"]],\n                   ^(NSData *data, NSURLResponse *_, NSError *error) {\n                     completionHandler([@\"{}\" dataUsingEncoding:NSUTF8StringEncoding], response, nil);\n                   });",
+            "replace": "      void (^loginHandler)(NSData *, NSURLResponse *, NSError *) =\n          ^(NSData *data, NSURLResponse *_, NSError *error) {\n            completionHandler([@\"{}\" dataUsingEncoding:NSUTF8StringEncoding], response, nil);\n          };\n      NSURLRequest *loginRequest = [NSURLRequest requestWithURL:[NSURL URLWithString:@\"data:application/json,%7B%7D\"]];\n      return %orig(loginRequest, loginHandler);"},
+           {"file": "Tweak.xm",
+            "find": "    if ([request.URL.path isEqualToString:@\"/auth/v2/oauth/access-token/session\"])\n      return %orig(request, ^(NSData *data, NSURLResponse *response, NSError *error) {\n        if ([response isKindOfClass:NSHTTPURLResponse.class] &&\n            ((NSHTTPURLResponse *)response).statusCode == 200)\n          RFClearPendingWebSession();\n        completionHandler(data, response, error);\n      });",
+            "replace": "    if ([request.URL.path isEqualToString:@\"/auth/v2/oauth/access-token/session\"]) {\n      void (^tokenHandler)(NSData *, NSURLResponse *, NSError *) =\n          ^(NSData *data, NSURLResponse *response, NSError *error) {\n            if ([response isKindOfClass:NSHTTPURLResponse.class] &&\n                ((NSHTTPURLResponse *)response).statusCode == 200)\n              RFClearPendingWebSession();\n            completionHandler(data, response, error);\n          };\n      return %orig(request, tokenHandler);\n    }"}
+         ],
+         "name": "RedditFilter", "description": "Removes promoted posts and comment ads by default. Includes sideload sign-in fixes and optional filters in Reddit's settings."}
+      ],
+      "limitations": [
+        {"icon": "key", "title": "Sign In with Browser or Email Link", "detail": "On the email or username login screen, tap Other options → Log in with browser, or paste an emailed login link. Use your Reddit username and password; Google sign-in may fail."},
+        {"icon": "bell", "title": "No Push, Widgets or Share Sheet", "detail": "Re-signed apps lose these."},
+        {"icon": "clock", "title": "Follows RedditFilter", "detail": "Builds the Reddit version supported by the pinned tweak. Newer versions follow after a compatibility update."}
+      ]
+    }
+  ]
+}

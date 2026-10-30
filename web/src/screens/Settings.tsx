@@ -1,0 +1,826 @@
+import { useEffect, useState } from "preact/hooks";
+import { api, errorMessage } from "../api/client";
+import type { CoreDevice, Me, Profile, Settings as SettingsData, Signing } from "../api/types";
+import { Icon } from "../components/Icon";
+import { KiwiLogo } from "../components/KiwiLogo";
+import {
+  BackBar,
+  Cell,
+  ErrorState,
+  LinkCell,
+  Loading,
+  Page,
+  Section,
+  Spinner,
+  Toggle,
+} from "../components/ui";
+import {
+  expiryInfo,
+  formatDate,
+  formatDateTime,
+  formatRelative,
+  osVersionSourceLabel,
+  plural,
+  serverLabel,
+} from "../lib/format";
+import { useResource, useTask } from "../lib/hooks";
+import { isMember } from "../lib/family";
+import { useMe } from "../lib/me";
+import { pushSupport, subscribe, subscriptionBody, usableSubscription, type PushSupport } from "../lib/push";
+import { BUILDS_PATH, DEVICE_PATH, FAMILY_PATH, NOTIFICATIONS_PATH, SIGNING_PATH } from "../lib/routes";
+import { countryName } from "../lib/store";
+
+/** Text field that saves on blur or Return when changed. */
+function InlineField(props: {
+  value: string;
+  label: string;
+  placeholder?: string;
+  inputMode?: "text" | "decimal";
+  onSave: (value: string) => Promise<unknown>;
+}) {
+  const [draft, setDraft] = useState(props.value);
+  const save = useTask(props.onSave);
+  useEffect(() => setDraft(props.value), [props.value]);
+  const commit = () => {
+    const next = draft.trim();
+    if (next && next !== props.value) void save.run(next);
+    else setDraft(props.value);
+  };
+  return (
+    <span class="inline-field">
+      <input
+        type="text"
+        value={draft}
+        aria-label={props.label}
+        placeholder={props.placeholder}
+        inputMode={props.inputMode ?? "text"}
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck={false}
+        enterKeyHint="done"
+        onInput={(e) => setDraft(e.currentTarget.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+          if (e.key === "Escape") setDraft(props.value);
+        }}
+        disabled={save.pending}
+      />
+      {save.pending && <Spinner />}
+      {save.error && <span class="form-error">{save.error}</span>}
+    </span>
+  );
+}
+
+function coreDeviceLabel(device: CoreDevice): string {
+  const kind = device.physical ? (device.model ?? device.platform ?? "Device") : "Simulator";
+  return `${device.name} (${kind}${device.os_version ? `, ${device.os_version}` : ""})`;
+}
+
+function DeviceSection({ me, setMe }: { me: Me; setMe: (me: Me) => void }) {
+  const { device } = me;
+  const devices = useResource("devices", api.devices);
+  const link = useTask(async (devicectlId: string | null) => {
+    await api.updateDevice(device.id, { devicectl_id: devicectlId });
+    setMe(await api.me());
+    await devices.reload();
+  });
+  const sync = useTask(async () => {
+    devices.mutate(await api.syncDevices());
+    setMe(await api.me());
+  });
+  const clearManual = useTask(async () => setMe(await api.updateMe({ os_version: null })));
+
+  const linked = device.devicectl;
+  const cores = devices.data?.core_devices ?? [];
+  const physicalFirst = [...cores].sort((a, b) => Number(b.physical) - Number(a.physical));
+
+  return (
+    <Section
+      footer={
+        me.server.devicectl_available
+          ? "Linking this device to the iPhone paired with the Mac lets Kiwi read its iOS version and installed apps."
+          : "devicectl is not available on the Mac, so Kiwi can't see the iPhone directly."
+      }
+    >
+      <Cell label="Name">
+        <InlineField value={device.name} label="Device name" onSave={async (name) => setMe(await api.updateMe({ name }))} />
+      </Cell>
+      <Cell label="iOS Version" sub={device.os_version ? osVersionSourceLabel(device.os_version_source) : "Not known yet; all releases are offered"}>
+        <InlineField
+          value={device.os_version ?? ""}
+          label="iOS version"
+          placeholder="e.g. 27.0.1"
+          inputMode="decimal"
+          onSave={async (os_version) => setMe(await api.updateMe({ os_version }))}
+        />
+      </Cell>
+      {device.os_version_source === "manual" && (
+        <Cell label="Manual Version" sub="Use the version reported by the iPhone instead">
+          <button type="button" class="text-button" onClick={() => void clearManual.run()} disabled={clearManual.pending}>
+            Clear
+          </button>
+        </Cell>
+      )}
+      {device.model && (
+        <Cell label="Model">
+          {device.model}
+        </Cell>
+      )}
+      <Cell label="Tailscale">{device.tailscale_name ?? (device.kind === "browser" ? "Not identified (browser cookie)" : "—")}</Cell>
+      <Cell label="Linked Mac Device" sub={linked ? linkStatus(linked) : null}>
+        {devices.data ? (
+          <select
+            class="select"
+            aria-label="Linked Mac device"
+            value={linked?.id ?? ""}
+            disabled={link.pending || !me.server.devicectl_available}
+            onChange={(e) => void link.run(e.currentTarget.value || null)}
+          >
+            <option value="">None</option>
+            {linked && !cores.some((c) => c.id === linked.id) && <option value={linked.id}>{linked.name}</option>}
+            {physicalFirst.map((c) => (
+              <option key={c.id} value={c.id} disabled={!!c.linked_device_id && c.linked_device_id !== device.id}>
+                {coreDeviceLabel(c)}
+                {c.linked_device_id && c.linked_device_id !== device.id ? " — linked elsewhere" : ""}
+              </option>
+            ))}
+          </select>
+        ) : devices.error ? (
+          <span class="danger small">{devices.error.message}</span>
+        ) : (
+          <Spinner />
+        )}
+      </Cell>
+      <Cell label="Sync with Mac" sub={linked?.last_sync_at ? `Last synced ${formatRelative(linked.last_sync_at)}` : "Reads the iOS version and installed apps"}>
+        <button
+          type="button"
+          class="text-button"
+          onClick={() => void sync.run()}
+          disabled={sync.pending || !me.server.devicectl_available}
+        >
+          {sync.pending ? <Spinner /> : "Sync Now"}
+        </button>
+      </Cell>
+      {(link.error || sync.error || clearManual.error) && (
+        <div class="cell">
+          <p class="form-error">{link.error ?? sync.error ?? clearManual.error}</p>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function linkStatus(linked: NonNullable<Me["device"]["devicectl"]>): string {
+  if (linked.last_error) return `Error: ${linked.last_error}`;
+  return linked.reachable ? "Reachable" : "Not reachable (connect the iPhone to the Mac's network)";
+}
+
+const SUPPORT_MESSAGES: Record<Exclude<PushSupport, "supported">, string> = {
+  "needs-home-screen": "Add Kiwi to your Home Screen (Share › Add to Home Screen) and open it from there to turn on notifications.",
+  unsupported: "This browser doesn't support web push notifications.",
+  "no-service-worker": "The service worker isn't running (it is only registered in production builds).",
+  denied: "Notifications are blocked. Allow them in the iOS Settings app under Notifications › Kiwi.",
+};
+
+function NotificationsSection({ me, reloadMe }: { me: Me; reloadMe: () => void }) {
+  const [support, setSupport] = useState<PushSupport | null>(null);
+  const [subscription, setSubscription] = useState<PushSubscription | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    void pushSupport().then(setSupport);
+    void usableSubscription(me.push.vapid_public_key)
+      .then(setSubscription)
+      .catch(() => setSubscription(null));
+  }, [me.push.vapid_public_key]);
+
+  const enable = useTask(async () => {
+    setMessage(null);
+    const sub = await subscribe(me.push.vapid_public_key);
+    await api.subscribePush(subscriptionBody(sub));
+    setSubscription(sub);
+    reloadMe();
+  });
+  const test = useTask(async () => {
+    const { sent } = await api.testPush();
+    setMessage(sent > 0 ? `Sent a test notification to ${plural(sent, "subscription")}.` : "No subscriptions to send to.");
+  });
+  const disable = useTask(async () => {
+    setMessage(null);
+    if (subscription) {
+      await api.unsubscribePush(subscription.endpoint);
+      await subscription.unsubscribe();
+    }
+    setSubscription(null);
+    reloadMe();
+  });
+
+  const error = enable.error ?? test.error ?? disable.error;
+  let body;
+  if (!me.push.vapid_public_key) {
+    body = <Cell label="Unavailable" sub="The server has no push key configured." />;
+  } else if (support === null) {
+    body = (
+      <Cell label="Checking…">
+        <Spinner />
+      </Cell>
+    );
+  } else if (subscription) {
+    body = (
+      <>
+        <Cell label="Notifications" sub="Updates, ready installs and expiry warnings">
+          <span class="tone-ok">On</span>
+        </Cell>
+        <Cell label="Send a Test">
+          <button type="button" class="text-button" onClick={() => void test.run()} disabled={test.pending}>
+            {test.pending ? <Spinner /> : "Send"}
+          </button>
+        </Cell>
+        <Cell label="Turn Off">
+          <button type="button" class="text-button danger" onClick={() => void disable.run()} disabled={disable.pending}>
+            {disable.pending ? <Spinner /> : "Disable"}
+          </button>
+        </Cell>
+      </>
+    );
+  } else if (support !== "supported") {
+    body = (
+      <Cell label="Notifications" sub={SUPPORT_MESSAGES[support]}>
+        {me.push.subscribed ? "On elsewhere" : "Off"}
+      </Cell>
+    );
+  } else {
+    body = (
+      <>
+        <Cell
+          label="Notifications"
+          sub={me.push.subscribed ? "On for another browser on this device" : "Get notified about updates and expiring apps"}
+        >
+          <button type="button" class="pill pill-filled" onClick={() => void enable.run()} disabled={enable.pending}>
+            {enable.pending ? "Enabling…" : "Enable"}
+          </button>
+        </Cell>
+        {me.push.subscribed && (
+          <Cell label="Send a Test">
+            <button type="button" class="text-button" onClick={() => void test.run()} disabled={test.pending}>
+              {test.pending ? <Spinner /> : "Send"}
+            </button>
+          </Cell>
+        )}
+      </>
+    );
+  }
+
+  return (
+    <Section>
+      {body}
+      {(error || message) && (
+        <div class="cell">
+          <p class={error ? "form-error" : "muted small"}>{error ?? message}</p>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+/** "com.example.app", or "Wildcard (TEAM.*)": Xcode names every profile alike. */
+function profileLabel(profile: Profile): string {
+  if (profile.wildcard) return `Wildcard (${profile.app_id_pattern})`;
+  return profile.app_id_pattern.startsWith(`${profile.team_id}.`)
+    ? profile.app_id_pattern.slice(profile.team_id.length + 1)
+    : profile.app_id_pattern;
+}
+
+function ProfileCell({ profile, active }: { profile: Profile; active: boolean }) {
+  const expiry = expiryInfo(profile.expires_at);
+  // An expired profile's reason only repeats the date.
+  const expired = Date.parse(profile.expires_at) <= Date.now();
+  const facts = [
+    profile.wildcard ? null : "Explicit",
+    profile.development ? null : "Distribution",
+    plural(profile.devices, "device"),
+  ].filter(Boolean);
+  return (
+    <div class="cell cell-stacked">
+      <div class="cell-label">
+        {profileLabel(profile)} {active && <span class="tag tag-tint">In Use</span>}
+      </div>
+      <div class="cell-sub">
+        {facts.join(" · ")}
+        {" · "}
+        {expiry && expiry.tone !== "ok" ? (
+          <span class={`tone-${expiry.tone}`}>{expiry.label.toLowerCase()}</span>
+        ) : (
+          `until ${formatDate(profile.expires_at)}`
+        )}
+      </div>
+      {!profile.usable && !expired && <div class="cell-sub danger">{profile.reason ?? "Not usable"}</div>}
+      <details class="cell-details">
+        <summary class="cell-sub">
+          {profile.name}
+          {profile.entitlements.length > 0 && ` · ${plural(profile.entitlements.length, "entitlement")}`}
+        </summary>
+        <ul class="mono-list">
+          <li>{profile.uuid}</li>
+          {profile.entitlements.map((e) => (
+            <li key={e}>{e}</li>
+          ))}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
+/** The answer first: can Kiwi sign, and until when. */
+function SigningStatus({ data }: { data: Signing }) {
+  const identity = data.identities.find((i) => i.sha1 === data.active?.identity_sha1);
+  if (!data.active) {
+    return (
+      <div class="status-card error">
+        <span class="status-icon" aria-hidden="true">
+          <Icon name="warning" size={20} />
+        </span>
+        <div>
+          <div class="status-title">Can't Sign</div>
+          <div class="status-text">
+            {data.error ??
+              "No usable identity and wildcard profile were found. Open Xcode on the Mac, sign in to your team and let it create a development profile."}
+          </div>
+        </div>
+      </div>
+    );
+  }
+  const expiry = expiryInfo(data.active.expires_at);
+  const soon = expiry && expiry.tone !== "ok";
+  return (
+    <div class={soon ? "status-card warn" : "status-card"}>
+      <span class="status-icon" aria-hidden="true">
+        <Icon name={soon ? "clock" : "shield"} size={20} />
+      </span>
+      <div>
+        <div class="status-title">{soon ? `Signing ${expiry.label.toLowerCase()}` : "Ready to Sign"}</div>
+        <div class="status-text">
+          New builds use {identity?.name ?? "the active identity"} and stay valid until {formatDate(data.active.expires_at)}.
+          {soon && " Renew the certificate or profile in Xcode, then rescan."}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Settings › Signing: the certificate and profiles Kiwi signs with. */
+export function SigningScreen() {
+  const signing = useResource<Signing>("signing", api.signing);
+  const rescan = useTask(async () => signing.mutate(await api.rescanSigning()));
+  const data = signing.data;
+
+  let content;
+  if (!data) {
+    content = signing.error ? <ErrorState error={signing.error} onRetry={signing.reload} /> : <Loading />;
+  } else {
+    content = (
+      <>
+        <SigningStatus data={data} />
+        <Section title={data.identities.length === 1 ? "Certificate" : "Certificates"}>
+          {data.identities.length === 0 && (
+            <Cell label="No signing identities" sub="Kiwi needs an Apple Development certificate in the login keychain." />
+          )}
+          {data.identities.map((identity) => {
+            const expiry = expiryInfo(identity.expires_at);
+            return (
+              <div key={identity.sha1} class="cell cell-stacked">
+                <div class="cell-label">
+                  {identity.name} {identity.sha1 === data.active?.identity_sha1 && <span class="tag tag-tint">In Use</span>}
+                </div>
+                <div class="cell-sub">
+                  {identity.team_id ? `Team ${identity.team_id}` : "No team"}
+                  {expiry && (
+                    <>
+                      {" · "}
+                      <span class={expiry.tone === "ok" ? undefined : `tone-${expiry.tone}`}>
+                        {expiry.tone === "ok" ? `until ${formatDate(identity.expires_at)}` : expiry.label.toLowerCase()}
+                      </span>
+                    </>
+                  )}
+                </div>
+                <div class="cell-sub mono small">{identity.sha1}</div>
+              </div>
+            );
+          })}
+        </Section>
+        <Section
+          title="Provisioning Profiles"
+          footer="Kiwi reads the profiles Xcode manages and prefers an explicit App ID profile when there is one."
+        >
+          {data.profiles.length === 0 && (
+            <Cell label="No profiles found" sub="Xcode stores them in ~/Library/Developer/Xcode/UserData/Provisioning Profiles." />
+          )}
+          {data.profiles.map((p) => (
+            <ProfileCell key={p.uuid} profile={p} active={p.uuid === data.active?.profile_uuid} />
+          ))}
+        </Section>
+        <Section footer={rescan.error ? <span class="danger">{rescan.error}</span> : "After renewing in Xcode, rescan to use the new files."}>
+          <button type="button" class="cell cell-button center" onClick={() => void rescan.run()} disabled={rescan.pending}>
+            {rescan.pending ? <Spinner /> : <span class="cell-action">Rescan Profiles and Identities</span>}
+          </button>
+        </Section>
+      </>
+    );
+  }
+  return (
+    <main class="page">
+      <BackBar label="Settings" fallback="/settings" />
+      <header class="page-header">
+        <h1 class="large-title">Signing</h1>
+      </header>
+      {content}
+    </main>
+  );
+}
+
+const REFRESH_CHOICES = [15, 30, 60, 120, 240, 360, 720, 1440];
+const SYNC_CHOICES = [5, 10, 15, 30, 60];
+
+function minutesLabel(minutes: number): string {
+  if (minutes % 1440 === 0) return plural(minutes / 1440, "day");
+  if (minutes % 60 === 0) return plural(minutes / 60, "hour");
+  return plural(minutes, "minute");
+}
+
+function MinutesSelect(props: { value: number; choices: number[]; label: string; disabled?: boolean; onChange: (v: number) => void }) {
+  const choices = props.choices.includes(props.value)
+    ? props.choices
+    : [...props.choices, props.value].sort((a, b) => a - b);
+  return (
+    <select
+      class="select"
+      aria-label={props.label}
+      value={String(props.value)}
+      disabled={props.disabled}
+      onChange={(e) => props.onChange(Number(e.currentTarget.value))}
+    >
+      {choices.map((m) => (
+        <option key={m} value={String(m)}>
+          {minutesLabel(m)}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+// Storefronts offered for the App Store comparison; any other stored value is kept.
+const STORE_COUNTRIES = [
+  "nl", "be", "lu", "de", "at", "ch", "fr", "gb", "ie", "es", "pt", "it", "dk", "se", "no", "fi", "pl", "cz",
+  "us", "ca", "mx", "br", "au", "nz", "jp", "kr", "tw", "hk", "sg", "in", "tr", "ae",
+];
+
+function CountrySelect(props: { value: string; onChange: (code: string) => void }) {
+  const codes = STORE_COUNTRIES.includes(props.value) ? STORE_COUNTRIES : [...STORE_COUNTRIES, props.value];
+  const options = codes.map((code) => ({ code, name: countryName(code) })).sort((a, b) => a.name.localeCompare(b.name));
+  return (
+    <select
+      class="select"
+      aria-label="App Store country"
+      value={props.value}
+      onChange={(e) => props.onChange(e.currentTarget.value)}
+    >
+      {options.map((o) => (
+        <option key={o.code} value={o.code}>
+          {o.name}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/** The server's settings, saved one change at a time (put back when saving fails). */
+function usePreferences() {
+  const settings = useResource<SettingsData>("settings", api.settings);
+  const [error, setError] = useState<string | null>(null);
+  const data = settings.data;
+  const update = async (patch: Partial<SettingsData>) => {
+    if (!data) return;
+    const previous = data;
+    setError(null);
+    settings.mutate({ ...data, ...patch });
+    try {
+      settings.mutate(await api.updateSettings(patch));
+    } catch (e) {
+      settings.mutate(previous);
+      setError(errorMessage(e));
+    }
+  };
+  return { settings, data, update, error };
+}
+
+const BUILDS_NOTICE =
+  "Turn on Kiwi Builds?\n\n" +
+  "Kiwi will download App Store apps with your Apple account, decrypt them on this Mac and patch them with " +
+  "open-source tweaks. Patched apps may break the app's terms of service. Use it only for apps you may use, " +
+  "on your own devices, at your own risk.\n\n" +
+  "The Mac needs a one-time setup first (see Kiwi's documentation).";
+
+/** Kiwi Builds: off until the owner turns it on and confirms what it does. */
+function BuildsSection({ data, update }: { data: SettingsData; update: (patch: Partial<SettingsData>) => Promise<void> }) {
+  const toggle = (on: boolean) => {
+    if (on && !window.confirm(BUILDS_NOTICE)) return;
+    void update({ kiwi_builds: on });
+  };
+  return (
+    <Section title="Kiwi Builds" footer="Patch App Store apps with open-source tweaks and sign them on this Mac.">
+      <Cell label="Kiwi Builds" icon="wrench" sub={data.kiwi_builds ? undefined : "Off"}>
+        <Toggle label="Kiwi Builds" checked={data.kiwi_builds} onChange={toggle} />
+      </Cell>
+      {data.kiwi_builds && <LinkCell href={BUILDS_PATH} label="Apps, Patches and Schedules" />}
+    </Section>
+  );
+}
+
+/** Signing and the App Store country, then how Kiwi keeps apps up to date. */
+function MacSections({ me }: { me: Me }) {
+  const { settings, data, update, error } = usePreferences();
+  const signing = useResource<Signing>("signing", api.signing);
+  const active = signing.data?.active;
+  const expiry = active ? expiryInfo(active.expires_at) : null;
+  let signingValue;
+  if (!signing.data) signingValue = signing.error ? "Unknown" : <Spinner />;
+  else if (!active) signingValue = <span class="tone-danger">Can't sign</span>;
+  else if (expiry && expiry.tone !== "ok") signingValue = <span class={`tone-${expiry.tone}`}>{expiry.label}</span>;
+  else signingValue = `Until ${formatDate(active.expires_at)}`;
+
+  return (
+    <>
+      <Section title={serverLabel(me.server.public_url)}>
+        <LinkCell href={SIGNING_PATH} icon="shield" label="Signing" value={signingValue} />
+        <Cell label="App Store Country" icon="globe">
+          {data ? (
+            <CountrySelect value={data.app_store_country} onChange={(code) => void update({ app_store_country: code })} />
+          ) : (
+            <Spinner />
+          )}
+        </Cell>
+      </Section>
+      {!data ? (
+        <Section title="Updates">
+          {settings.error ? (
+            <Cell label="Couldn't load settings" sub={settings.error.message}>
+              <button type="button" class="text-button" onClick={() => void settings.reload()}>
+                Retry
+              </button>
+            </Cell>
+          ) : (
+            <Cell label="Loading…">
+              <Spinner />
+            </Cell>
+          )}
+        </Section>
+      ) : (
+        <Section title="Updates" footer={error ? <span class="danger">{error}</span> : undefined}>
+          <Cell label="Check Sources Every">
+            <MinutesSelect
+              value={data.refresh_interval_minutes}
+              choices={REFRESH_CHOICES}
+              label="Source refresh interval"
+              onChange={(v) => void update({ refresh_interval_minutes: v })}
+            />
+          </Cell>
+          <Cell label="Prepare Updates Automatically" sub="Download and sign updates in the background so they're ready to install">
+            <Toggle label="Prepare updates automatically" checked={data.auto_prepare_updates} onChange={(v) => void update({ auto_prepare_updates: v })} />
+          </Cell>
+          <Cell label="Notify About Updates">
+            <Toggle label="Notify about updates" checked={data.notify_updates} onChange={(v) => void update({ notify_updates: v })} />
+          </Cell>
+          <Cell label="Notify Before Apps Expire" sub="30, 7 and 1 days before the signature expires">
+            <Toggle label="Notify before apps expire" checked={data.notify_expiry} onChange={(v) => void update({ notify_expiry: v })} />
+          </Cell>
+          <Cell label="Remove Apple Watch Apps" sub="Smaller installs; watch apps can't be re-signed for the phone alone">
+            <Toggle label="Remove Apple Watch apps" checked={data.strip_watch_apps} onChange={(v) => void update({ strip_watch_apps: v })} />
+          </Cell>
+        </Section>
+      )}
+      {data && <BuildsSection data={data} update={update} />}
+    </>
+  );
+}
+
+/** How often Kiwi asks the Mac's devicectl about paired iPhones. */
+function DeviceSyncSection() {
+  const { data, update, error } = usePreferences();
+  if (!data) return null;
+  return (
+    <Section
+      title="Sync with devicectl"
+      footer={error ? <span class="danger">{error}</span> : "Checks installed apps and the iOS version when the iPhone is paired with the Mac."}
+    >
+      <Cell label="Sync Automatically">
+        <Toggle label="Sync with devicectl" checked={data.devicectl_sync} onChange={(v) => void update({ devicectl_sync: v })} />
+      </Cell>
+      {data.devicectl_sync && (
+        <Cell label="Sync Every">
+          <MinutesSelect
+            value={data.devicectl_sync_minutes}
+            choices={SYNC_CHOICES}
+            label="devicectl sync interval"
+            onChange={(v) => void update({ devicectl_sync_minutes: v })}
+          />
+        </Cell>
+      )}
+    </Section>
+  );
+}
+
+/** A member's iPhone: its name and iOS version (linking and syncing are the owner's). */
+function MemberDeviceSection({ me, setMe }: { me: Me; setMe: (me: Me) => void }) {
+  const { device } = me;
+  return (
+    <Section>
+      <Cell label="Name">
+        <InlineField value={device.name} label="Device name" onSave={async (name) => setMe(await api.updateMe({ name }))} />
+      </Cell>
+      <Cell label="iOS Version" sub={device.os_version ? osVersionSourceLabel(device.os_version_source) : "Not known yet; all releases are offered"}>
+        <InlineField
+          value={device.os_version ?? ""}
+          label="iOS version"
+          placeholder="e.g. 27.0.1"
+          inputMode="decimal"
+          onSave={async (os_version) => setMe(await api.updateMe({ os_version }))}
+        />
+      </Cell>
+      <Cell label="Registered">
+        <span class="tone-ok">Ready</span>
+      </Cell>
+    </Section>
+  );
+}
+
+/** Settings › Family, with the devices waiting for approval. */
+function FamilyRow() {
+  const family = useResource("family", api.family);
+  const data = family.data;
+  const members = data ? data.people.length - 1 : 0;
+  return (
+    <LinkCell
+      href={FAMILY_PATH}
+      icon="people"
+      label="Family"
+      sub={data && members === 0 ? "Share Kiwi with the people on your tailnet" : undefined}
+      value={
+        data && data.pending > 0 ? (
+          <span class="tag tag-tint">{data.pending} waiting</span>
+        ) : data && members > 0 ? (
+          `You and ${plural(members, "other", "others")}`
+        ) : null
+      }
+    />
+  );
+}
+
+/** This iPhone (name and iOS version) and its notifications. */
+function DeviceRows({ me }: { me: Me }) {
+  const { device } = me;
+  return (
+    <>
+      <LinkCell
+        href={DEVICE_PATH}
+        icon="phone"
+        label={device.name}
+        value={device.os_version ? `iOS ${device.os_version}` : <span class="tone-warn">iOS unknown</span>}
+      />
+      <LinkCell href={NOTIFICATIONS_PATH} icon="bell" label="Notifications" value={me.push.subscribed ? "On" : "Off"} />
+    </>
+  );
+}
+
+/** Kiwi's card: a turning kiwi slice, the version and address, and whether it can sign right now. */
+function AboutCard({ me, member }: { me: Me; member: boolean }) {
+  const signing = useResource<Signing | null>(member ? "signing-none" : "signing", () =>
+    member ? Promise.resolve(null) : api.signing(),
+  );
+  const active = signing.data?.active;
+  const expiry = active ? expiryInfo(active.expires_at) : null;
+  let dot = "dot";
+  let status: string;
+  if (member) status = `Apps from ${me.access.owner_name}`;
+  else if (signing.data === undefined) {
+    dot = "dot dot-off";
+    status = signing.error ? "Signing status unknown" : "Checking signing…";
+  } else if (!active) {
+    dot = "dot dot-error";
+    status = "Can't sign apps";
+  } else if (expiry && expiry.tone !== "ok") {
+    dot = "dot dot-warn";
+    status = `Signing ${expiry.label.toLowerCase()}`;
+  } else status = "Ready to sign";
+  return (
+    <div class="about-card">
+      <KiwiLogo size={150} />
+      <div class="about-text">
+        <div class="about-name">
+          Kiwi<small>{me.server.version}</small>
+        </div>
+        <div class="about-host">{me.server.public_url.replace(/^https?:\/\//, "")}</div>
+        <div class="about-status">
+          <span class={dot === "dot" ? "dot dot-live" : dot} />
+          <span>{status}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Versions({ me }: { me: Me }) {
+  return (
+    <p class="fine-print">
+      Server {me.server.version} · web app {__APP_VERSION__}
+    </p>
+  );
+}
+
+export function Settings() {
+  const { me, error, reload } = useMe();
+
+  let content;
+  if (me && isMember(me)) {
+    content = (
+      <>
+        <AboutCard me={me} member />
+        <Section title="This iPhone" footer={`${me.access.owner_name} manages Kiwi and chooses which apps you can install.`}>
+          <DeviceRows me={me} />
+        </Section>
+        <Versions me={me} />
+      </>
+    );
+  } else if (me) {
+    const browser = me.device.kind === "browser";
+    content = (
+      <>
+        <AboutCard me={me} member={false} />
+        <Section>
+          <FamilyRow />
+        </Section>
+        <Section title={browser ? "This Device" : "This iPhone"}>
+          <DeviceRows me={me} />
+        </Section>
+        <MacSections me={me} />
+        <Versions me={me} />
+      </>
+    );
+  } else if (error) {
+    content = <ErrorState error={error} onRetry={reload} />;
+  } else {
+    content = <Loading />;
+  }
+
+  return <Page title="Settings">{content}</Page>;
+}
+
+/** Settings › This iPhone: its name, iOS version, Tailscale name and link to the Mac. */
+export function DeviceScreen() {
+  const { me, error, reload, setMe } = useMe();
+  let content;
+  if (me && isMember(me)) content = <MemberDeviceSection me={me} setMe={setMe} />;
+  else if (me) {
+    content = (
+      <>
+        <DeviceSection me={me} setMe={setMe} />
+        <DeviceSyncSection />
+        <Section title="Details">
+          <Cell label="Device ID">
+            <span class="mono small">{me.device.id}</span>
+          </Cell>
+          <Cell label="Last Seen">{formatDateTime(me.device.last_seen)}</Cell>
+        </Section>
+      </>
+    );
+  } else content = error ? <ErrorState error={error} onRetry={reload} /> : <Loading />;
+  return (
+    <main class="page">
+      <BackBar label="Settings" fallback="/settings" />
+      <header class="page-header">
+        <h1 class="large-title">{me?.device.kind === "browser" ? "This Device" : "This iPhone"}</h1>
+      </header>
+      {content}
+    </main>
+  );
+}
+
+/** Settings › Notifications: turn them on, send a test, turn them off. */
+export function NotificationsScreen() {
+  const { me, error, reload } = useMe();
+  return (
+    <main class="page">
+      <BackBar label="Settings" fallback="/settings" />
+      <header class="page-header">
+        <h1 class="large-title">Notifications</h1>
+      </header>
+      {me ? (
+        <NotificationsSection me={me} reloadMe={reload} />
+      ) : error ? (
+        <ErrorState error={error} onRetry={reload} />
+      ) : (
+        <Loading />
+      )}
+    </main>
+  );
+}

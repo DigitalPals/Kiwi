@@ -1,0 +1,10 @@
+# Kiwi log rotation. Installed by install.sh as /etc/newsyslog.d/kiwi.conf
+# (root:wheel 0644); removed by uninstall.sh.
+#
+# newsyslog runs hourly. When kiwi.log exceeds 10 MB it is rotated (5 gzipped copies
+# kept) and SIGTERM (15) is sent to the PID in kiwi.pid, written by the LaunchAgent's
+# sh wrapper. Kiwi shuts down gracefully and launchd (KeepAlive) starts it again, which
+# reopens kiwi.log; without the restart Kiwi would keep writing to the rotated file.
+#
+# logfilename                          [owner:group]   mode count size(KB) when flags [/pid_file]                          [sig_num]
+@HOME@/Library/Logs/Kiwi/kiwi.log      @USER@:@GROUP@  600  5     10240    *    Z     @HOME@/Library/Logs/Kiwi/kiwi.pid   15

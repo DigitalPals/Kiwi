@@ -1,0 +1,60 @@
+{
+  "info": {
+    "arguments": [
+      "devicectl",
+      "device",
+      "info",
+      "apps",
+      "--device",
+      "A1B2C3D4-E5F6-4789-9ABC-DEF012345678",
+      "--quiet",
+      "--timeout",
+      "60",
+      "--json-output",
+      "/tmp/out.json"
+    ],
+    "commandType": "devicectl.device.info.apps",
+    "environment": {},
+    "jsonVersion": 5,
+    "outcome": "success",
+    "version": "651.13.5"
+  },
+  "result": {
+    "apps": [
+      {
+        "appClip": false,
+        "builtByDeveloper": true,
+        "bundleIdentifier": "com.google.ios.youtube.A1B2C3D4E5",
+        "bundleVersion": "21.43.5",
+        "containerAccessible": true,
+        "defaultApp": false,
+        "hidden": false,
+        "internalApp": false,
+        "name": "YouTube",
+        "removable": true,
+        "url": "file:///private/var/containers/Bundle/Application/0D3F1A2B-3C4D-4E5F-8A9B-0C1D2E3F4A5B/YouTube.app/",
+        "version": "21.43.5"
+      },
+      {
+        "appClip": false,
+        "builtByDeveloper": false,
+        "bundleIdentifier": "com.example.My-App",
+        "containerAccessible": false,
+        "defaultApp": false,
+        "hidden": false,
+        "internalApp": false,
+        "name": "My App",
+        "removable": true,
+        "url": "file:///private/var/containers/Bundle/Application/1E2F3A4B-5C6D-4E7F-9A0B-1C2D3E4F5A6B/My%20App.app/"
+      },
+      {
+        "bundleIdentifier": "com.example.minimal"
+      }
+    ],
+    "defaultAppsIncluded": false,
+    "deviceIdentifier": "A1B2C3D4-E5F6-4789-9ABC-DEF012345678",
+    "hiddenAppsIncluded": false,
+    "internalAppsIncluded": false,
+    "removableAppsIncluded": true
+  }
+}

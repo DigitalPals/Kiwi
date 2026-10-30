@@ -1,0 +1,59 @@
+{
+  "info" : {
+    "arguments" : [
+      "devicectl",
+      "device",
+      "info",
+      "apps",
+      "--device",
+      "E67F3739-DA98-4C02-B8B6-0D6FB192A2A7",
+      "--quiet",
+      "--json-output",
+      "apps.json"
+    ],
+    "commandType" : "devicectl.device.info.apps",
+    "environment" : {
+
+    },
+    "jsonVersion" : 5,
+    "outcome" : "success",
+    "version" : "651.13.5"
+  },
+  "result" : {
+    "apps" : [
+      {
+        "appClip" : false,
+        "builtByDeveloper" : true,
+        "bundleIdentifier" : "com.callstack.agentdevice.runner.uitests.xctrunner",
+        "bundleVersion" : "1",
+        "containerAccessible" : true,
+        "defaultApp" : false,
+        "hidden" : false,
+        "internalApp" : false,
+        "name" : "AgentDeviceRunnerUITests-Runner",
+        "removable" : true,
+        "url" : "file:///Users/alex/Library/Developer/CoreSimulator/Devices/E67F3739-DA98-4C02-B8B6-0D6FB192A2A7/data/Containers/Bundle/Application/69361B82-3281-4738-A91E-6D32B2F0F947/AgentDeviceRunnerUITests-Runner.app/",
+        "version" : "1.0"
+      },
+      {
+        "appClip" : false,
+        "builtByDeveloper" : true,
+        "bundleIdentifier" : "com.example.sample",
+        "bundleVersion" : "3001000",
+        "containerAccessible" : true,
+        "defaultApp" : false,
+        "hidden" : false,
+        "internalApp" : false,
+        "name" : "Sample",
+        "removable" : true,
+        "url" : "file:///Users/alex/Library/Developer/CoreSimulator/Devices/E67F3739-DA98-4C02-B8B6-0D6FB192A2A7/data/Containers/Bundle/Application/CC6D5C02-8A07-4421-8248-6105DF9139CA/Sample.app/",
+        "version" : "3.1.0"
+      }
+    ],
+    "defaultAppsIncluded" : false,
+    "deviceIdentifier" : "E67F3739-DA98-4C02-B8B6-0D6FB192A2A7",
+    "hiddenAppsIncluded" : false,
+    "internalAppsIncluded" : false,
+    "removableAppsIncluded" : true
+  }
+}

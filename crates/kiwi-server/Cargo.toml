@@ -1,0 +1,47 @@
+[package]
+name = "kiwi-server"
+description = "Kiwi's HTTP server: sources, builds, OTA installs, devices, push and the web app."
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "kiwi_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kiwi"
+path = "src/main.rs"
+
+[dependencies]
+kiwi-source = { path = "../kiwi-source" }
+kiwi-signer = { path = "../kiwi-signer" }
+kiwi-device = { path = "../kiwi-device" }
+kiwi-push = { path = "../kiwi-push" }
+kiwi-appstore = { path = "../kiwi-appstore" }
+axum = "0.8"
+base64.workspace = true
+chrono.workspace = true
+clap = { version = "4.5", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+getrandom = "0.4"
+hex.workspace = true
+libc = "0.2"
+plist.workspace = true
+rusqlite = { version = "0.41", features = ["bundled", "chrono"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "signal", "sync", "time"] }
+tokio-util = { workspace = true, features = ["io"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url.workspace = true
+
+[dev-dependencies]
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
+reqwest.workspace = true
+sha1 = "0.11"
+zip.workspace = true

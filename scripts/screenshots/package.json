@@ -1,0 +1,14 @@
+{
+  "name": "kiwi-screenshots",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Regenerates the README screenshots in docs/screenshots from the web app's demo mode",
+  "scripts": {
+    "shoot": "node screenshots.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "^1.64.1",
+    "sharp": "^0.35.5"
+  }
+}

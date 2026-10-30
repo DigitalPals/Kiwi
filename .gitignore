@@ -1,0 +1,10 @@
+/target
+/web/node_modules
+/web/dist
+.DS_Store
+__pycache__/
+# Your SSH destination for deploy/deploy.sh (KIWI_MAC=you@your-mac)
+/deploy/deploy.env
+.pytest_cache/
+/scripts/screenshots/node_modules
+/scripts/screenshots/raw

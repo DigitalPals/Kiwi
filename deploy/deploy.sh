@@ -46,7 +46,9 @@ main() {
 	"${SSH[@]}" "$KIWI_MAC" "touch $BUILD_DIR/.kiwi-deploy-copy"
 
 	log=$(mktemp -t kiwi-deploy.XXXXXX)
-	trap 'rm -f "$log"' EXIT
+	# Expanded now: the trap runs after main returns, when the local $log is gone (set -u).
+	# shellcheck disable=SC2064
+	trap "rm -f -- '$log'" EXIT
 	"${SSH[@]}" "$KIWI_MAC" /bin/bash "$BUILD_DIR/install.sh" "$@" </dev/null | tee "$log"
 	url=$(sed -n 's|^==> Kiwi .* is running at \(https://[^/ ]*\)/ .*|\1|p' "$log" | tail -n 1)
 	[ -n "$url" ] || die "install.sh did not report Kiwi's address"

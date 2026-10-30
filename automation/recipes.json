@@ -20,7 +20,6 @@
       "name": "YouTube",
       "app_id": "544007664",
       "bundle_id": "com.google.ios.youtube",
-      "display_name": "YouMod · Kiwi",
       "tweak": "YouMod",
       "summary": "No ads, background play, downloads",
       "experimental": false,
@@ -28,7 +27,7 @@
       "retain": 10,
       "markers": ["youmod"],
       "catalog": {
-        "name": "YouMod · Kiwi",
+        "name": "YouTube",
         "developer": "Private Kiwi build",
         "subtitle": "YouTube with your selected tweaks",
         "description": "Built privately from the original App Store app and pinned YouMod sources. Each release records its patch recipe. Newly built versions have not been playback-tested on a physical device.",
@@ -71,7 +70,7 @@
       "retain": 10,
       "markers": ["ytmusicultimate"],
       "catalog": {
-        "name": "YouTube Music · Kiwi",
+        "name": "YouTube Music",
         "developer": "Private Kiwi build",
         "subtitle": "YouTube Music with YTMusicUltimate",
         "description": "Built privately from the original App Store app and pinned YTMusicUltimate sources. Each release records its patch recipe. Newly built versions have not been tested on a physical device.",
@@ -111,7 +110,7 @@
       "retain": 5,
       "markers": ["twitchadblock"],
       "catalog": {
-        "name": "Twitch · Kiwi",
+        "name": "Twitch",
         "developer": "Private Kiwi build",
         "subtitle": "Twitch with ad blocking",
         "description": "Built privately from the original App Store app and pinned TwitchAdBlock sources. Ad blocking talks only to Twitch. Newly built versions have not been tested on a physical device.",
@@ -145,7 +144,7 @@
       "retain": 3,
       "markers": ["bhtwitter", "zxpluginsinject"],
       "catalog": {
-        "name": "{name} · Kiwi",
+        "name": "{name}",
         "developer": "Private Kiwi build",
         "subtitle": "X with NeoFreeBird",
         "description": "Built privately from the original App Store app and pinned NeoFreeBird sources. Sign in through x.com in the app. Newly built versions have not been tested on a physical device.",
@@ -187,7 +186,7 @@
       "retain": 10,
       "markers": ["redditfilter", "redditsideloadfix"],
       "catalog": {
-        "name": "Reddit · Kiwi",
+        "name": "Reddit",
         "developer": "Private Kiwi build",
         "subtitle": "Reddit with ad removal",
         "description": "Built privately from the original App Store app and pinned RedditFilter sources. Promoted feed posts and comment ads are hidden by default. Extra filters are available under Profile → Settings → RedditFilter. Sign in using Other options → Log in with browser on the email or username login screen, or use an emailed login link. Each release records its patch recipe.",

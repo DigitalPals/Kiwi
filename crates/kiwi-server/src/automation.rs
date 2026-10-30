@@ -1257,12 +1257,9 @@ mod tests {
         let mut p = twitch.default_preferences();
         p.name = Some("Twitter".into());
         assert!(p.validate(twitch).is_err());
-        assert_eq!(x.catalog_name(Some("X")), "X · Kiwi");
-        assert_eq!(x.catalog_name(None), "Twitter · Kiwi");
-        assert_eq!(
-            recipe("youtube").unwrap().catalog_name(None),
-            "YouMod · Kiwi"
-        );
+        assert_eq!(x.catalog_name(Some("X")), "X");
+        assert_eq!(x.catalog_name(None), "Twitter");
+        assert_eq!(recipe("youtube").unwrap().catalog_name(None), "YouTube");
         assert!(recipe("instagram").is_err());
     }
 

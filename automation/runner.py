@@ -621,9 +621,8 @@ class Builder:
         products = self.compile_tweaks(app, tweaks, job_dir)
         emit("stage", stage="Injecting tweaks")
         injected = job_dir / "injected.ipa"
-        display = name or app.get("display_name")
         self.command([self.tool("cyan"), "-i", decrypted, "-o", injected, "-uwef", *products,
-                      *(["-n", display] if display else []), "-b", app["bundle_id"]], timeout=1800,
+                      *(["-n", name] if name else []), "-b", app["bundle_id"]], timeout=1800,
                      message=f"Tweak injection failed. The new {app['name']} build may need an updated patch recipe.")
         candidate = job_dir / "candidate.ipa"
         stamp_revision(injected, candidate, sequence)

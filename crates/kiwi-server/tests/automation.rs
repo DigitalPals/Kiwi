@@ -502,7 +502,7 @@ async fn apps_are_added_queued_behind_each_other_published_together_and_removed(
         .map(|a| a["name"].as_str().unwrap())
         .collect();
     assert_eq!(names.len(), 2, "{built}");
-    assert!(names.contains(&"Twitch · Kiwi") && names.contains(&"YouMod · Kiwi"));
+    assert!(names.contains(&"Twitch") && names.contains(&"YouTube"));
     assert!(phone.ok("/api/apps/kiwi-youtube/tv.twitch").await["state"]["install_url"].is_string());
 
     let removed = phone
@@ -572,7 +572,7 @@ async fn reddit_is_supported_and_publishes_signed_updates_with_its_original_bund
     assert!(ready["next_check_at"].is_string());
     let path = "/api/apps/kiwi-youtube/com.reddit.Reddit";
     let app = phone.ok(path).await;
-    assert_eq!(app["name"], "Reddit · Kiwi");
+    assert_eq!(app["name"], "Reddit");
     assert_eq!(app["bundle_id"], "com.reddit.Reddit");
     assert_eq!(app["releases"][0]["version"], "2026.43.0");
     assert!(app["state"]["install_url"].is_string());
@@ -628,7 +628,7 @@ async fn queued_jobs_cancel_without_running_and_names_are_part_of_the_build() {
         phone
             .ok("/api/apps/kiwi-youtube/com.atebits.Tweetie2")
             .await["name"],
-        "X · Kiwi"
+        "X"
     );
     let renamed = phone
         .send(
@@ -646,6 +646,6 @@ async fn queued_jobs_cancel_without_running_and_names_are_part_of_the_build() {
         phone
             .ok("/api/apps/kiwi-youtube/com.atebits.Tweetie2")
             .await["name"],
-        "Twitter · Kiwi"
+        "Twitter"
     );
 }

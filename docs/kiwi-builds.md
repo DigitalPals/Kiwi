@@ -79,7 +79,7 @@ Kiwi's normal request protections apply.
 
 | App | Tweak (pinned) | Notes |
 |---|---|---|
-| YouTube | YouMod with YouPiP, Return YouTube Dislikes, YTABConfig, YouQuality, YouGroupSettings, YTVideoOverlay, UncappedAVPlayer | Optional tweaks are choices; the Home Screen name is "YouMod · Kiwi" |
+| YouTube | YouMod with YouPiP, Return YouTube Dislikes, YTABConfig, YouQuality, YouGroupSettings, YTVideoOverlay, UncappedAVPlayer | Optional tweaks are choices |
 | YouTube Music | YTMusicUltimate 2.4.1 ([mrdrvt99 fork](https://github.com/mrdrvt99/YTMusicUltimate): upstream plus a download crash fix), optional Return YouTube Music Dislikes, YouMusicPiP, YTMABConfig | Built with `SIDELOADING=1` (Google sign-in and keychain fixes). Sign-in may need a second try |
 | Twitch | TwitchAdBlock 0.3.0 ([wkangg fork](https://github.com/wkangg/TwitchAdBlock); upstream is abandoned and crashes on Twitch 24.5+) | Experimental. Sideload fixes are built without theos-jailed (one Makefile line removed). No proxy; no live notifications |
 | X | NeoFreeBird 7.3.0 (v7) | Experimental. Built on the X version NeoFreeBird supports (12.38.1), not the newest. Sign in through x.com in the app (X blocks native login for re-signed apps; passkeys don't work). Choose "Twitter" or "X" as the Home Screen name. X's terms forbid modified clients |

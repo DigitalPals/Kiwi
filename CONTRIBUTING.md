@@ -19,7 +19,7 @@ Thanks for helping. Kiwi is a small project, so a short conversation first saves
    cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
    (cd web && npm run typecheck && npm test)
    python3 -m pytest automation/test_runner.py
-   shellcheck install.sh uninstall.sh deploy/deploy.sh
+   shellcheck install.sh uninstall.sh deploy/deploy.sh experiments/gboard-rambler/*.sh
    ```
 
 4. When you change the HTTP API, update [docs/api.md](docs/api.md), `web/src/api/types.ts`

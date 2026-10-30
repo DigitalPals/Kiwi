@@ -111,7 +111,7 @@ brew install node                                                 # Node.js 20 o
 Clone the repository and let the installer check the Mac first:
 
 ```sh
-git clone <this repository's URL> kiwi && cd kiwi
+git clone https://github.com/DigitalPals/Kiwi.git kiwi && cd kiwi
 ./install.sh --check
 ```
 

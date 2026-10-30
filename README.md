@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/DigitalPals/Kiwi/actions/workflows/ci.yml"><img src="https://github.com/DigitalPals/Kiwi/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1e6b4d" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/server-macOS-555" alt="macOS">
   <img src="https://img.shields.io/badge/phones-iOS%2016%2B-555" alt="iOS 16 or later">
@@ -47,7 +48,9 @@ can only be reached from your own tailnet.
 - **App Store originals.** Patched apps show the App Store app they're based on and warn you
   when the App Store is ahead.
 - **Kiwi Builds (optional, off by default).** Build patched YouTube, YouTube Music, Twitch,
-  X and Reddit apps on your Mac from pinned open-source tweaks, on a schedule.
+  X and Reddit apps on your Mac from pinned open-source tweaks, on a schedule. Experimental
+  extras bring Rambler dictation (filler words removed, spoken corrections applied) to a
+  patched Gboard keyboard and a small dictation app.
 - **Private by design.** Kiwi listens on `127.0.0.1` only. `tailscale serve` publishes it to
   your tailnet over HTTPS, never to the internet, and only your own Tailscale user can use it.
 
@@ -153,21 +156,51 @@ More detail: [architecture](docs/architecture.md).
 | **Build tools** | Xcode (or its command line tools), [Rust](https://rustup.rs) and Node.js 20 or later. `install.sh` checks them all. |
 | **iPhone** | iOS 16 or later; iOS 16.4 or later for notifications. Developer Mode turned on. |
 
-## Quick start
+## Install
 
-On the Mac, in Terminal:
+Plan on about half an hour, most of it in Apple's developer portal.
+[The install guide](docs/install.md) has every step in detail.
 
-```sh
-git clone <this repository's URL> kiwi && cd kiwi
-./install.sh --check    # checks the Mac and shows what it will install; changes nothing
-./install.sh            # builds Kiwi, installs it as a LaunchAgent and publishes it on your tailnet
-```
+1. **Prepare the Mac.** Install Xcode, [Rust](https://rustup.rs) and Node.js. Create an
+   **Apple Development** certificate (Xcode › Settings › Accounts › Manage Certificates),
+   register your iPhones' UDIDs on [developer.apple.com](https://developer.apple.com/account/resources/devices/list)
+   and create a wildcard (`*`) **iOS App Development** profile that includes them, then
+   double-click the downloaded profile. ([How](docs/install.md#2-signing-certificate-and-profile))
+2. **Set up Tailscale** on the Mac and on your iPhones, and turn on **MagicDNS** and
+   **HTTPS Certificates** on the [DNS page](https://login.tailscale.com/admin/dns) of the
+   admin console.
+3. **Install Kiwi.** On the Mac, in Terminal:
 
-The installer prints Kiwi's address, such as `https://your-mac.your-tailnet.ts.net`. On your
-iPhone, open it in Safari, tap **Share › Add to Home Screen**, and open Kiwi from the Home
-Screen. Add a source under **Sources** and install your first app.
+   ```sh
+   git clone https://github.com/DigitalPals/Kiwi.git kiwi && cd kiwi
+   ./install.sh --check    # checks the Mac and shows what it will install; changes nothing
+   ./install.sh            # builds Kiwi, installs it as a LaunchAgent and publishes it on your tailnet
+   ```
 
-To update later, run `git pull && ./install.sh`; to remove Kiwi, run `./uninstall.sh`.
+   The installer ends with Kiwi's address, such as `https://your-mac.your-tailnet.ts.net`.
+4. **Add Kiwi to your iPhone.** Open that address in Safari, tap **Share › Add to Home
+   Screen** and open Kiwi from the Home Screen. Settings should say **Ready to sign**.
+5. **Install your first app.** In **Sources**, tap **+** and paste an AltStore source URL.
+   Tap **Get** on an app in **Browse** and confirm when iOS asks. The first time you open
+   an app Kiwi signed, iOS asks you to turn on **Developer Mode** (Settings › Privacy &
+   Security).
+
+To update Kiwi, run `git pull && ./install.sh` in the clone: it backs up Kiwi's database
+and rolls back if the new version doesn't start. To remove it, run `./uninstall.sh` (add
+`--purge` to delete its data and logs too). Installed apps keep working until their
+signature expires.
+
+## Using Kiwi
+
+| Tab | |
+|---|---|
+| **Browse** | Every app from your sources, with **Fresh This Week** on top. Search, sort, filter by source, and hide apps you don't want (**•••** › **Hide from Browse**). |
+| **My Apps** | Updates, the apps you installed and how long each signature lasts. **Update All** prepares every update; iOS asks you to confirm each install. |
+| **Sources** | Add, turn off or remove AltStore sources, and show all of a source's apps or only the ones you pick. Kiwi Builds lives here too. |
+| **Settings** | Signing, notifications, update checks, the App Store country, this iPhone's link to the Mac and Kiwi Builds. |
+
+Updates, installs that are ready and apps about to expire can notify you (iOS 16.4 or
+later, from the Home Screen app). More in [Using Kiwi](docs/using-kiwi.md).
 
 ## Documentation
 
@@ -207,7 +240,8 @@ your Mac.
 Kiwi is an independent project. It is not affiliated with Apple, AltStore or Tailscale.
 Install only apps you trust and are allowed to use. Kiwi Builds modifies App Store apps and
 may break their terms of service; it is off unless you turn it on, and it's for your own
-devices only. See [Kiwi Builds](docs/kiwi-builds.md) before you use it.
+devices only. Its Rambler apps use a private Google speech service that Google may close
+at any time. See [Kiwi Builds](docs/kiwi-builds.md) before you use it.
 
 ## License
 

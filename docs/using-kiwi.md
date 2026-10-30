@@ -97,5 +97,6 @@ devicectl**). Installs from other stores show up in My Apps as "installed outsid
 ## Kiwi Builds
 
 Kiwi can also patch App Store apps on your Mac: YouTube, YouTube Music, Twitch, X and
-Reddit. It's off by default; read [Kiwi Builds](kiwi-builds.md) before you turn it on under
-Settings › **Kiwi Builds**.
+Reddit, plus the experimental Gboard Rambler keyboard and Rambler PoC dictation app. It's
+off by default; read [Kiwi Builds](kiwi-builds.md) before you turn it on under Settings ›
+**Kiwi Builds**.

@@ -8,3 +8,4 @@ __pycache__/
 .pytest_cache/
 /scripts/screenshots/node_modules
 /scripts/screenshots/raw
+/scripts/walkthrough/

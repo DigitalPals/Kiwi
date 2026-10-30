@@ -24,10 +24,9 @@ import {
   serverLabel,
 } from "../lib/format";
 import { useResource, useTask } from "../lib/hooks";
-import { isMember } from "../lib/family";
 import { useMe } from "../lib/me";
 import { pushSupport, subscribe, subscriptionBody, usableSubscription, type PushSupport } from "../lib/push";
-import { BUILDS_PATH, DEVICE_PATH, FAMILY_PATH, NOTIFICATIONS_PATH, SIGNING_PATH } from "../lib/routes";
+import { BUILDS_PATH, DEVICE_PATH, NOTIFICATIONS_PATH, SIGNING_PATH } from "../lib/routes";
 import { countryName } from "../lib/store";
 
 /** Text field that saves on blur or Return when changed. */
@@ -630,52 +629,6 @@ function DeviceSyncSection() {
   );
 }
 
-/** A member's iPhone: its name and iOS version (linking and syncing are the owner's). */
-function MemberDeviceSection({ me, setMe }: { me: Me; setMe: (me: Me) => void }) {
-  const { device } = me;
-  return (
-    <Section>
-      <Cell label="Name">
-        <InlineField value={device.name} label="Device name" onSave={async (name) => setMe(await api.updateMe({ name }))} />
-      </Cell>
-      <Cell label="iOS Version" sub={device.os_version ? osVersionSourceLabel(device.os_version_source) : "Not known yet; all releases are offered"}>
-        <InlineField
-          value={device.os_version ?? ""}
-          label="iOS version"
-          placeholder="e.g. 27.0.1"
-          inputMode="decimal"
-          onSave={async (os_version) => setMe(await api.updateMe({ os_version }))}
-        />
-      </Cell>
-      <Cell label="Registered">
-        <span class="tone-ok">Ready</span>
-      </Cell>
-    </Section>
-  );
-}
-
-/** Settings › Family, with the devices waiting for approval. */
-function FamilyRow() {
-  const family = useResource("family", api.family);
-  const data = family.data;
-  const members = data ? data.people.length - 1 : 0;
-  return (
-    <LinkCell
-      href={FAMILY_PATH}
-      icon="people"
-      label="Family"
-      sub={data && members === 0 ? "Share Kiwi with the people on your tailnet" : undefined}
-      value={
-        data && data.pending > 0 ? (
-          <span class="tag tag-tint">{data.pending} waiting</span>
-        ) : data && members > 0 ? (
-          `You and ${plural(members, "other", "others")}`
-        ) : null
-      }
-    />
-  );
-}
-
 /** This iPhone (name and iOS version) and its notifications. */
 function DeviceRows({ me }: { me: Me }) {
   const { device } = me;
@@ -693,16 +646,13 @@ function DeviceRows({ me }: { me: Me }) {
 }
 
 /** Kiwi's card: a turning kiwi slice, the version and address, and whether it can sign right now. */
-function AboutCard({ me, member }: { me: Me; member: boolean }) {
-  const signing = useResource<Signing | null>(member ? "signing-none" : "signing", () =>
-    member ? Promise.resolve(null) : api.signing(),
-  );
+function AboutCard({ me }: { me: Me }) {
+  const signing = useResource<Signing>("signing", api.signing);
   const active = signing.data?.active;
   const expiry = active ? expiryInfo(active.expires_at) : null;
   let dot = "dot";
   let status: string;
-  if (member) status = `Apps from ${me.access.owner_name}`;
-  else if (signing.data === undefined) {
+  if (signing.data === undefined) {
     dot = "dot dot-off";
     status = signing.error ? "Signing status unknown" : "Checking signing…";
   } else if (!active) {
@@ -741,24 +691,11 @@ export function Settings() {
   const { me, error, reload } = useMe();
 
   let content;
-  if (me && isMember(me)) {
-    content = (
-      <>
-        <AboutCard me={me} member />
-        <Section title="This iPhone" footer={`${me.access.owner_name} manages Kiwi and chooses which apps you can install.`}>
-          <DeviceRows me={me} />
-        </Section>
-        <Versions me={me} />
-      </>
-    );
-  } else if (me) {
+  if (me) {
     const browser = me.device.kind === "browser";
     content = (
       <>
-        <AboutCard me={me} member={false} />
-        <Section>
-          <FamilyRow />
-        </Section>
+        <AboutCard me={me} />
         <Section title={browser ? "This Device" : "This iPhone"}>
           <DeviceRows me={me} />
         </Section>
@@ -779,8 +716,7 @@ export function Settings() {
 export function DeviceScreen() {
   const { me, error, reload, setMe } = useMe();
   let content;
-  if (me && isMember(me)) content = <MemberDeviceSection me={me} setMe={setMe} />;
-  else if (me) {
+  if (me) {
     content = (
       <>
         <DeviceSection me={me} setMe={setMe} />

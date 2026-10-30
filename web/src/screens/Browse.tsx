@@ -2,13 +2,11 @@ import { useCallback, useMemo, useState } from "preact/hooks";
 import { api } from "../api/client";
 import type { AppState, AppSummary, Me } from "../api/types";
 import { AppRow } from "../components/AppRow";
-import { DevModeSheet } from "../components/family";
 import { FreshShelf } from "../components/FreshShelf";
 import { Icon } from "../components/Icon";
 import { KiwiLogo } from "../components/KiwiLogo";
 import { Banner, Empty, ErrorState, MenuPicker, Page, SkeletonRows, Spinner } from "../components/ui";
 import { withAppState } from "../lib/action";
-import { DEV_MODE_BANNER, isMember } from "../lib/family";
 import { plural } from "../lib/format";
 import { useDebounced, useResource, useStoredFlag, useTask } from "../lib/hooks";
 import { useMe } from "../lib/me";
@@ -71,11 +69,6 @@ function byRecentRelease(a: AppSummary, b: AppSummary): number {
   return db.localeCompare(da) || a.name.localeCompare(b.name);
 }
 
-export function Browse() {
-  const { me } = useMe();
-  return me && isMember(me) ? <MemberBrowse me={me} /> : <OwnerBrowse />;
-}
-
 function SearchField({ query, onInput }: { query: string; onInput: (value: string) => void }) {
   return (
     <label class="search">
@@ -95,81 +88,12 @@ function SearchField({ query, onInput }: { query: string; onInput: (value: strin
   );
 }
 
-/** A member's Browse: only the apps the owner picked for them, no sources or hidden apps. */
-function MemberBrowse({ me }: { me: Me }) {
-  const [query, setQuery] = useState(savedQuery);
-  const [devMode, setDevMode] = useState(false);
-  const [dismissed, setDismissed] = useStoredFlag(DEV_MODE_BANNER);
-  const q = useDebounced(query.trim(), 250);
-  const apps = useResource(`apps?q=${q}&member`, () => api.apps({ q }));
-  const { mutate } = apps;
-  const onState = useCallback(
-    (app: AppSummary, state: AppState) => mutate((list) => list && withAppState(list, app, state)),
-    [mutate],
-  );
-  const owner = me.access.owner_name;
-  const openable = apps.data?.find((a) => a.state.open_url) ?? null;
-
-  let content;
-  if (!apps.data) {
-    content = apps.error ? <ErrorState error={apps.error} onRetry={apps.reload} /> : <SkeletonRows />;
-  } else if (apps.data.length === 0) {
-    content = q ? (
-      <Empty icon="search" title="No Results" message={`Nothing matches “${q}”.`} />
-    ) : (
-      <Empty icon="apps" art={<KiwiLogo size={72} />} title="No Apps Yet" message={`${owner} hasn't picked any apps for you yet.`} />
-    );
-  } else {
-    content = (
-      <>
-        {apps.error && <Banner level="error">Couldn't refresh: {apps.error.message}</Banner>}
-        {!q && <FreshShelf apps={apps.data} onState={onState} />}
-        <div class="list-header">
-          <h2 class="list-title">
-            {q ? "Results" : `Apps from ${owner}`}
-            <span class="count">{apps.data.length}</span>
-          </h2>
-        </div>
-        <ul class="app-list">
-          {apps.data.map((app) => (
-            <AppRow key={`${app.source_id}/${app.bundle_id}`} app={app} onState={onState} />
-          ))}
-        </ul>
-      </>
-    );
-  }
-
-  return (
-    <Page title="Browse">
-      <HomeScreenHint />
-      {!dismissed && (
-        <Banner level="info" icon="check" onDismiss={() => setDismissed(true)}>
-          <strong>This iPhone is registered.</strong> The first time you open an app, iOS asks for Developer Mode once.{" "}
-          <button type="button" class="text-button small" onClick={() => setDevMode(true)}>
-            Show Me How
-          </button>
-        </Banner>
-      )}
-      <SearchField
-        query={query}
-        onInput={(value) => {
-          savedQuery = value;
-          setQuery(value);
-        }}
-      />
-      {content}
-      {apps.data && !q && <p class="fine-print">Want another app? Ask {owner}.</p>}
-      {devMode && <DevModeSheet app={openable} onClose={() => setDevMode(false)} />}
-    </Page>
-  );
-}
-
 const SORTS = [
   { value: "name", label: "Name" },
   { value: "recent", label: "Recently Updated" },
 ] as const;
 
-function OwnerBrowse() {
+export function Browse() {
   const { me } = useMe();
   const [query, setQuery] = useState(savedQuery);
   const [source, setSource] = useState(savedSource);

@@ -18,7 +18,7 @@ use serde::Serialize;
 use crate::{
     Kiwi,
     catalog::CatalogApp,
-    db::{Db, DeviceRow, InstallRow, RegistrationRow, RegistrationStatus, Time},
+    db::{Db, DeviceRow, InstallRow, Time},
     error::{ApiError, ApiResult},
 };
 
@@ -322,34 +322,25 @@ pub async fn resolve(kiwi: &Kiwi, req: &Requester) -> ApiResult<(DeviceRow, Opti
             }
         },
     };
-    let person = peer.as_ref().map(person_of);
-    let mut created = false;
+    let user = peer.as_ref().map(user_of);
     let mut device = match kiwi.db.device(&id)? {
         Some(d) => d,
         None => {
             let mut d = DeviceRow::new(id.clone(), kind, now);
             d.tailscale_name = peer.as_ref().map(|p| p.name.clone());
-            d.person_id = person.as_ref().map(|(id, ..)| id.clone());
+            d.person_id = user.clone();
             kiwi.db.insert_device(&d)?;
-            created = true;
             kiwi.db.device(&id)?.unwrap_or(d)
         }
     };
     let renamed = peer
         .as_ref()
         .is_some_and(|p| device.tailscale_name.as_ref() != Some(&p.name));
-    let moved = person
-        .as_ref()
-        .is_some_and(|(person, ..)| device.person_id.as_ref() != Some(person));
-    if let Some((person, name, fallback)) = &person
-        && (created || moved || now - device.last_seen > chrono::Duration::minutes(1))
+    if let Some(user) = user
+        && device.person_id.as_ref() != Some(&user)
     {
-        kiwi.db
-            .ensure_person(person, name.as_deref(), fallback, now)?;
-        if moved {
-            kiwi.db.set_device_person(&id, person)?;
-            device.person_id = Some(person.clone());
-        }
+        kiwi.db.set_device_person(&id, &user)?;
+        device.person_id = Some(user);
     }
     if renamed || now - device.last_seen > chrono::Duration::minutes(1) {
         let name = peer.map(|p| p.name);
@@ -363,16 +354,12 @@ pub async fn resolve(kiwi: &Kiwi, req: &Requester) -> ApiResult<(DeviceRow, Opti
     Ok((device, set_cookie))
 }
 
-/// The person (Tailscale login, or `node:<StableID>` for a node without a user), their
-/// display name when Tailscale has one, and a name to use otherwise.
-fn person_of(peer: &TailscalePeer) -> (String, Option<String>, String) {
+/// The Tailscale user of a peer: their login, or `node:<StableID>` for a node without a
+/// user (which is never the owner).
+fn user_of(peer: &TailscalePeer) -> String {
     match &peer.user_login {
-        Some(login) => (
-            login.clone(),
-            peer.user_name.clone(),
-            login.split('@').next().unwrap_or(login).to_owned(),
-        ),
-        None => (format!("node:{}", peer.stable_id), None, peer.name.clone()),
+        Some(login) => login.clone(),
+        None => format!("node:{}", peer.stable_id),
     }
 }
 
@@ -559,42 +546,6 @@ pub fn auto_link_candidate<'a>(
     }
 }
 
-/// Links by UDID: an approved device whose UDID a paired CoreDevice reports, when neither
-/// is linked yet.
-pub fn udid_links<'a>(
-    cores: &'a [CoreDevice],
-    devices: &[DeviceRow],
-    registrations: &[RegistrationRow],
-    allow_simulators: bool,
-) -> Vec<(String, &'a CoreDevice)> {
-    let mut links = Vec::new();
-    for reg in registrations
-        .iter()
-        .filter(|r| r.status == RegistrationStatus::Approved)
-    {
-        let Some(device) = devices
-            .iter()
-            .find(|d| d.id == reg.device_id && d.devicectl_id.is_none())
-        else {
-            continue;
-        };
-        let core = cores.iter().find(|c| {
-            linkable(c, allow_simulators)
-                && c.paired()
-                && c.udid
-                    .as_deref()
-                    .is_some_and(|u| u.eq_ignore_ascii_case(&reg.udid))
-                && !devices
-                    .iter()
-                    .any(|d| d.devicectl_id.as_deref() == Some(c.identifier.as_str()))
-        });
-        if let Some(core) = core {
-            links.push((device.id.clone(), core));
-        }
-    }
-    links
-}
-
 /// Reconciles a device's installs with the apps devicectl reports. Returns rows to save.
 pub fn reconcile(
     device_id: &str,
@@ -693,16 +644,6 @@ pub async fn sync(kiwi: &Arc<Kiwi>) -> ApiResult<()> {
         tracing::info!("linking {} to CoreDevice {}", devices[0].id, core.name);
         kiwi.db
             .set_device_link(&devices[0].id, Some(link_columns(core)))?;
-    }
-    let registrations = kiwi.db.registrations()?;
-    for (device, core) in udid_links(
-        &cores,
-        &kiwi.db.devices()?,
-        &registrations,
-        kiwi.config.allow_simulators,
-    ) {
-        tracing::info!("linking {device} to CoreDevice {} by UDID", core.name);
-        kiwi.db.set_device_link(&device, Some(link_columns(core)))?;
     }
     let team = kiwi.team_id();
     let catalog = kiwi.catalog.apps(None, None);
@@ -918,45 +859,6 @@ mod tests {
 
     fn device() -> DeviceRow {
         DeviceRow::new("ts:n1".into(), "tailscale", Utc::now())
-    }
-
-    #[test]
-    fn links_approved_devices_by_udid() {
-        let now = Utc::now();
-        let mut phone = core("phone", true, true);
-        phone.udid = Some("00008110-001A2B3C4D5E801E".into());
-        let other = core("other", true, true);
-        let devices = vec![
-            DeviceRow::new("ts:noah".into(), "tailscale", now),
-            DeviceRow::new("ts:alex".into(), "tailscale", now),
-        ];
-        let reg = |device: &str, status| RegistrationRow {
-            device_id: device.into(),
-            udid: "00008110-001a2b3c4d5e801e".into(),
-            product: None,
-            os_build: None,
-            device_name: None,
-            status,
-            requested_at: now,
-            decided_at: None,
-            apple_id: None,
-            registered_at: None,
-            error: None,
-        };
-        let cores = vec![other, phone];
-        let approved = [reg("ts:noah", RegistrationStatus::Approved)];
-        let links = udid_links(&cores, &devices, &approved, false);
-        assert_eq!(links.len(), 1);
-        assert_eq!(
-            (links[0].0.as_str(), links[0].1.identifier.as_str()),
-            ("ts:noah", "phone")
-        );
-        // Pending devices and CoreDevices linked elsewhere are left alone.
-        let pending = [reg("ts:noah", RegistrationStatus::Pending)];
-        assert!(udid_links(&cores, &devices, &pending, false).is_empty());
-        let mut linked = devices.clone();
-        linked[1].devicectl_id = Some("phone".into());
-        assert!(udid_links(&cores, &linked, &approved, false).is_empty());
     }
 
     #[test]

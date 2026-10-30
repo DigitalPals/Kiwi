@@ -53,138 +53,7 @@ export interface Me {
   };
   push: { vapid_public_key: string; subscribed: boolean };
   counts: { updates: number; installed: number; sources: number; source_errors: number; preparing: number };
-  /** Members only get warnings about their own installs and iOS version. */
   warnings: Warning[];
-  access: Access;
-  /** This device's family registration. */
-  registration: Registration;
-}
-
-// ---- family (docs/api.md "Family") ----
-
-/** The owner manages Kiwi; members see the apps the owner allowed for them. */
-export type Role = "owner" | "member";
-
-export interface Access {
-  role: Role;
-  /** null for browser devices on the Mac. */
-  person: { id: string; name: string } | null;
-  /** The owner's first name, for "Apps from Alex". */
-  owner_name: string;
-}
-
-export type RegistrationStatus = "none" | "pending" | "approved" | "declined";
-
-export interface Registration {
-  status: RegistrationStatus;
-  udid: string | null;
-  product: string | null; // "iPhone16,2"
-  os_build: string | null; // "24A434"
-  requested_at: Timestamp | null;
-  decided_at: Timestamp | null;
-  /** In the developer account (registered by Kiwi or in a profile). */
-  apple_registered: boolean;
-  /** The wildcard profile Kiwi signs with includes the UDID. */
-  in_profile: boolean;
-  /** The device may install apps (always true for the owner). */
-  ready: boolean;
-  /** Last registration error (owner views only). */
-  error: string | null;
-}
-
-export interface FamilyDevice {
-  id: string;
-  name: string;
-  person_id: string | null;
-  model: string | null; // machine identifier, e.g. "iPhone16,2"
-  os_version: string | null;
-  last_seen: Timestamp;
-  registration: Registration;
-}
-
-export interface Person {
-  id: string; // Tailscale login, or "node:<StableID>"
-  name: string;
-  role: Role;
-  /** "Apps You Add Later" are allowed. */
-  new_apps: boolean;
-  /** Apps they may use (every app for the owner). */
-  app_count: number;
-  devices: FamilyDevice[];
-  last_seen: Timestamp;
-}
-
-/** One catalog app, for a person. */
-export interface PersonApp {
-  source_id: string;
-  source_name: string;
-  bundle_id: string;
-  name: string;
-  subtitle: string | null;
-  icon_url: string | null;
-  tint_color: string | null;
-  allowed: boolean;
-  /** Chosen by hand (else it follows `new_apps`). */
-  explicit: boolean;
-  /** On one of the person's devices. */
-  installed_version: string | null;
-}
-
-export interface PersonDetail extends Person {
-  /** Every app of the enabled sources, by name. */
-  apps: PersonApp[];
-}
-
-export interface AppleAccount {
-  /** An App Store Connect API key is saved. */
-  connected: boolean;
-  issuer_id: string | null;
-  key_id: string | null;
-  /** Devices in the developer account at the last check. */
-  devices: number | null;
-  device_limit: number;
-  checked_at: Timestamp | null;
-  /** Last App Store Connect error. */
-  error: string | null;
-  /** The wildcard profile Kiwi signs with. */
-  profile: { uuid: string; name: string; devices: number; expires_at: Timestamp; kiwi: boolean } | null;
-}
-
-export interface Family {
-  /** The owner first, then by name. */
-  people: Person[];
-  /** Devices waiting for approval. */
-  pending: number;
-  apple: AppleAccount;
-}
-
-/** Who may install an app (owner views of an app's page). */
-export interface AppAccess {
-  person_id: string;
-  name: string;
-  role: Role;
-  allowed: boolean;
-  installed_version: string | null;
-  /** The person has no ready device yet. */
-  pending: boolean;
-}
-
-export interface PersonPatch {
-  name?: string;
-  new_apps?: boolean;
-}
-
-export interface AppChoice {
-  source_id: string;
-  bundle_id: string;
-  allowed: boolean;
-}
-
-export interface AppleKey {
-  issuer_id: string;
-  key_id: string;
-  /** The .p8 file's text. */
-  private_key: string;
 }
 
 export interface Source {
@@ -317,8 +186,6 @@ export interface AppDetail extends AppSummary {
   source_url: string;
   original_match: OriginalMatch;
   other_versions: OtherVersion[];
-  /** Owner only: who may install it (owner first); null for members. */
-  access: AppAccess[] | null;
 }
 
 export type BuildStatus = "queued" | "downloading" | "signing" | "packaging" | "ready" | "failed";

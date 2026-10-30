@@ -25,11 +25,9 @@ Signing uses the Apple Development identity in your login keychain and the profi
 
 | File | |
 |---|---|
-| `kiwi.db` | SQLite: sources, devices, people, builds, installs, push subscriptions, settings |
+| `kiwi.db` | SQLite: sources, devices, builds, installs, push subscriptions, settings |
 | `kiwi.db.bak-<UTC time>` | Copies `install.sh` takes before each install (the newest 5 are kept) |
 | `vapid.json` | The Web Push key pair (0600). If it's lost, every device has to turn notifications on again. An unreadable one is moved to `vapid.json.corrupt-<time>` and replaced |
-| `appstoreconnect.json` | The App Store Connect key, when you added one (0600) |
-| `profiles/` | Development profiles Kiwi made through App Store Connect |
 | `downloads/`, `builds/`, `icons/` | Downloaded IPAs, signed builds and icons; caches that Kiwi cleans up |
 | `automation/` | Kiwi Builds' runner, recipes, jobs and artifacts (see [Kiwi Builds](kiwi-builds.md)) |
 | `work/` | Temporary files, emptied at every start |
@@ -108,10 +106,10 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.kiwi.plist
 
 ## Backups
 
-Back up `kiwi.db`, `vapid.json` and, if you use it, `appstoreconnect.json`. Use
-`sqlite3 kiwi.db ".backup kiwi.db.bak"` for a consistent copy of the database while Kiwi
-runs. The `kiwi.db.bak-*` copies the installer keeps are on the same disk, so they don't
-count as a backup. Everything else in the data directory can be rebuilt.
+Back up `kiwi.db` and `vapid.json`. Use `sqlite3 kiwi.db ".backup kiwi.db.bak"` for a
+consistent copy of the database while Kiwi runs. The `kiwi.db.bak-*` copies the installer
+keeps are on the same disk, so they don't count as a backup. Everything else in the data
+directory can be rebuilt.
 
 ## Uninstall
 

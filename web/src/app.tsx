@@ -1,12 +1,11 @@
 import { useEffect, useLayoutEffect } from "preact/hooks";
-import { api } from "./api/client";
+import { api, ApiError } from "./api/client";
 import { TabBar } from "./components/TabBar";
 import { Empty, Loading } from "./components/ui";
-import { isMember } from "./lib/family";
 import { useMe } from "./lib/me";
 import { subscriptionBody, usableSubscription } from "./lib/push";
 import { applyPendingScroll, previousTab, useRoute } from "./lib/router";
-import { ownerOnly, routeTab, type Route } from "./lib/routes";
+import { routeTab, type Route } from "./lib/routes";
 import { tabDots } from "./lib/warnings";
 import { AppDetailScreen } from "./screens/AppDetail";
 import { Browse } from "./screens/Browse";
@@ -16,22 +15,8 @@ import { SourceApps } from "./screens/SourceApps";
 import { Sources } from "./screens/Sources";
 import { Automation } from "./screens/Automation";
 import { Builds } from "./screens/Builds";
-import { AppleScreen, FamilyScreen } from "./screens/Family";
-import { FamilyDeviceScreen, PersonScreen } from "./screens/FamilyPerson";
-import { RegistrationGate } from "./screens/Register";
 
-function Screen({ route, member, owner }: { route: Route; member: boolean; owner: string }) {
-  if (member && ownerOnly(route)) {
-    return (
-      <main class="page">
-        <Empty icon="settings" title="Not Available" message={`Only ${owner} can open this.`}>
-          <a class="button" href="/">
-            Browse Apps
-          </a>
-        </Empty>
-      </main>
-    );
-  }
+function Screen({ route }: { route: Route }) {
   switch (route.name) {
     case "browse":
       return <Browse />;
@@ -53,14 +38,6 @@ function Screen({ route, member, owner }: { route: Route; member: boolean; owner
       return <Automation key={route.app} app={route.app} />;
     case "source":
       return <SourceApps key={route.sourceId} sourceId={route.sourceId} />;
-    case "family":
-      return <FamilyScreen />;
-    case "person":
-      return <PersonScreen key={route.personId} personId={route.personId} />;
-    case "family-device":
-      return <FamilyDeviceScreen key={route.deviceId} deviceId={route.deviceId} />;
-    case "apple":
-      return <AppleScreen />;
     case "app":
       return (
         <AppDetailScreen
@@ -101,13 +78,13 @@ function usePushResync() {
 
 export function App() {
   const route = useRoute();
-  const { me, error, reload } = useMe();
+  const { me, error } = useMe();
   usePushResync();
 
   const path = location.pathname;
   useLayoutEffect(() => applyPendingScroll(), [path]);
 
-  // Who is asking decides the screens (and which requests they may send), so wait for it.
+  // Kiwi is its owner's alone: wait to know whether this device is theirs.
   if (!me && !error) {
     return (
       <main class="page">
@@ -115,14 +92,19 @@ export function App() {
       </main>
     );
   }
-  const member = isMember(me);
-  if (me && member && !me.registration.ready) return <RegistrationGate me={me} reload={reload} />;
+  if (error instanceof ApiError && error.code === "not_owner") {
+    return (
+      <main class="page">
+        <Empty icon="shield" title="Not Your Kiwi" message={error.message} />
+      </main>
+    );
+  }
 
   const active = routeTab(route) ?? (route.name === "app" ? previousTab() : null);
   return (
     <>
-      <Screen route={route} member={member} owner={me?.access.owner_name ?? "the owner"} />
-      <TabBar active={active} updates={me?.counts.updates ?? 0} dots={tabDots(me)} member={member} />
+      <Screen route={route} />
+      <TabBar active={active} updates={me?.counts.updates ?? 0} dots={tabDots(me)} />
     </>
   );
 }

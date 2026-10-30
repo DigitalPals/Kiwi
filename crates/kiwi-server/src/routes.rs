@@ -26,8 +26,7 @@ use crate::{
     db::{BrowseMode, DeviceRow, OriginalChoice, SourceRow},
     devices::{self, COOKIE, Requester, device_json},
     error::{ApiError, ApiResult},
-    family::{self, Access},
-    ota,
+    ota, owner,
     push::{self, Payload, SubscribeBody},
     sources,
     store::{self, StoreAppJson},
@@ -48,28 +47,6 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .route("/automation/{app}/check", post(automation_check))
         .route("/automation/{app}/cancel", post(automation_cancel))
         .route("/me", get(me).patch(patch_me))
-        .route("/me/enroll", post(enroll))
-        .route("/family", get(family_overview))
-        .route(
-            "/family/people/{id}",
-            get(family_person).patch(patch_person).delete(delete_person),
-        )
-        .route("/family/people/{id}/apps", patch(patch_person_apps))
-        .route("/family/devices/{id}", get(family_device))
-        .route("/family/devices/{id}/approve", post(approve_device))
-        .route("/family/devices/{id}/decline", post(decline_device))
-        .route("/family/devices/{id}/register", post(register_device))
-        .route(
-            "/family/devices/{id}/registration",
-            delete(forget_registration),
-        )
-        .route(
-            "/family/apple",
-            get(apple_account)
-                .put(connect_apple)
-                .delete(disconnect_apple),
-        )
-        .route("/family/apple/sync", post(sync_apple))
         .route("/sources", get(list_sources).post(add_source))
         .route("/sources/refresh", post(refresh_sources))
         .route("/sources/{id}", patch(patch_source).delete(delete_source))
@@ -109,11 +86,6 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .route("/ota/{token}/manifest.plist", get(ota::manifest_handler))
         .route("/ota/{token}/app.ipa", get(ota::ipa_handler))
         .route("/ota/{token}/icon.png", get(ota::icon_handler))
-        .route(
-            "/enroll/{token}/kiwi.mobileconfig",
-            get(family::mobileconfig_handler),
-        )
-        .route("/enroll/{token}", post(family::enroll_handler))
         .fallback(web)
         .layer(middleware::from_fn_with_state(kiwi.clone(), host_guard))
         .layer(middleware::from_fn(log_requests))
@@ -225,23 +197,11 @@ async fn api_guard(mut req: Request, next: Next) -> Response {
     response
 }
 
-/// The requesting device, what its person may do, and the public URL for links.
+/// The requesting device and the public URL for links. Only the owner's devices get one:
+/// other people's get `403 not_owner`, so every API handler but `/api/health` takes it.
 pub struct Ctx {
     pub device: DeviceRow,
-    pub access: Access,
     pub public_url: String,
-}
-
-/// [`Ctx`] of the owner; members get `403 forbidden`.
-pub struct Owner(pub Ctx);
-
-impl FromRequestParts<Arc<Kiwi>> for Owner {
-    type Rejection = ApiError;
-    async fn from_request_parts(parts: &mut Parts, kiwi: &Arc<Kiwi>) -> ApiResult<Self> {
-        let ctx = Ctx::from_request_parts(parts, kiwi).await?;
-        ctx.access.require_owner(kiwi)?;
-        Ok(Self(ctx))
-    }
 }
 
 impl FromRequestParts<Arc<Kiwi>> for Ctx {
@@ -279,10 +239,9 @@ impl FromRequestParts<Arc<Kiwi>> for Ctx {
         {
             *slot.0.lock().unwrap() = Some(cookie);
         }
-        let access = family::access(kiwi, &device, &kiwi.signing_info(), Utc::now())?;
+        owner::require(kiwi, &device)?;
         Ok(Self {
             device,
-            access,
             public_url: kiwi.public_url(&parts.headers),
         })
     }
@@ -356,20 +315,13 @@ fn days_until(t: chrono::DateTime<Utc>, now: chrono::DateTime<Utc>) -> String {
 async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
     let view = View::load(kiwi, &ctx.device, &ctx.public_url)?;
     let now = view.now;
-    let owner = view.access.is_owner();
-    let sources = if owner {
-        kiwi.catalog.sources()
-    } else {
-        Vec::new()
-    };
+    let sources = kiwi.catalog.sources();
     let errors = sources
         .iter()
         .filter(|s| s.enabled && s.source.error.is_some())
         .count();
     let mut warnings = Vec::new();
-    if !owner {
-        // Signing and sources are the owner's business.
-    } else if view.signing.identities.is_empty() {
+    if view.signing.identities.is_empty() {
         let message = view.signing.error(now).unwrap_or_default();
         warnings.push(warning("error", "no_identity", message, "/settings"));
     } else if let Some(message) = view.signing.error(now) {
@@ -446,15 +398,6 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
             "preparing": preparing,
         },
         "warnings": warnings,
-        "access": family::access_json(kiwi, &view.access),
-        "registration": family::registration_json(
-            view.access.role,
-            &ctx.device,
-            view.access.registration.as_ref(),
-            &view.signing,
-            now,
-            owner,
-        ),
     }))
 }
 
@@ -512,17 +455,11 @@ async fn patch_me(
     me_json(&kiwi, &ctx).await.map(Json)
 }
 
-/// A one-time enrollment profile for this device (see api.md "Family").
-async fn enroll(State(kiwi): K, ctx: Ctx) -> ApiResult<Json<Value>> {
-    let url = family::start_enrollment(&kiwi, &ctx.device)?;
-    Ok(Json(json!({ "url": url })))
-}
-
-async fn list_devices(State(kiwi): K, _: Owner) -> ApiResult<Json<devices::DevicesJson>> {
+async fn list_devices(State(kiwi): K, _: Ctx) -> ApiResult<Json<devices::DevicesJson>> {
     devices::devices_json(&kiwi, false).await.map(Json)
 }
 
-async fn sync_devices(State(kiwi): K, _: Owner) -> ApiResult<Json<devices::DevicesJson>> {
+async fn sync_devices(State(kiwi): K, _: Ctx) -> ApiResult<Json<devices::DevicesJson>> {
     devices::sync(&kiwi).await?;
     devices::devices_json(&kiwi, false).await.map(Json)
 }
@@ -537,7 +474,7 @@ struct DevicePatch {
 
 async fn patch_device(
     State(kiwi): K,
-    _: Owner,
+    _: Ctx,
     P(id): P<String>,
     JsonBody(body): JsonBody<DevicePatch>,
 ) -> ApiResult<Json<devices::DeviceJson>> {
@@ -564,7 +501,7 @@ fn source_json(kiwi: &Kiwi, row: &SourceRow) -> ApiResult<Json<SourceJson>> {
     Ok(Json(SourceJson::new(row, &kiwi.db.app_prefs()?)))
 }
 
-async fn list_sources(State(kiwi): K, _: Owner) -> ApiResult<Json<Vec<SourceJson>>> {
+async fn list_sources(State(kiwi): K, _: Ctx) -> ApiResult<Json<Vec<SourceJson>>> {
     sources_json(&kiwi)
 }
 
@@ -586,7 +523,7 @@ struct AddSource {
 
 async fn add_source(
     State(kiwi): K,
-    _: Owner,
+    _: Ctx,
     JsonBody(body): JsonBody<AddSource>,
 ) -> ApiResult<Response> {
     let row = sources::add(&kiwi, &body.url).await?;
@@ -602,7 +539,7 @@ struct SourcePatch {
 
 async fn patch_source(
     State(kiwi): K,
-    _: Owner,
+    _: Ctx,
     P(id): P<String>,
     JsonBody(body): JsonBody<SourcePatch>,
 ) -> ApiResult<Json<SourceJson>> {
@@ -622,18 +559,18 @@ async fn patch_source(
     source_json(&kiwi, &row)
 }
 
-async fn delete_source(State(kiwi): K, _: Owner, P(id): P<String>) -> ApiResult<StatusCode> {
+async fn delete_source(State(kiwi): K, _: Ctx, P(id): P<String>) -> ApiResult<StatusCode> {
     sources::remove(&kiwi, &id)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn refresh_source(State(kiwi): K, _: Owner, P(id): P<String>) -> ApiResult<Json<SourceJson>> {
+async fn refresh_source(State(kiwi): K, _: Ctx, P(id): P<String>) -> ApiResult<Json<SourceJson>> {
     let row = sources::refresh(&kiwi, &id).await?;
     kiwi.kick.notify_one();
     source_json(&kiwi, &row)
 }
 
-async fn refresh_sources(State(kiwi): K, _: Owner) -> ApiResult<Json<Vec<SourceJson>>> {
+async fn refresh_sources(State(kiwi): K, _: Ctx) -> ApiResult<Json<Vec<SourceJson>>> {
     let ids = kiwi
         .catalog
         .sources()
@@ -667,7 +604,7 @@ async fn list_apps(
     kiwi.catalog
         .apps(source.as_deref(), q.as_deref())
         .iter()
-        .filter(|app| view.may_use(app) && (hidden || !view.hidden(app)))
+        .filter(|app| hidden || !view.hidden(app))
         .map(|app| view.summary(app, None))
         .collect::<ApiResult<_>>()
         .map(Json)
@@ -683,9 +620,6 @@ async fn app_detail(
         .app(&source_id, &bundle_id)
         .ok_or_else(|| ApiError::not_found("App not found."))?;
     let view = View::load(&kiwi, &ctx.device, &ctx.public_url)?;
-    if !view.may_use(&app) {
-        return Err(ApiError::not_found("App not found."));
-    }
     Ok(Json(view.detail(&app)?).into_response())
 }
 
@@ -708,7 +642,7 @@ struct AppPatch {
 /// Hides or shows an app in Browse and chooses the App Store app it is based on.
 async fn patch_app(
     State(kiwi): K,
-    Owner(ctx): Owner,
+    ctx: Ctx,
     P((source_id, bundle_id)): P<(String, String)>,
     JsonBody(body): JsonBody<AppPatch>,
 ) -> ApiResult<Json<AppDetail>> {
@@ -774,7 +708,7 @@ async fn known_store_app(kiwi: &Kiwi, store_id: &str) -> ApiResult<String> {
 
 async fn store_search(
     State(kiwi): K,
-    _: Owner,
+    _: Ctx,
     RawQuery(query): RawQuery,
 ) -> ApiResult<Json<Vec<StoreAppJson>>> {
     let term = url::form_urlencoded::parse(query.unwrap_or_default().as_bytes())
@@ -806,11 +740,6 @@ async fn prepare(
     if (body.build.is_some() || body.revision.is_some()) && body.version.is_none() {
         return Err(ApiError::bad_request("A build needs a version."));
     }
-    ctx.access.require_ready(&kiwi)?;
-    if !may_use(&kiwi, &ctx.access, &source_id, &bundle_id)? {
-        return Err(ApiError::not_found("App not found."));
-    }
-    let udid = ctx.access.udid.as_deref();
     let build = builds::prepare(
         &kiwi,
         &source_id,
@@ -819,45 +748,20 @@ async fn prepare(
         body.build.as_deref(),
         body.revision,
         &ctx.device,
-        udid,
     )
     .await?;
-    let build = views::build_json(
-        &kiwi,
-        &ctx.device.id,
-        udid,
-        &ctx.public_url,
-        &build,
-        Utc::now(),
-    )?;
+    let build = views::build_json(&kiwi, &ctx.device.id, &ctx.public_url, &build, Utc::now())?;
     Ok((StatusCode::ACCEPTED, Json(build)).into_response())
 }
 
-/// Whether the person may use an app (members: only once their device is ready).
-fn may_use(kiwi: &Kiwi, access: &Access, source_id: &str, bundle_id: &str) -> ApiResult<bool> {
-    if access.is_owner() {
-        return Ok(true);
-    }
-    let Some(app) = kiwi.catalog.app(source_id, bundle_id) else {
-        return Ok(false);
-    };
-    let prefs = kiwi.db.app_prefs()?;
-    Ok(access.may_use(
-        &app,
-        prefs.get(&(source_id.to_owned(), bundle_id.to_owned())),
-    ))
-}
-
 async fn get_build(State(kiwi): K, ctx: Ctx, P(id): P<String>) -> ApiResult<Response> {
-    let not_found = || ApiError::not_found("Build not found.");
-    let build = kiwi.db.build(&id)?.ok_or_else(not_found)?;
-    if !may_use(&kiwi, &ctx.access, &build.source_id, &build.bundle_id)? {
-        return Err(not_found());
-    }
+    let build = kiwi
+        .db
+        .build(&id)?
+        .ok_or_else(|| ApiError::not_found("Build not found."))?;
     Ok(Json(views::build_json(
         &kiwi,
         &ctx.device.id,
-        ctx.access.udid.as_deref(),
         &ctx.public_url,
         &build,
         Utc::now(),
@@ -897,46 +801,45 @@ async fn prepare_updates(State(kiwi): K, ctx: Ctx) -> ApiResult<Response> {
             })
             .collect()
     };
-    let udid = ctx.access.udid.as_deref();
     let mut prepared = Vec::new();
     for (app, target) in targets {
-        prepared.push(builds::prepare_release(&kiwi, &app, target, udid).await?);
+        prepared.push(builds::prepare_release(&kiwi, &app, target).await?);
     }
     let now = Utc::now();
     let list = prepared
         .iter()
-        .map(|b| views::build_json(&kiwi, &ctx.device.id, udid, &ctx.public_url, b, now))
+        .map(|b| views::build_json(&kiwi, &ctx.device.id, &ctx.public_url, b, now))
         .collect::<ApiResult<Vec<_>>>()?;
     Ok(Json(list).into_response())
 }
 
 // ---- signing, settings, push ----
 
-async fn signing(State(kiwi): K, _: Owner) -> Response {
+async fn signing(State(kiwi): K, _: Ctx) -> Response {
     Json(kiwi.signing_info().json(Utc::now())).into_response()
 }
 
-async fn rescan_signing(State(kiwi): K, _: Owner) -> Response {
+async fn rescan_signing(State(kiwi): K, _: Ctx) -> Response {
     Json(kiwi.rescan_signing().await.json(Utc::now())).into_response()
 }
 
-async fn get_settings(State(kiwi): K, _: Owner) -> Response {
+async fn get_settings(State(kiwi): K, _: Ctx) -> Response {
     Json(kiwi.settings()).into_response()
 }
 
-async fn automation_overview(State(kiwi): K, _: Owner) -> ApiResult<Response> {
+async fn automation_overview(State(kiwi): K, _: Ctx) -> ApiResult<Response> {
     crate::automation::require_on(&kiwi)?;
     Ok(Json(crate::automation::overview(&kiwi)).into_response())
 }
 
-async fn automation_state(State(kiwi): K, _: Owner, P(app): P<String>) -> ApiResult<Response> {
+async fn automation_state(State(kiwi): K, _: Ctx, P(app): P<String>) -> ApiResult<Response> {
     crate::automation::require_on(&kiwi)?;
     Ok(Json(crate::automation::app_view(&kiwi, &app)?).into_response())
 }
 
 async fn automation_preferences(
     State(kiwi): K,
-    _: Owner,
+    _: Ctx,
     P(app): P<String>,
     JsonBody(body): JsonBody<crate::automation::Preferences>,
 ) -> ApiResult<Response> {
@@ -947,7 +850,7 @@ async fn automation_preferences(
 
 async fn automation_add(
     State(kiwi): K,
-    _: Owner,
+    _: Ctx,
     P(app): P<String>,
     JsonBody(body): JsonBody<crate::automation::Preferences>,
 ) -> ApiResult<Response> {
@@ -960,7 +863,7 @@ async fn automation_add(
         .into_response())
 }
 
-async fn automation_remove(State(kiwi): K, _: Owner, P(app): P<String>) -> ApiResult<Response> {
+async fn automation_remove(State(kiwi): K, _: Ctx, P(app): P<String>) -> ApiResult<Response> {
     crate::automation::require_on(&kiwi)?;
     crate::automation::remove(&kiwi, &app)?;
     Ok(Json(crate::automation::app_view(&kiwi, &app)?).into_response())
@@ -975,7 +878,7 @@ struct AutomationCheck {
 
 async fn automation_check(
     State(kiwi): K,
-    _: Owner,
+    _: Ctx,
     P(app): P<String>,
     JsonBody(body): JsonBody<AutomationCheck>,
 ) -> ApiResult<Response> {
@@ -988,7 +891,7 @@ async fn automation_check(
         .into_response())
 }
 
-async fn automation_cancel(State(kiwi): K, _: Owner, P(app): P<String>) -> ApiResult<Response> {
+async fn automation_cancel(State(kiwi): K, _: Ctx, P(app): P<String>) -> ApiResult<Response> {
     crate::automation::require_on(&kiwi)?;
     crate::automation::recipe(&app)?;
     crate::automation::cancel(&kiwi, &app);
@@ -997,7 +900,7 @@ async fn automation_cancel(State(kiwi): K, _: Owner, P(app): P<String>) -> ApiRe
 
 async fn patch_settings(
     State(kiwi): K,
-    _: Owner,
+    _: Ctx,
     JsonBody(patch): JsonBody<Map<String, Value>>,
 ) -> ApiResult<Response> {
     let previous = kiwi.settings();
@@ -1049,168 +952,6 @@ async fn push_test(State(kiwi): K, ctx: Ctx) -> ApiResult<Json<Value>> {
     };
     let sent = push::send_to_device(&kiwi, &ctx.device.id, &payload).await?;
     Ok(Json(json!({ "sent": sent })))
-}
-
-// ---- family ----
-
-async fn family_overview(State(kiwi): K, _: Owner) -> ApiResult<Json<family::FamilyJson>> {
-    family::family_json(&kiwi).map(Json)
-}
-
-async fn family_person(
-    State(kiwi): K,
-    _: Owner,
-    P(id): P<String>,
-) -> ApiResult<Json<family::PersonDetailJson>> {
-    family::person_json(&kiwi, &id).map(Json)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PersonPatch {
-    name: Option<String>,
-    new_apps: Option<bool>,
-}
-
-async fn patch_person(
-    State(kiwi): K,
-    _: Owner,
-    P(id): P<String>,
-    JsonBody(body): JsonBody<PersonPatch>,
-) -> ApiResult<Json<family::PersonDetailJson>> {
-    if let Some(name) = &body.name {
-        family::rename(&kiwi, &id, name)?;
-    }
-    if let Some(on) = body.new_apps {
-        family::set_new_apps(&kiwi, &id, on)?;
-    }
-    family::person_json(&kiwi, &id).map(Json)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AppChoice {
-    source_id: String,
-    bundle_id: String,
-    allowed: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AppChoices {
-    apps: Vec<AppChoice>,
-}
-
-async fn patch_person_apps(
-    State(kiwi): K,
-    _: Owner,
-    P(id): P<String>,
-    JsonBody(body): JsonBody<AppChoices>,
-) -> ApiResult<Json<family::PersonDetailJson>> {
-    let apps: Vec<(String, String, bool)> = body
-        .apps
-        .into_iter()
-        .map(|a| (a.source_id, a.bundle_id, a.allowed))
-        .collect();
-    family::set_apps(&kiwi, &id, &apps)?;
-    family::person_json(&kiwi, &id).map(Json)
-}
-
-async fn delete_person(State(kiwi): K, _: Owner, P(id): P<String>) -> ApiResult<StatusCode> {
-    family::remove_person(&kiwi, &id)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn family_device(
-    State(kiwi): K,
-    _: Owner,
-    P(id): P<String>,
-) -> ApiResult<Json<family::FamilyDeviceJson>> {
-    family::device_json(&kiwi, &id).map(Json)
-}
-
-async fn approve_device(
-    State(kiwi): K,
-    _: Owner,
-    P(id): P<String>,
-) -> ApiResult<Json<family::FamilyDeviceJson>> {
-    family::approve(&kiwi, &id)?;
-    family::device_json(&kiwi, &id).map(Json)
-}
-
-async fn decline_device(
-    State(kiwi): K,
-    _: Owner,
-    P(id): P<String>,
-) -> ApiResult<Json<family::FamilyDeviceJson>> {
-    family::decline(&kiwi, &id)?;
-    family::device_json(&kiwi, &id).map(Json)
-}
-
-async fn register_device(State(kiwi): K, _: Owner, P(id): P<String>) -> ApiResult<Response> {
-    if !kiwi.paths.appstore.exists() {
-        return Err(ApiError::bad_request(
-            "Connect an App Store Connect API key first, or add the iPhone in the Apple Developer portal.",
-        ));
-    }
-    let device = family::device_json(&kiwi, &id)?;
-    if device.registration.status != "approved" {
-        return Err(ApiError::bad_request("Approve the device first."));
-    }
-    family::start_apple_sync(&kiwi);
-    Ok((StatusCode::ACCEPTED, Json(device)).into_response())
-}
-
-async fn forget_registration(State(kiwi): K, _: Owner, P(id): P<String>) -> ApiResult<StatusCode> {
-    family::forget_registration(&kiwi, &id)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn apple_account(State(kiwi): K, _: Owner) -> ApiResult<Json<family::AppleJson>> {
-    family::apple_json(&kiwi).map(Json)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AppleKey {
-    issuer_id: String,
-    key_id: String,
-    private_key: String,
-}
-
-async fn connect_apple(
-    State(kiwi): K,
-    _: Owner,
-    JsonBody(body): JsonBody<AppleKey>,
-) -> ApiResult<Json<family::AppleJson>> {
-    family::connect(
-        &kiwi,
-        kiwi_appstore::Credentials {
-            issuer_id: body.issuer_id,
-            key_id: body.key_id,
-            private_key: body.private_key,
-        },
-    )
-    .await?;
-    family::apple_json(&kiwi).map(Json)
-}
-
-async fn disconnect_apple(State(kiwi): K, _: Owner) -> ApiResult<Json<family::AppleJson>> {
-    family::disconnect(&kiwi)?;
-    family::apple_json(&kiwi).map(Json)
-}
-
-/// Registers approved devices and refreshes profiles now; errors are in the response.
-async fn sync_apple(State(kiwi): K, _: Owner) -> ApiResult<Json<family::AppleJson>> {
-    if !kiwi.paths.appstore.exists() {
-        return Err(ApiError::bad_request(
-            "Connect an App Store Connect API key first.",
-        ));
-    }
-    if let Err(e) = family::sync_apple(&kiwi).await {
-        tracing::warn!("registration with Apple failed: {e}");
-    }
-    family::apple_json(&kiwi).map(Json)
 }
 
 // ---- web app ----

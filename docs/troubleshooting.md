@@ -63,9 +63,10 @@ That happens when Kiwi doesn't run in your desktop session (for example, started
 over SSH). Use the LaunchAgent the installer sets up, and make sure the login keychain is
 unlocked, which logging in to the desktop does.
 
-**"This iPhone isn't in the profile Kiwi signs with yet"** (`409 not_in_profile`): register
-the iPhone's UDID and add it to your wildcard profile, or let Kiwi do it with an App Store
-Connect key. See [Family](family.md#registering-iphones-with-apple).
+**"This Kiwi belongs to …"** (`403 not_owner`): the device is signed in to Tailscale as
+someone other than the Mac's owner. Kiwi is only for the owner: sign in to Tailscale on the
+device as them. When nobody owns the Mac (a tagged machine), run
+`./install.sh --owner you@example.com`.
 
 ## Installing apps
 

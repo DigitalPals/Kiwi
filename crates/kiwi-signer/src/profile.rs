@@ -64,16 +64,6 @@ impl Profile {
         }
     }
 
-    /// Whether the profile lets the app install on the device with this UDID.
-    pub fn covers(&self, udid: &str) -> bool {
-        self.devices.iter().any(|d| d.eq_ignore_ascii_case(udid))
-    }
-
-    /// How many of `udids` the profile covers.
-    pub fn covered(&self, udids: &[String]) -> usize {
-        udids.iter().filter(|u| self.covers(u)).count()
-    }
-
     /// Checks team, certificate, expiry and platform; the error says why not.
     pub fn usable_with(&self, identity: &Identity, now: DateTime<Utc>) -> Result<(), String> {
         if let Some(team) = &identity.team_id
@@ -240,42 +230,20 @@ pub fn select_profile<'a>(
     bundle_id: &str,
     now: DateTime<Utc>,
 ) -> Result<&'a Profile> {
-    select_profile_for(profiles, identity, bundle_id, &[], now)
-}
-
-/// [`select_profile`], first preferring the profiles that include the most of `devices`
-/// (UDIDs the app must install on), so a profile for every family device wins over an
-/// explicit one that lacks some of them.
-pub fn select_profile_for<'a>(
-    profiles: &'a [Profile],
-    identity: &Identity,
-    bundle_id: &str,
-    devices: &[String],
-    now: DateTime<Utc>,
-) -> Result<&'a Profile> {
     let mut reasons = Vec::new();
     let best = profiles
         .iter()
         .filter_map(|p| {
             let kind = p.match_bundle(bundle_id)?;
             match p.usable_with(identity, now) {
-                Ok(()) => Some((
-                    p.covered(devices),
-                    kind,
-                    p.app_id_pattern.len(),
-                    p.expires_at,
-                    p.created_at,
-                    p,
-                )),
+                Ok(()) => Some((kind, p.app_id_pattern.len(), p.expires_at, p.created_at, p)),
                 Err(reason) => {
                     reasons.push(reason);
                     None
                 }
             }
         })
-        .max_by_key(|&(covered, kind, len, expires, created, _)| {
-            (covered, kind, len, expires, created)
-        });
+        .max_by_key(|&(kind, len, expires, created, _)| (kind, len, expires, created));
     if let Some((.., profile)) = best {
         return Ok(profile);
     }
@@ -474,35 +442,6 @@ mod tests {
             pick(&[wildcard.clone(), newer], "org.other").unwrap(),
             "newer"
         );
-    }
-
-    #[test]
-    fn prefers_profiles_that_include_the_devices() {
-        let id = identity();
-        let mut family_spec = ProfileSpec::wildcard();
-        family_spec.uuid = "family".into();
-        family_spec.expires = "2027-01-01T00:00:00Z";
-        let mut family = profile(&family_spec);
-        let mut exact = profile(&ProfileSpec::explicit("com.example.app"));
-        let phone = "00008150-000000000000001E".to_owned();
-        let kid = "00008110-001A2B3C4D5E801E".to_owned();
-        exact.devices = vec![phone.clone()];
-        family.devices = vec![phone.to_lowercase(), kid.clone()];
-        assert!(family.covers(&phone) && family.covers(&kid) && !exact.covers(&kid));
-        assert_eq!(family.covered(&[phone.clone(), kid.clone()]), 2);
-
-        let all = vec![exact.clone(), family.clone()];
-        let pick = |devices: &[String]| {
-            select_profile_for(&all, &id, "com.example.app", devices, now())
-                .unwrap()
-                .uuid
-                .clone()
-        };
-        // Without devices (or when both include them) the explicit profile wins as before.
-        assert_eq!(pick(&[]), exact.uuid);
-        assert_eq!(pick(std::slice::from_ref(&phone)), exact.uuid);
-        // A profile that includes more of the family's devices wins over the explicit one.
-        assert_eq!(pick(&[phone, kid]), "family");
     }
 
     #[test]

@@ -38,8 +38,6 @@ pub struct Inputs<'a> {
     pub installed: Option<&'a InstallRow>,
     /// Builds of this app, newest first.
     pub builds: &'a [BuildRow],
-    /// The device's UDID when known: a ready build it is not in cannot be installed.
-    pub udid: Option<&'a str>,
     /// The device has an install of this app in progress.
     pub installing: bool,
     /// Expiry a new signature would get; `None` when signing is unavailable.
@@ -128,7 +126,6 @@ pub fn decide<'a>(i: &Inputs<'a>) -> Decision<'a> {
     });
     let ready = build.filter(|b| {
         b.usable(i.now)
-            && b.covers(i.udid)
             && (update_reason != Some(UpdateReason::Resign)
                 || b.expires_at > i.installed.and_then(|inst| inst.expires_at))
     });
@@ -170,7 +167,6 @@ mod tests {
         builds: Vec<BuildRow>,
         installing: bool,
         resign_expiry: Option<Time>,
-        udid: Option<String>,
         now: Time,
     }
 
@@ -183,7 +179,6 @@ mod tests {
                 builds: Vec::new(),
                 installing: false,
                 resign_expiry: None,
-                udid: None,
                 now: Utc::now(),
             }
         }
@@ -193,7 +188,6 @@ mod tests {
                 device: self.device.as_ref(),
                 installed: self.installed.as_ref(),
                 builds: &self.builds,
-                udid: self.udid.as_deref(),
                 installing: self.installing,
                 resign_expiry: self.resign_expiry,
                 now: self.now,
@@ -227,14 +221,6 @@ mod tests {
         let d = c.decide();
         assert_eq!(d.action, Action::Install);
         assert_eq!(d.install_build.unwrap().id, c.builds[0].id);
-
-        // A build whose profiles do not include the device cannot be installed on it.
-        c.builds[0].devices = Some(vec!["00008150-000000000000001E".into()]);
-        c.udid = Some("00008110-001A2B3C4D5E801E".into());
-        assert_eq!(c.decide().action, Action::Get);
-        c.udid = Some("00008150-000000000000001e".into());
-        assert_eq!(c.decide().action, Action::Install);
-        c.udid = None;
 
         // A build of another release does not count for the target.
         c.builds = vec![build_for(&c.release(1), BuildStatus::Ready, c.now)];

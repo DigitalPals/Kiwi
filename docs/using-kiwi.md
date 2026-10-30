@@ -78,7 +78,7 @@ Expire** on, you get a notification 30, 7 and 1 days before an app expires.
 
 In the Home Screen app, open Settings › **Notifications** and turn them on (iOS 16.4 or
 later). Kiwi notifies you about updates, installs that are ready and apps that are about to
-expire, and family registrations if you're the owner. **Send a Test** checks that it works.
+expire. **Send a Test** checks that it works.
 
 ## This iPhone and devicectl
 

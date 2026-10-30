@@ -5,7 +5,6 @@ members = [
     "crates/kiwi-signer",
     "crates/kiwi-device",
     "crates/kiwi-push",
-    "crates/kiwi-appstore",
     "crates/kiwi-server",
 ]
 

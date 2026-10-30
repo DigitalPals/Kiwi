@@ -1,21 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
-  APPLE_PATH,
   BUILDS_PATH,
   DEVICE_PATH,
-  FAMILY_PATH,
   NOTIFICATIONS_PATH,
   SIGNING_PATH,
   appPath,
   buildPath,
-  familyDevicePath,
   interceptedPath,
   matchRoute,
-  ownerOnly,
-  personPath,
   routeTab,
   sourcePath,
-  tabsFor,
 } from "./routes";
 
 describe("matchRoute", () => {
@@ -42,17 +36,13 @@ describe("matchRoute", () => {
     expect(matchRoute("/settings/builds/youtube-music/")).toEqual({ name: "build", app: "youtube-music" });
     expect(routeTab({ name: "builds" })).toBe("sources");
     expect(routeTab({ name: "build", app: "x" })).toBe("sources");
-    expect(ownerOnly({ name: "builds" })).toBe(true);
   });
 
-  it("opens the Settings pages; only Signing is the owner's", () => {
+  it("opens the Settings pages", () => {
     expect(matchRoute(SIGNING_PATH)).toEqual({ name: "signing" });
     expect(matchRoute(`${DEVICE_PATH}/`)).toEqual({ name: "device" });
     expect(matchRoute(NOTIFICATIONS_PATH)).toEqual({ name: "notifications" });
     for (const name of ["signing", "device", "notifications"] as const) expect(routeTab({ name })).toBe("settings");
-    expect(ownerOnly({ name: "signing" })).toBe(true);
-    expect(ownerOnly({ name: "device" })).toBe(false);
-    expect(ownerOnly({ name: "notifications" })).toBe(false);
   });
 
   it("decodes app routes; bundle ids with dots are one segment", () => {
@@ -74,28 +64,6 @@ describe("matchRoute", () => {
     expect(matchRoute("/sources/abc123/")).toEqual({ name: "source", sourceId: "abc123" });
     expect(matchRoute(sourcePath("a/b"))).toEqual({ name: "source", sourceId: "a/b" });
     expect(matchRoute("/sources/a/b")).toMatchObject({ name: "not-found" });
-  });
-
-  it("opens the family pages under Settings, including device links from notifications", () => {
-    expect(matchRoute(FAMILY_PATH)).toEqual({ name: "family" });
-    expect(matchRoute(`${FAMILY_PATH}/`)).toEqual({ name: "family" });
-    expect(matchRoute(APPLE_PATH)).toEqual({ name: "apple" });
-    expect(matchRoute(personPath("noah@example.com"))).toEqual({ name: "person", personId: "noah@example.com" });
-    expect(personPath("noah@example.com")).toBe("/settings/family/noah%40example.com");
-    expect(matchRoute("/settings/family/devices/ts:nNOAH1CNTRL")).toEqual({ name: "family-device", deviceId: "ts:nNOAH1CNTRL" });
-    expect(matchRoute(familyDevicePath("ts:a/b"))).toEqual({ name: "family-device", deviceId: "ts:a/b" });
-    expect(matchRoute("/settings/family/devices")).toMatchObject({ name: "not-found" });
-    for (const route of [{ name: "family" }, { name: "apple" }, { name: "person", personId: "x" }, { name: "family-device", deviceId: "y" }] as const) {
-      expect(routeTab(route)).toBe("settings");
-      expect(ownerOnly(route)).toBe(true);
-    }
-    expect(ownerOnly({ name: "browse" })).toBe(false);
-    expect(ownerOnly({ name: "app", sourceId: "s", bundleId: "b" })).toBe(false);
-  });
-
-  it("leaves out the Sources tab for members", () => {
-    expect(tabsFor(false).map((t) => t.tab)).toEqual(["browse", "apps", "sources", "settings"]);
-    expect(tabsFor(true).map((t) => t.tab)).toEqual(["browse", "apps", "settings"]);
   });
 
   it("returns not-found for unknown or malformed paths", () => {
@@ -133,7 +101,6 @@ describe("interceptedPath", () => {
     expect(interceptedPath(click, link("https://github.com/x"), origin)).toBeNull();
     expect(interceptedPath(click, link(`${origin}/api/me`), origin)).toBeNull();
     expect(interceptedPath(click, link(`${origin}/ota/t/manifest.plist`), origin)).toBeNull();
-    expect(interceptedPath(click, link(`${origin}/enroll/t/kiwi.mobileconfig`), origin)).toBeNull();
   });
 
   it("respects modifiers, targets and downloads", () => {

@@ -12,10 +12,6 @@ export type Route =
   | { name: "build"; app: string }
   | { name: "app"; sourceId: string; bundleId: string }
   | { name: "source"; sourceId: string }
-  | { name: "family" }
-  | { name: "person"; personId: string }
-  | { name: "family-device"; deviceId: string }
-  | { name: "apple" }
   | { name: "not-found"; path: string };
 
 export const TABS: readonly { tab: Tab; path: string; label: string }[] = [
@@ -25,13 +21,6 @@ export const TABS: readonly { tab: Tab; path: string; label: string }[] = [
   { tab: "settings", path: "/settings", label: "Settings" },
 ];
 
-/** Members have no Sources tab. */
-export function tabsFor(member: boolean): readonly { tab: Tab; path: string; label: string }[] {
-  return member ? TABS.filter((t) => t.tab !== "sources") : TABS;
-}
-
-export const FAMILY_PATH = "/settings/family";
-export const APPLE_PATH = "/settings/family/apple";
 export const SIGNING_PATH = "/settings/signing";
 export const DEVICE_PATH = "/settings/device";
 export const NOTIFICATIONS_PATH = "/settings/notifications";
@@ -39,13 +28,6 @@ export const NOTIFICATIONS_PATH = "/settings/notifications";
 export const BUILDS_PATH = "/builds";
 
 export const buildPath = (app: string) => `${BUILDS_PATH}/${encodeURIComponent(app)}`;
-
-/** Routes only the owner can use. */
-export function ownerOnly(route: Route): boolean {
-  return ["sources", "source", "builds", "build", "family", "person", "family-device", "apple", "signing"].includes(
-    route.name,
-  );
-}
 
 function decode(segment: string): string | null {
   try {
@@ -81,10 +63,6 @@ export function matchRoute(pathname: string): Route {
     case "/automation":
     case "/settings/builds":
       return { name: "builds" };
-    case FAMILY_PATH:
-      return { name: "family" };
-    case APPLE_PATH:
-      return { name: "apple" };
   }
   const parts = trimmed.split("/");
   // ["", "builds", app], or ["", "settings", "builds", app] from earlier links
@@ -97,16 +75,6 @@ export function matchRoute(pathname: string): Route {
   if (buildSegment) {
     const app = decode(buildSegment);
     if (app) return { name: "build", app };
-  }
-  // ["", "settings", "family", "devices", deviceId] (push notifications link here)
-  if (parts.length === 5 && parts[1] === "settings" && parts[2] === "family" && parts[3] === "devices" && parts[4]) {
-    const deviceId = decode(parts[4]);
-    if (deviceId) return { name: "family-device", deviceId };
-  }
-  // ["", "settings", "family", personId]
-  if (parts.length === 4 && parts[1] === "settings" && parts[2] === "family" && parts[3] && parts[3] !== "devices") {
-    const personId = decode(parts[3]);
-    if (personId) return { name: "person", personId };
   }
   // ["", "sources", sourceId]
   if (parts.length === 3 && parts[1] === "sources" && parts[2]) {
@@ -130,14 +98,6 @@ export function sourcePath(sourceId: string): string {
   return `/sources/${encodeURIComponent(sourceId)}`;
 }
 
-export function personPath(personId: string): string {
-  return `${FAMILY_PATH}/${encodeURIComponent(personId)}`;
-}
-
-export function familyDevicePath(deviceId: string): string {
-  return `${FAMILY_PATH}/devices/${encodeURIComponent(deviceId)}`;
-}
-
 export function routeTab(route: Route): Tab | null {
   switch (route.name) {
     case "browse":
@@ -152,10 +112,6 @@ export function routeTab(route: Route): Tab | null {
     case "signing":
     case "device":
     case "notifications":
-    case "family":
-    case "person":
-    case "family-device":
-    case "apple":
       return "settings";
     default:
       return null;
@@ -191,7 +147,7 @@ export function interceptedPath(
     return null;
   }
   if (url.origin !== origin) return null;
-  // The server answers these itself (OTA installs, enrollment profiles).
-  if (url.pathname === "/api" || ["/api/", "/ota/", "/enroll/"].some((p) => url.pathname.startsWith(p))) return null;
+  // The server answers these itself (the API, OTA installs).
+  if (url.pathname === "/api" || ["/api/", "/ota/"].some((p) => url.pathname.startsWith(p))) return null;
   return url.pathname + url.search + url.hash;
 }

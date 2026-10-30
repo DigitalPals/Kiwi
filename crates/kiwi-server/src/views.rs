@@ -19,7 +19,6 @@ use crate::{
     },
     devices::{device_profile, random_token},
     error::ApiResult,
-    family::{self, Access, AppAccessJson},
     ota,
     signing::SigningInfo,
     store::StoreAppJson,
@@ -205,8 +204,6 @@ pub struct AppDetail {
     pub source_url: String,
     pub original_match: OriginalMatch,
     pub other_versions: Vec<OtherVersionJson>,
-    /// Owner views: who may install the app. `None` for members.
-    pub access: Option<Vec<AppAccessJson>>,
 }
 
 pub fn release_json(r: &Release, device: Option<&DeviceProfile>) -> ReleaseJson {
@@ -253,11 +250,9 @@ fn install_url(
 
 /// One build needs no catalog, signing snapshot or unrelated device/app state. In
 /// particular, progress polling must not reload the entire build history each time.
-/// `udid`: the device's, when known; a build it is not in has no install URL.
 pub fn build_json(
     kiwi: &Kiwi,
     device_id: &str,
-    udid: Option<&str>,
     public_url: &str,
     b: &BuildRow,
     now: Time,
@@ -279,7 +274,7 @@ pub fn build_json(
         dropped_entitlements: b.dropped_entitlements.clone(),
         created_at: b.created_at,
         finished_at: b.finished_at,
-        install_url: if b.usable(now) && b.covers(udid) {
+        install_url: if b.usable(now) {
             Some(install_url(kiwi, device_id, public_url, b, now)?)
         } else {
             None
@@ -304,27 +299,19 @@ pub struct View<'a> {
     prefs: HashMap<(String, String), AppPrefs>,
     /// Cached App Store lookups of the current storefront by bundle id.
     store: HashMap<String, StoreRow>,
-    /// What the device's person may use.
-    pub access: Access,
     pub now: Time,
 }
 
 impl<'a> View<'a> {
     pub fn load(kiwi: &'a Kiwi, device: &DeviceRow, public_url: &str) -> ApiResult<Self> {
         let now = Utc::now();
-        let signing = kiwi.signing_info();
         let mut builds: HashMap<(String, String), Vec<BuildRow>> = HashMap::new();
-        for mut b in kiwi.db.builds()? {
-            if b.devices.is_none() && b.status == BuildStatus::Ready {
-                // Builds from before Kiwi recorded their devices: from the profiles' files.
-                b.devices = crate::builds::covered_devices(&signing.profiles, &b.profile_uuids);
-            }
+        for b in kiwi.db.builds()? {
             builds
                 .entry((b.source_id.clone(), b.bundle_id.clone()))
                 .or_default()
                 .push(b);
         }
-        let access = family::access(kiwi, device, &signing, now)?;
         let installing = kiwi
             .db
             .device_attempts(&device.id)?
@@ -347,7 +334,7 @@ impl<'a> View<'a> {
             installs,
             installs_by_signed_id,
             installing,
-            signing,
+            signing: kiwi.signing_info(),
             team: kiwi.team_id(),
             prefs: kiwi.db.app_prefs()?,
             store: kiwi
@@ -356,19 +343,8 @@ impl<'a> View<'a> {
                 .into_iter()
                 .map(|r| (r.bundle_id.clone(), r))
                 .collect(),
-            access,
             now,
         })
-    }
-
-    /// The device's UDID, when known.
-    pub fn udid(&self) -> Option<&str> {
-        self.access.udid.as_deref()
-    }
-
-    /// Whether this device may see and install the app (always for the owner).
-    pub fn may_use(&self, app: &CatalogApp) -> bool {
-        self.access.may_use(app, self.prefs(app))
     }
 
     fn prefs(&self, app: &CatalogApp) -> Option<&AppPrefs> {
@@ -376,9 +352,9 @@ impl<'a> View<'a> {
             .get(&(app.source.id.clone(), app.app().bundle_id.clone()))
     }
 
-    /// Not shown in Browse. The owner's choices do not hide apps from members.
+    /// Not shown in Browse.
     pub fn hidden(&self, app: &CatalogApp) -> bool {
-        self.access.is_owner() && !app.source.shows(self.prefs(app))
+        !app.source.shows(self.prefs(app))
     }
 
     /// The App Store app this app is based on, and how it was found.
@@ -481,7 +457,6 @@ impl<'a> View<'a> {
             device: self.profile.as_ref(),
             installed,
             builds: self.app_builds(&app.source.id, &a.bundle_id),
-            udid: self.udid(),
             installing: self
                 .installing
                 .contains(&(app.source.id.clone(), a.bundle_id.clone())),
@@ -508,14 +483,7 @@ impl<'a> View<'a> {
     }
 
     pub fn build_json(&self, b: &BuildRow) -> ApiResult<BuildJson> {
-        build_json(
-            self.kiwi,
-            &self.device.id,
-            self.udid(),
-            &self.public_url,
-            b,
-            self.now,
-        )
+        build_json(self.kiwi, &self.device.id, &self.public_url, b, self.now)
     }
 
     /// `install` overrides the install row (library entries).
@@ -558,7 +526,7 @@ impl<'a> View<'a> {
             unavailable,
             orphaned: false,
             hidden: self.hidden(app),
-            is_new: self.access.is_owner() && app.source.is_new(self.prefs(app)),
+            is_new: app.source.is_new(self.prefs(app)),
             original: self.original_json(app, &d),
             state: AppStateJson {
                 action: d.action,
@@ -610,11 +578,6 @@ impl<'a> View<'a> {
             source_url: app.source.url.clone(),
             original_match: self.original(app).0,
             other_versions: self.other_versions(app),
-            access: if self.access.is_owner() {
-                Some(family::app_access(self.kiwi, app)?)
-            } else {
-                None
-            },
             summary,
         })
     }
@@ -629,7 +592,6 @@ impl<'a> View<'a> {
             .filter(|o| {
                 (o.source.id != app.source.id || o.app().bundle_id != app.app().bundle_id)
                     && self.family(o) == family
-                    && self.may_use(o)
             })
             .map(|o| {
                 let a = o.app();
@@ -699,9 +661,6 @@ impl<'a> View<'a> {
             .apps(None, None)
             .into_iter()
             .filter_map(|app| {
-                if !self.may_use(&app) {
-                    return None;
-                }
                 let installed = self.installed_for(&app)?;
                 let reason = self.decide(&app, Some(installed)).update_reason?;
                 Some((app, reason))
@@ -717,13 +676,6 @@ impl<'a> View<'a> {
                 .catalog
                 .app(&install.source_id, &install.bundle_id);
             out.push(match app {
-                Some(app) if !self.may_use(&app) => {
-                    // An app the person may no longer use: installed, never updated, and
-                    // without a detail page.
-                    let mut summary = self.plain_summary(install, false);
-                    summary.orphaned = true;
-                    summary
-                }
                 Some(app) if install.signed_bundle_id == self.signed_id(&install.bundle_id) => {
                     self.summary(&app, Some(install))?
                 }

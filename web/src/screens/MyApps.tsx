@@ -1,14 +1,12 @@
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useState } from "preact/hooks";
 import { api, errorMessage } from "../api/client";
-import type { AppState, AppSummary, Source } from "../api/types";
+import type { AppState, AppSummary } from "../api/types";
 import { AppRow, ExpiryLabel, SignedIcon } from "../components/AppRow";
-import { DevModeSheet } from "../components/family";
 import { Icon } from "../components/Icon";
 import { Banner, Empty, ErrorState, ExpandableText, Page, SkeletonRows, Spinner, VersionChange } from "../components/ui";
 import { libraryKey, needsPrepare, versionChange, withAppState, withLibraryState } from "../lib/action";
 import { expiryInfo, formatBytes, formatDate, formatRelative, formatVersion } from "../lib/format";
-import { DEV_MODE_SHOWN, isMember } from "../lib/family";
-import { useOnForeground, useResource, useStoredFlag, useTask } from "../lib/hooks";
+import { useOnForeground, useResource, useTask } from "../lib/hooks";
 import { useMe, useOnUpdateCountChange } from "../lib/me";
 
 /** "21.43.5 → 21.44.0 · 152.4 MB", or when a re-sign's current build expires. */
@@ -54,22 +52,8 @@ function lastChecked(sources: { enabled: boolean; last_attempt_at: string | null
 export function MyApps() {
   const updates = useResource("updates", api.updates);
   const library = useResource("library", api.library);
-  const { me, reload: reloadMe } = useMe();
-  // Sources (and checking them) are the owner's.
-  const member = isMember(me);
-  const sources = useResource(member ? "sources-none" : "sources", () =>
-    member ? Promise.resolve<Source[]>([]) : api.sources(),
-  );
-  const [guideShown, setGuideShown] = useStoredFlag(DEV_MODE_SHOWN);
-  const [guide, setGuide] = useState(false);
-  const firstApp = library.data?.find((a) => a.state.open_url && a.state.installed?.origin === "kiwi") ?? null;
-  // A member's first app needs Developer Mode: show how once, when it appears.
-  useEffect(() => {
-    if (member && firstApp && !guideShown) {
-      setGuide(true);
-      setGuideShown(true);
-    }
-  }, [member, firstApp, guideShown, setGuideShown]);
+  const sources = useResource("sources", api.sources);
+  const { reload: reloadMe } = useMe();
   const [editing, setEditing] = useState(false);
   const [forgetError, setForgetError] = useState<string | null>(null);
   const [forgetting, setForgetting] = useState<string | null>(null);
@@ -253,7 +237,6 @@ export function MyApps() {
         )
       }
       summary={
-        !member && (
         <>
           <span>{checked ? `Checked ${formatRelative(checked)}` : "Not checked yet"}</span>
           <span>·</span>
@@ -262,7 +245,6 @@ export function MyApps() {
           </button>
           {check.error && <span class="danger">{check.error}</span>}
         </>
-        )
       }
     >
       {forgetError && <Banner level="error">{forgetError}</Banner>}
@@ -270,7 +252,6 @@ export function MyApps() {
         <Banner level="error">Couldn't refresh: {(updates.error ?? library.error)?.message}</Banner>
       )}
       {content}
-      {guide && <DevModeSheet app={firstApp} onClose={() => setGuide(false)} />}
     </Page>
   );
 }

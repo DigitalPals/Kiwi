@@ -2,25 +2,17 @@
 // action rules in docs/architecture.md closely enough to exercise every UI state.
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import type {
-  AppAccess,
   AppDetail,
-  AppleAccount,
   AppState,
   AppSummary,
   AutomationPreferences,
   Build,
   DevicesResponse,
-  Family,
-  FamilyDevice,
   Installed,
   Me,
   Original,
   OriginalMatch,
   OtherVersion,
-  Person,
-  PersonApp,
-  PersonDetail,
-  Registration,
   Release,
   Settings,
   Source,
@@ -35,8 +27,6 @@ import {
   createDb,
   type MockApp,
   type MockAttempt,
-  type MockPerson,
-  type MockViewer,
   type MockBuild,
   type MockDb,
   type MockRelease,
@@ -60,14 +50,6 @@ export interface MockResponse {
   text?: string;
   contentType?: string;
   headers?: Record<string, string>;
-}
-
-/** The cookie that picks whose device the dev app is (`?as=emma`); the owner's by default. */
-export const VIEWER_COOKIE = "kiwi_mock_as";
-
-export function viewerFromCookie(cookie: string | undefined): string {
-  const match = /(?:^|;\s*)kiwi_mock_as=([a-z]+)/.exec(cookie ?? "");
-  return match?.[1] ?? "alex";
 }
 
 const VERSION = "0.2.0";
@@ -118,188 +100,6 @@ export function createMockApi(clock: () => number = Date.now) {
   const db: MockDb = createDb(clock());
   const vapid = vapidPublicKey();
   const builds = createBuilds(iso(clock()));
-
-  // ---- the family: whose device is asking, and what they may use ------------------------
-
-  const family = db.family;
-  let current: MockViewer = family.viewers[0] as MockViewer;
-
-  function findViewer(key: string): MockViewer | undefined {
-    return family.viewers.find((v) => v.key === key);
-  }
-
-  /** Makes a viewer's device, installs and subscriptions the ones `db` (and every helper) uses. */
-  function select(key: string) {
-    current.device = db.device;
-    current.installs = db.installs;
-    current.subscriptions = db.subscriptions;
-    current = findViewer(key) ?? (family.viewers[0] as MockViewer);
-    db.device = current.device;
-    db.installs = current.installs;
-    db.subscriptions = current.subscriptions;
-  }
-
-  /** A viewer's installs, also for the current one (whose list lives in `db`). */
-  const installsOf = (v: MockViewer) => (v === current ? db.installs : v.installs);
-  const isOwnerViewer = (v: MockViewer) => v.person_id === family.owner;
-  const isOwner = () => isOwnerViewer(current);
-
-  function personOf(id: string): MockPerson {
-    let person = family.people.find((p) => p.id === id);
-    if (!person) {
-      person = { id, name: id.split("@")[0] ?? id, new_apps: false, choices: {} };
-      family.people.push(person);
-    }
-    return person;
-  }
-
-  const ownerName = () => {
-    const name = family.people.find((p) => p.id === family.owner)?.name ?? "Alex";
-    return name.split(/\s+/)[0] ?? name;
-  };
-
-  function allowedFor(v: MockViewer, app: MockApp): boolean {
-    if (isOwnerViewer(v)) return true;
-    return v.registration.ready && personOf(v.person_id).choices[appKey(app)] === true;
-  }
-  const allowed = (app: MockApp) => allowedFor(current, app);
-
-  function requireOwner() {
-    if (!isOwner()) throw new HttpError(403, "forbidden", `Only ${ownerName()} can do this.`);
-  }
-
-  function registrationJson(v: MockViewer, ownerView: boolean): Registration {
-    const r = v.registration;
-    return { ...r, ready: isOwnerViewer(v) || r.ready, error: ownerView ? r.error : null };
-  }
-
-  /** Puts approved devices in the profile (registration with Apple, or a rescan). */
-  function addToProfile(v: MockViewer) {
-    v.ready_at = undefined;
-    Object.assign(v.registration, { apple_registered: true, in_profile: true, ready: true, error: null });
-  }
-
-  /** Registration with Apple takes a few seconds once App Store Connect is connected. */
-  function settle(now: number) {
-    for (const v of family.viewers) {
-      if (v.ready_at !== undefined && v.ready_at <= now && v.registration.status === "approved") {
-        addToProfile(v);
-        family.kiwi_profile ??= `Kiwi * ${iso(now).slice(0, 16).replace("T", " ").replace(":", ".")}`;
-      }
-    }
-  }
-
-  function appleJson(): AppleAccount {
-    const base = db.profiles[0];
-    const members = family.viewers.filter((v) => !isOwnerViewer(v) && v.registration.in_profile).length;
-    return {
-      ...family.apple,
-      profile: base
-        ? {
-            uuid: base.uuid,
-            name: family.kiwi_profile ?? base.name,
-            devices: base.devices + members,
-            expires_at: base.expires_at,
-            kiwi: !!family.kiwi_profile,
-          }
-        : null,
-    };
-  }
-
-  function familyDevice(v: MockViewer): FamilyDevice {
-    const device = v === current ? db.device : v.device;
-    return {
-      id: device.id,
-      name: device.name,
-      person_id: v.person_id,
-      model: v.registration.product ?? device.model,
-      os_version: device.os_version,
-      last_seen: device.last_seen,
-      registration: registrationJson(v, true),
-    };
-  }
-
-  const viewersOf = (person: MockPerson) => family.viewers.filter((v) => v.person_id === person.id);
-
-  function personApps(person: MockPerson): PersonApp[] {
-    const owner = person.id === family.owner;
-    const installed = new Map<string, string>();
-    for (const v of viewersOf(person)) for (const i of installsOf(v)) installed.set(i.app_key, i.version);
-    return visibleApps()
-      .map((app) => {
-        const key = appKey(app);
-        return {
-          source_id: app.source_id,
-          source_name: sourceName(app.source_id),
-          bundle_id: app.bundle_id,
-          name: app.name,
-          subtitle: app.subtitle,
-          icon_url: `/__mock/icon/${app.slug}.svg`,
-          tint_color: app.tint_color,
-          allowed: owner || person.choices[key] === true,
-          explicit: !owner && key in person.choices,
-          installed_version: installed.get(key) ?? null,
-        };
-      })
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }
-
-  function personJson(person: MockPerson): Person {
-    const devices = viewersOf(person).map(familyDevice);
-    return {
-      id: person.id,
-      name: person.name,
-      role: person.id === family.owner ? "owner" : "member",
-      new_apps: person.new_apps,
-      app_count: personApps(person).filter((a) => a.allowed).length,
-      devices,
-      last_seen: devices.map((d) => d.last_seen).sort().at(-1) ?? iso(clock()),
-    };
-  }
-
-  function personDetail(id: string): PersonDetail {
-    const person = family.people.find((p) => p.id === id);
-    if (!person) throw new HttpError(404, "not_found", "Person not found.");
-    return { ...personJson(person), apps: personApps(person) };
-  }
-
-  /** The owner first, then members with a device, by name. */
-  function people(): MockPerson[] {
-    return family.people
-      .filter((p) => p.id === family.owner || viewersOf(p).length > 0)
-      .sort((a, b) => Number(b.id === family.owner) - Number(a.id === family.owner) || a.name.localeCompare(b.name));
-  }
-
-  function familyJson(): Family {
-    return {
-      people: people().map(personJson),
-      pending: family.viewers.filter((v) => v.registration.status === "pending").length,
-      apple: appleJson(),
-    };
-  }
-
-  function appAccess(app: MockApp): AppAccess[] {
-    const key = appKey(app);
-    return people().map((person) => {
-      const viewers = viewersOf(person);
-      const install = viewers.flatMap(installsOf).find((i) => i.app_key === key);
-      const owner = person.id === family.owner;
-      return {
-        person_id: person.id,
-        name: person.name,
-        role: owner ? "owner" : "member",
-        allowed: owner || person.choices[key] === true,
-        installed_version: install?.version ?? null,
-        pending: !owner && !viewers.some((v) => v.registration.ready),
-      };
-    });
-  }
-
-  function deviceViewer(id: string): MockViewer {
-    const v = family.viewers.find((x) => (x === current ? db.device : x.device).id === id);
-    if (!v) throw new HttpError(404, "not_found", "Device not found.");
-    return v;
-  }
 
   // ---- derived state ------------------------------------------------------------------
 
@@ -373,7 +173,7 @@ export function createMockApi(clock: () => number = Date.now) {
   function otherVersions(app: MockApp): OtherVersion[] {
     const key = appKey(app);
     return visibleApps()
-      .filter((o) => appKey(o) !== key && sameApp(o) === sameApp(app) && allowed(o))
+      .filter((o) => appKey(o) !== key && sameApp(o) === sameApp(app))
       .map((o) => ({
         source_id: o.source_id,
         source_name: sourceName(o.source_id),
@@ -540,9 +340,8 @@ export function createMockApi(clock: () => number = Date.now) {
       category: app.category,
       unavailable: state.action === "unavailable" && newest ? release(newest).incompatibility : null,
       orphaned: !db.sources.some((s) => s.id === app.source_id),
-      // The owner's Browse choices don't hide apps from members.
-      hidden: isOwner() && !isShown(app),
-      is_new: isOwner() && isNew(app),
+      hidden: !isShown(app),
+      is_new: isNew(app),
       original: originalJson(app, state.target),
       state,
     };
@@ -560,7 +359,6 @@ export function createMockApi(clock: () => number = Date.now) {
       source_url: db.sources.find((s) => s.id === app.source_id)?.url ?? "",
       original_match: originalOf(app).match,
       other_versions: otherVersions(app),
-      access: isOwner() ? appAccess(app) : null,
     };
   }
 
@@ -575,9 +373,8 @@ export function createMockApi(clock: () => number = Date.now) {
   const visibleApps = () => db.apps.filter((a) => db.sources.some((s) => s.id === a.source_id && s.enabled));
 
   function me(now: number): Me {
-    const owner = isOwner();
-    const updates = visibleApps().filter((a) => allowed(a) && isUpdate(a, now)).length;
-    const errors = owner ? db.sources.filter((s) => s.enabled && s.error) : [];
+    const updates = visibleApps().filter((a) => isUpdate(a, now)).length;
+    const errors = db.sources.filter((s) => s.enabled && s.error);
     const warnings: Warning[] = [];
     if (errors.length > 0) {
       warnings.push({
@@ -611,7 +408,7 @@ export function createMockApi(clock: () => number = Date.now) {
       counts: {
         updates,
         installed: db.installs.length,
-        sources: owner ? db.sources.length : 0,
+        sources: db.sources.length,
         source_errors: errors.length,
         preparing: db.builds.filter((b) => {
           const s = buildStatus(b, now).status;
@@ -619,12 +416,6 @@ export function createMockApi(clock: () => number = Date.now) {
         }).length,
       },
       warnings,
-      access: {
-        role: owner ? "owner" : "member",
-        person: { id: current.person_id, name: personOf(current.person_id).name },
-        owner_name: ownerName(),
-      },
-      registration: registrationJson(current, owner),
     };
   }
 
@@ -634,11 +425,9 @@ export function createMockApi(clock: () => number = Date.now) {
 
   /** Completes simulated installs whose time has come. */
   function tick(now: number) {
-    settle(now);
     for (const attempt of db.attempts) {
       if (attempt.manifest_at === null || attempt.completed_at || now - attempt.manifest_at < attempt.install_ms) continue;
       attempt.completed_at = now;
-      select(attempt.viewer ?? "alex");
       const build = db.builds.find((b) => b.id === attempt.build_id);
       if (!build) continue;
       // Kiwi installs share the signed bundle id of every source's app with this bundle id.
@@ -657,7 +446,6 @@ export function createMockApi(clock: () => number = Date.now) {
       });
       db.device.os_version_source = db.device.os_version_source === "manual" ? "manual" : "installer";
     }
-    select("alex");
   }
 
   // ---- request handling ---------------------------------------------------------------
@@ -731,7 +519,6 @@ export function createMockApi(clock: () => number = Date.now) {
             manifest_at: now,
             install_ms: 6000,
             completed_at: null,
-            viewer: current.key,
           });
         }
         return {
@@ -741,28 +528,6 @@ export function createMockApi(clock: () => number = Date.now) {
         };
       }
       throw new HttpError(404, "not_found", "Not available in mock mode.");
-    }
-
-    // The real server serves a profile; here downloading it stands for installing it in
-    // Settings, after which iOS sends the UDID and Safari opens `/?enrolled=1`.
-    if (parts[0] === "enroll") {
-      const key = family.enrollments.get(parts[1] ?? "");
-      const v = key ? findViewer(key) : undefined;
-      if (!v) return { status: 404, text: "This registration link expired.", contentType: "text/plain" };
-      family.enrollments.delete(parts[1] ?? "");
-      const r = v.registration;
-      const again = r.status === "approved";
-      Object.assign(r, {
-        status: isOwnerViewer(v) || again ? "approved" : "pending",
-        udid: r.udid ?? `00008110-${randomBytes(8).toString("hex").toUpperCase()}`,
-        product: r.product ?? v.device.model ?? "iPhone15,4",
-        os_build: r.os_build ?? "24A434",
-        requested_at: iso(now),
-        decided_at: isOwnerViewer(v) ? iso(now) : again ? r.decided_at : null,
-        error: null,
-      });
-      if (v.device.name === v.device.tailscale_name) v.device.name = `${personOf(v.person_id).name.split(/\s+/)[0]}'s iPhone`;
-      return { status: 302, headers: { Location: "/?enrolled=1" } };
     }
 
     if (method !== "GET" && method !== "HEAD") {
@@ -777,15 +542,6 @@ export function createMockApi(clock: () => number = Date.now) {
       method === m && segments.length === parts.length - 1 && segments.every((s, i) => s === undefined || s === parts[i + 1]);
 
     if (is("GET", "health")) return ok({ ok: true, version: VERSION });
-    const ownerOnly = ["automation", "sources", "store", "signing", "settings", "devices", "family"];
-    if (resource && ownerOnly.includes(resource)) requireOwner();
-    if (resource === "family") return familyRoute(req, now);
-    if (is("POST", "me", "enroll")) {
-      if (db.device.kind !== "tailscale") throw new HttpError(400, "bad_request", "Open Kiwi on the iPhone through Tailscale to register it.");
-      const token = `e-${randomBytes(9).toString("base64url")}`;
-      family.enrollments.set(token, current.key);
-      return ok({ url: `/enroll/${token}/kiwi.mobileconfig` });
-    }
     if (resource === "automation" && !db.settings.kiwi_builds) {
       throw new HttpError(409, "builds_off", "Kiwi Builds is off. Turn it on in Settings.");
     }
@@ -912,22 +668,16 @@ export function createMockApi(clock: () => number = Date.now) {
         const withHidden = ["1", "true"].includes(req.query.get("hidden") ?? "");
         return ok(
           visibleApps()
-            .filter((a) => allowed(a))
             .filter((a) => !sourceFilter || a.source_id === sourceFilter)
-            .filter((a) => withHidden || !isOwner() || isShown(a))
+            .filter((a) => withHidden || isShown(a))
             .filter((a) => !q || [a.name, a.developer, a.subtitle, a.bundle_id].some((f) => f?.toLowerCase().includes(q)))
             .sort((a, b) => a.name.localeCompare(b.name))
             .map((a) => summary(a, now, origin)),
         );
       }
       const app = findApp(id ?? "", sub ?? "");
-      if (method === "POST" && !isOwner() && !current.registration.ready) {
-        throw new HttpError(403, "not_registered", `This iPhone isn't registered yet. Register it in Kiwi; ${ownerName()} approves it.`);
-      }
-      if (!allowed(app)) throw new HttpError(404, "not_found", "App not found.");
       if (is("GET", "apps", id, sub)) return ok(detail(app, now, origin));
       if (is("PATCH", "apps", id, sub)) {
-        requireOwner();
         if (body.hidden !== undefined && typeof body.hidden !== "boolean") {
           throw new HttpError(400, "bad_request", "hidden must be true or false.");
         }
@@ -958,8 +708,7 @@ export function createMockApi(clock: () => number = Date.now) {
 
     if (is("GET", "builds", id)) {
       const build = db.builds.find((b) => b.id === id);
-      const app = build && db.apps.find((a) => appKey(a) === build.app_key);
-      if (!build || (!isOwner() && !(app && allowed(app)))) throw new HttpError(404, "not_found", "Build not found.");
+      if (!build) throw new HttpError(404, "not_found", "Build not found.");
       return ok(buildJson(build, now, origin));
     }
 
@@ -969,8 +718,7 @@ export function createMockApi(clock: () => number = Date.now) {
           .map((i) => db.apps.find((a) => appKey(a) === i.app_key))
           .filter((a): a is MockApp => !!a)
           .sort((a, b) => a.name.localeCompare(b.name))
-          // Apps a member may no longer use: installed, never updated, no detail page.
-          .map((a) => (allowed(a) ? summary(a, now, origin) : { ...summary(a, now, origin), orphaned: true })),
+          .map((a) => summary(a, now, origin)),
       );
     }
     if (is("DELETE", "library", id)) {
@@ -981,20 +729,16 @@ export function createMockApi(clock: () => number = Date.now) {
     }
 
     if (is("GET", "updates")) {
-      return ok(visibleApps().filter((a) => allowed(a) && isUpdate(a, now)).map((a) => summary(a, now, origin)));
+      return ok(visibleApps().filter((a) => isUpdate(a, now)).map((a) => summary(a, now, origin)));
     }
     if (is("POST", "updates", "prepare")) {
       return ok(
         visibleApps()
-          .filter((a) => allowed(a) && isUpdate(a, now))
+          .filter((a) => isUpdate(a, now))
           .map((a) => buildJson(prepare(a, {}, now), now, origin)),
       );
     }
 
-    if (is("POST", "signing", "rescan")) {
-      // As if the owner had added approved iPhones to a profile in the Apple Developer portal.
-      for (const v of family.viewers) if (v.registration.status === "approved" && !v.registration.in_profile) addToProfile(v);
-    }
     if (is("GET", "signing") || is("POST", "signing", "rescan")) {
       const identity = db.identities[0];
       const profile = db.profiles[0];
@@ -1076,115 +820,6 @@ export function createMockApi(clock: () => number = Date.now) {
     throw new HttpError(404, "not_found", `No route for ${method} ${path}.`);
   }
 
-  function familyRoute(req: MockRequest, now: number): MockResponse {
-    const { method } = req;
-    const parts = req.path.split("/").filter(Boolean).map(decodeURIComponent).slice(2);
-    const body = parseBody(req);
-    const ok = (json: unknown, status = 200): MockResponse => ({ status, json });
-    const at = (m: string, ...segments: (string | null)[]) =>
-      method === m && segments.length === parts.length && segments.every((s, i) => s === null || s === parts[i]);
-
-    if (at("GET")) return ok(familyJson());
-    if (at("GET", "apple")) return ok(appleJson());
-    if (at("PUT", "apple")) {
-      const issuer = typeof body.issuer_id === "string" ? body.issuer_id.trim().toLowerCase() : "";
-      const keyId = typeof body.key_id === "string" ? body.key_id.trim().toUpperCase() : "";
-      if (!/^[0-9a-f-]{36}$/.test(issuer)) throw new HttpError(400, "bad_request", "The issuer ID is a UUID like 57246542-96fe-1a63-e053-0824d011072a.");
-      if (!/^[A-Z0-9]{8,16}$/.test(keyId)) throw new HttpError(400, "bad_request", "The key ID has 10 letters and digits, like 2X9R4HXF34.");
-      if (typeof body.private_key !== "string" || !body.private_key.includes("PRIVATE KEY")) {
-        throw new HttpError(400, "bad_request", "The private key is not an App Store Connect API key (.p8 file).");
-      }
-      Object.assign(family.apple, { connected: true, issuer_id: issuer, key_id: keyId, devices: 3, checked_at: iso(now), error: null });
-      for (const v of family.viewers) if (v.registration.status === "approved" && !v.registration.in_profile) v.ready_at = now + 4000;
-      return ok(appleJson());
-    }
-    if (at("DELETE", "apple")) {
-      Object.assign(family.apple, { connected: false, issuer_id: null, key_id: null, devices: null, checked_at: null, error: null });
-      return ok(appleJson());
-    }
-    if (at("POST", "apple", "sync")) {
-      if (!family.apple.connected) throw new HttpError(400, "bad_request", "Connect an App Store Connect API key first.");
-      family.apple.checked_at = iso(now);
-      for (const v of family.viewers) if (v.registration.status === "approved" && !v.registration.in_profile) addToProfile(v);
-      return ok(appleJson());
-    }
-
-    if (parts[0] === "people" && parts[1] !== undefined) {
-      const id = parts[1];
-      if (at("GET", "people", null)) return ok(personDetail(id));
-      const person = family.people.find((p) => p.id === id);
-      if (!person) throw new HttpError(404, "not_found", "Person not found.");
-      const member = () => {
-        if (id === family.owner) throw new HttpError(400, "bad_request", "The owner always has every app.");
-      };
-      if (at("PATCH", "people", null)) {
-        if (typeof body.name === "string") {
-          if (!body.name.trim()) throw new HttpError(400, "bad_request", "Names have 1 to 64 characters.");
-          person.name = body.name.trim();
-        }
-        if (typeof body.new_apps === "boolean") {
-          member();
-          person.new_apps = body.new_apps;
-        }
-        return ok(personDetail(id));
-      }
-      if (at("PATCH", "people", null, "apps")) {
-        member();
-        const apps = body.apps;
-        if (!Array.isArray(apps)) throw new HttpError(400, "bad_request", "apps must be a list.");
-        for (const choice of apps as { source_id?: unknown; bundle_id?: unknown; allowed?: unknown }[]) {
-          const key = `${String(choice.source_id)}/${String(choice.bundle_id)}`;
-          if (!visibleApps().some((a) => appKey(a) === key) || typeof choice.allowed !== "boolean") {
-            throw new HttpError(400, "bad_request", `${String(choice.bundle_id)} is not an app of an enabled source.`);
-          }
-          person.choices[key] = choice.allowed;
-        }
-        return ok(personDetail(id));
-      }
-      if (at("DELETE", "people", null)) {
-        member();
-        family.people = family.people.filter((p) => p !== person);
-        for (const v of viewersOf(person)) {
-          v.registration = { ...v.registration, status: "none", udid: null, requested_at: null, decided_at: null, apple_registered: false, in_profile: false, ready: false };
-        }
-        return { status: 204 };
-      }
-    }
-
-    if (parts[0] === "devices" && parts[1] !== undefined) {
-      const v = deviceViewer(parts[1]);
-      const r = v.registration;
-      if (at("GET", "devices", null)) return ok(familyDevice(v));
-      const decide = (status: Registration["status"]) => {
-        if (r.status === "none") throw new HttpError(404, "not_found", "This device has not sent its ID to Kiwi yet.");
-        Object.assign(r, { status, decided_at: iso(now), error: null });
-      };
-      if (at("POST", "devices", null, "approve")) {
-        decide("approved");
-        if (family.apple.connected && !r.in_profile) v.ready_at = now + 4000;
-        return ok(familyDevice(v));
-      }
-      if (at("POST", "devices", null, "decline")) {
-        decide("declined");
-        Object.assign(r, { in_profile: false, ready: false });
-        return ok(familyDevice(v));
-      }
-      if (at("POST", "devices", null, "register")) {
-        if (!family.apple.connected) {
-          throw new HttpError(400, "bad_request", "Connect an App Store Connect API key first, or add the iPhone in the Apple Developer portal.");
-        }
-        if (r.status !== "approved") throw new HttpError(400, "bad_request", "Approve the device first.");
-        v.ready_at = now + 3000;
-        return ok(familyDevice(v), 202);
-      }
-      if (at("DELETE", "devices", null, "registration")) {
-        v.registration = { ...r, status: "none", udid: null, requested_at: null, decided_at: null, apple_registered: false, in_profile: false, ready: false, error: null };
-        return { status: 204 };
-      }
-    }
-    throw new HttpError(404, "not_found", `No route for ${method} ${req.path}.`);
-  }
-
   function refreshSource(source: MockSource, now: number): MockSource {
     source.last_attempt_at = iso(now);
     if (!source.error) source.last_success_at = iso(now);
@@ -1231,14 +866,11 @@ export function createMockApi(clock: () => number = Date.now) {
     handle(req: MockRequest): MockResponse {
       const now = clock();
       tick(now);
-      select(viewerFromCookie(req.headers.cookie));
       try {
         return route(req, now);
       } catch (error) {
         if (error instanceof HttpError) return { status: error.status, json: { error: { code: error.code, message: error.message } } };
         return { status: 500, json: { error: { code: "internal", message: String(error) } } };
-      } finally {
-        select("alex");
       }
     },
     /** Looks up an app for the generated placeholder artwork. */

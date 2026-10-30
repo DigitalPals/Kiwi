@@ -1,12 +1,11 @@
 import type { ComponentChildren } from "preact";
 import { useCallback, useEffect, useState } from "preact/hooks";
-import { ApiError, api, errorMessage } from "../api/client";
-import type { AppAccess, AppDetail, AppPatch, AppState, AppSummary, Release, StoreApp } from "../api/types";
+import { ApiError, api } from "../api/client";
+import type { AppDetail, AppPatch, AppState, AppSummary, Release, StoreApp } from "../api/types";
 import { ActionButton, VersionButton } from "../components/ActionButton";
 import { AppIcon } from "../components/AppIcon";
-import { Avatar } from "../components/family";
 import { Icon } from "../components/Icon";
-import { Empty, ErrorState, ExpandableText, LinkCell, Loading, Spinner, Toggle, VersionChange } from "../components/ui";
+import { Empty, ErrorState, ExpandableText, LinkCell, Loading, Spinner, VersionChange } from "../components/ui";
 import { replacesLabel, versionChange, type ButtonView } from "../lib/action";
 import { BUILD_SOURCE_ID } from "../lib/automation";
 import {
@@ -21,11 +20,9 @@ import {
   privacyLabel,
   splitBytes,
 } from "../lib/format";
-import { isMember } from "../lib/family";
 import { useDebounced, useOnForeground, useResource, useTask } from "../lib/hooks";
-import { useMe } from "../lib/me";
 import { goBack, previousTab } from "../lib/router";
-import { BUILDS_PATH, FAMILY_PATH, TABS, appPath, buildPath } from "../lib/routes";
+import { BUILDS_PATH, TABS, appPath, buildPath } from "../lib/routes";
 import { originalNote, searchTerm } from "../lib/store";
 import { appColor, heroColors } from "../lib/tint";
 
@@ -293,7 +290,7 @@ function InfoStrip({ app, release }: { app: AppDetail; release: Release | null }
 }
 
 /** The App Store app this app is based on, compared with this app's version. */
-function OriginalSection({ app, onLink }: { app: AppDetail; onLink?: () => void }) {
+function OriginalSection({ app, onLink }: { app: AppDetail; onLink: () => void }) {
   const original = app.original;
   if (!original) {
     if (app.original_match !== "not_found") return null;
@@ -306,11 +303,9 @@ function OriginalSection({ app, onLink }: { app: AppDetail; onLink?: () => void 
               <div class="cell-label">Not in the App Store</div>
               <div class="cell-sub">No App Store app uses {app.bundle_id}</div>
             </div>
-            {onLink && (
-              <button type="button" class="text-button" onClick={onLink}>
-                Link…
-              </button>
-            )}
+            <button type="button" class="text-button" onClick={onLink}>
+              Link…
+            </button>
           </div>
         </div>
       </section>
@@ -468,61 +463,8 @@ function Releases({ app, onState }: { app: AppDetail; onState: (app: AppSummary,
   );
 }
 
-function accessLine(a: AppAccess): string {
-  if (a.installed_version) return `Installed · ${a.installed_version}`;
-  if (a.pending) return "Waiting for approval";
-  return "Not installed";
-}
-
-/** Owner: who may install the app; the same switches as on each person's page. */
-function WhoCanInstall({ app, onChange }: { app: AppDetail; onChange: (app: AppDetail) => void }) {
-  const [error, setError] = useState<string | null>(null);
-  const access = app.access;
-  // Only the owner: nobody to choose for yet.
-  if (!access || !access.some((a) => a.role === "member")) return null;
-  const toggle = async (person: AppAccess, allowed: boolean) => {
-    setError(null);
-    const set = (value: boolean) =>
-      onChange({ ...app, access: access.map((a) => (a.person_id === person.person_id ? { ...a, allowed: value } : a)) });
-    set(allowed);
-    try {
-      await api.setPersonApps(person.person_id, [{ source_id: app.source_id, bundle_id: app.bundle_id, allowed }]);
-    } catch (e) {
-      set(person.allowed);
-      setError(errorMessage(e));
-    }
-  };
-  return (
-    <section class="detail-section">
-      <h2 class="section-heading">Who Can Install</h2>
-      <div class="cells">
-        {access.map((a) => (
-          <div key={a.person_id} class="cell has-icon">
-            <Avatar name={a.name} />
-            <div class="cell-main">
-              <div class="cell-label">
-                {a.name} {a.role === "owner" && <span class="tag">You</span>}
-              </div>
-              <div class="cell-sub">{accessLine(a)}</div>
-            </div>
-            {a.role === "owner" ? (
-              <Icon name="check" size={20} strokeWidth={2.6} class="tone-ok" />
-            ) : (
-              <Toggle checked={a.allowed} onChange={(on) => void toggle(a, on)} label={`Allow ${a.name} to install ${app.name}`} />
-            )}
-          </div>
-        ))}
-      </div>
-      <p class="section-footer">
-        {error ? <span class="danger">{error}</span> : <>Also in <a href={FAMILY_PATH}>Settings › Family</a>, per person.</>}
-      </p>
-    </section>
-  );
-}
-
 function Details(props: {
   app: AppDetail;
-  member: boolean;
   onState: (app: AppSummary, state: AppState) => void;
   onChange: (app: AppDetail) => void;
   onLink: () => void;
@@ -621,9 +563,8 @@ function Details(props: {
         </section>
       )}
 
-      {app.source_id === BUILD_SOURCE_ID && !props.member && <BuildLink bundleId={app.bundle_id} />}
-      <WhoCanInstall app={app} onChange={props.onChange} />
-      <OriginalSection app={app} onLink={props.member ? undefined : props.onLink} />
+      {app.source_id === BUILD_SOURCE_ID && <BuildLink bundleId={app.bundle_id} />}
+      <OriginalSection app={app} onLink={props.onLink} />
       <OtherVersions app={app} />
 
       <InstalledCard app={app} />
@@ -710,8 +651,6 @@ function Details(props: {
 }
 
 export function AppDetailScreen({ sourceId, bundleId }: { sourceId: string; bundleId: string }) {
-  const { me } = useMe();
-  const member = isMember(me);
   const detail = useResource(`app/${sourceId}/${bundleId}`, () => api.app(sourceId, bundleId));
   const { mutate } = detail;
   const onState = useCallback(
@@ -724,7 +663,7 @@ export function AppDetailScreen({ sourceId, bundleId }: { sourceId: string; bund
 
   let content;
   if (detail.data) {
-    content = <Details app={detail.data} member={member} onState={onState} onChange={mutate} onLink={() => setLinking(true)} />;
+    content = <Details app={detail.data} onState={onState} onChange={mutate} onLink={() => setLinking(true)} />;
   } else if (detail.error instanceof ApiError && detail.error.status === 404) {
     content = (
       <Empty icon="inbox" title="App Not Found" message="It may have been removed from its source.">
@@ -741,7 +680,7 @@ export function AppDetailScreen({ sourceId, bundleId }: { sourceId: string; bund
   return (
     <main class="page page-detail page-app" style={hero ? { "--hero": hero.base, "--hero-deep": hero.deep } : undefined}>
       <BackBar
-        trailing={detail.data && !member && <AppMenu app={detail.data} onChange={mutate} onLink={() => setLinking(true)} />}
+        trailing={detail.data && <AppMenu app={detail.data} onChange={mutate} onLink={() => setLinking(true)} />}
       />
       {content}
       {linking && detail.data && <LinkSheet app={detail.data} onChange={mutate} onClose={closeLink} />}

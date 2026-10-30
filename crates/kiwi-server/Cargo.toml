@@ -19,7 +19,6 @@ kiwi-source = { path = "../kiwi-source" }
 kiwi-signer = { path = "../kiwi-signer" }
 kiwi-device = { path = "../kiwi-device" }
 kiwi-push = { path = "../kiwi-push" }
-kiwi-appstore = { path = "../kiwi-appstore" }
 axum = "0.8"
 base64.workspace = true
 chrono.workspace = true
@@ -33,7 +32,6 @@ rusqlite = { version = "0.41", features = ["bundled", "chrono"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "signal", "sync", "time"] }
 tokio-util = { workspace = true, features = ["io"] }
 tracing.workspace = true
@@ -41,7 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url.workspace = true
 
 [dev-dependencies]
-p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 reqwest.workspace = true
 sha1 = "0.11"
+tempfile.workspace = true
 zip.workspace = true

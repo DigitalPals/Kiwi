@@ -69,8 +69,7 @@ A wildcard profile works for every app, so Kiwi can sign anything with it:
    (as well as `~/Library/MobileDevice/Provisioning Profiles`).
 
 When you add an iPhone later, edit the profile in the portal to include it, download it
-again and double-click it. If you would rather have Kiwi do this, give it an App Store
-Connect key. See [Family](family.md#registering-iphones-with-apple).
+again and double-click it.
 
 > [!NOTE]
 > A wildcard profile can't grant capabilities such as push notifications, App Groups or
@@ -91,9 +90,9 @@ certificate, which iOS requires for over-the-air installs.
    **MagicDNS** and, below it, **HTTPS Certificates**.
 3. Install Tailscale on your iPhone and sign in to the same tailnet.
 
-Kiwi treats the Tailscale user who owns the Mac as its **owner**. If the Mac is
-[tagged](https://tailscale.com/kb/1068/tags) (no owner), pass `--owner you@example.com` to
-the installer.
+Kiwi is for one person, its **owner**: the Tailscale user who owns the Mac. Other people on
+your tailnet can't use it. If the Mac is [tagged](https://tailscale.com/kb/1068/tags) (no
+owner), pass `--owner you@example.com` to the installer.
 
 ## 4. Build tools
 
@@ -154,9 +153,9 @@ What it installed and where is listed in [Operations](operations.md). Options:
    Home Screen.
 6. The first time you open an app Kiwi signed, iOS asks you to turn on **Developer Mode**:
    Settings › Privacy & Security › Developer Mode, restart, then **Turn On**. This is
-   needed once per iPhone. Kiwi shows these steps too.
+   needed once per iPhone.
 
-Next: [Using Kiwi](using-kiwi.md), or share Kiwi with your [family](family.md).
+Next: [Using Kiwi](using-kiwi.md).
 
 ## 7. Updating and removing Kiwi
 

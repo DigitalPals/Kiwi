@@ -120,9 +120,7 @@ fn megabytes(bytes: u64) -> String {
     format!("{:.1}", bytes as f64 / 1e6)
 }
 
-/// Prepares the requested version/build/revision, or the target release, for a device
-/// (`udid`: the build must install on it).
-#[allow(clippy::too_many_arguments)]
+/// Prepares the requested version/build/revision, or the target release.
 pub async fn prepare(
     kiwi: &Arc<Kiwi>,
     source_id: &str,
@@ -131,7 +129,6 @@ pub async fn prepare(
     build: Option<&str>,
     revision: Option<u64>,
     device: &DeviceRow,
-    udid: Option<&str>,
 ) -> ApiResult<BuildRow> {
     let app = kiwi
         .catalog
@@ -165,17 +162,14 @@ pub async fn prepare(
     {
         return Err(ApiError::bad_request(reason));
     }
-    prepare_release(kiwi, &app, index, udid).await
+    prepare_release(kiwi, &app, index).await
 }
 
-/// Returns a running or reusable ready build of the release, or queues a new one. With a
-/// `udid`, a ready build is only reused when it installs on that device, and the request
-/// fails when no profile includes the device yet.
+/// Returns a running or reusable ready build of the release, or queues a new one.
 pub async fn prepare_release(
     kiwi: &Arc<Kiwi>,
     app: &CatalogApp,
     index: usize,
-    udid: Option<&str>,
 ) -> ApiResult<BuildRow> {
     let a = app.app();
     let release = &a.releases[index];
@@ -193,14 +187,6 @@ pub async fn prepare_release(
     let plan = signing
         .plan(&signed, now)
         .map_err(ApiError::signing_unavailable)?;
-    if let Some(udid) = udid
-        && !plan.profile.covers(udid)
-    {
-        return Err(ApiError::not_in_profile(format!(
-            "The provisioning profile Kiwi signs {} with ('{}') doesn't include this iPhone yet.",
-            a.name, plan.profile.name
-        )));
-    }
     let key = plan.signing_key(kiwi.settings().strip_watch_apps);
 
     let _guard = kiwi.jobs.prepare.lock().await;
@@ -210,7 +196,7 @@ pub async fn prepare_release(
         }
         let file_ok = b.ipa_path.as_ref().is_some_and(|p| Path::new(p).is_file());
         if b.status.is_active()
-            || (b.usable(now) && b.signing_key.as_ref() == Some(&key) && file_ok && b.covers(udid))
+            || (b.usable(now) && b.signing_key.as_ref() == Some(&key) && file_ok)
         {
             return Ok(b);
         }
@@ -242,7 +228,6 @@ pub async fn prepare_release(
         created_at: now,
         finished_at: None,
         app_version: None,
-        devices: None,
     };
     kiwi.db.save_build(&row)?;
     tracing::info!(build = %row.id, app = %a.name, version = %row.version, "build queued");
@@ -374,7 +359,6 @@ async fn execute(
         bundle_id: row.signed_bundle_id.clone(),
         url_scheme: row.url_scheme.clone(),
         strip_watch,
-        devices: signing.devices.clone(),
     };
     let flag = Arc::new(AtomicBool::new(false));
     let last_step = Arc::new(std::sync::Mutex::new(None));
@@ -430,26 +414,11 @@ async fn execute(
         .len();
     row.size = Some(size as i64);
     row.expires_at = Some(report.expires_at);
-    row.devices = covered_devices(&signing.profiles, &report.profile_uuids);
     row.profile_uuids = report.profile_uuids;
     row.dropped_entitlements = report.dropped_entitlements;
     row.app_version = Some(report.version).filter(|v| !v.trim().is_empty());
     row.ipa_path = Some(output.to_string_lossy().into_owned());
     Ok(())
-}
-
-/// UDIDs every one of the profiles includes (the devices a build signed with them installs
-/// on); `None` when a profile is unknown.
-pub fn covered_devices(profiles: &[kiwi_signer::Profile], uuids: &[String]) -> Option<Vec<String>> {
-    let mut devices: Option<Vec<String>> = None;
-    for uuid in uuids {
-        let profile = profiles.iter().find(|p| &p.uuid == uuid)?;
-        devices = Some(match devices {
-            None => profile.devices.clone(),
-            Some(d) => d.into_iter().filter(|u| profile.covers(u)).collect(),
-        });
-    }
-    devices
 }
 
 /// A previously downloaded copy of the release, by its declared SHA-256 or an earlier build.

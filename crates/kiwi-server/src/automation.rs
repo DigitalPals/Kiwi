@@ -893,7 +893,7 @@ async fn execute(
         source: Arc::new(row),
         index,
     };
-    let build = builds::prepare_release(kiwi, &candidate, 0, None)
+    let build = builds::prepare_release(kiwi, &candidate, 0)
         .await
         .map_err(failed)?;
     kiwi.automation

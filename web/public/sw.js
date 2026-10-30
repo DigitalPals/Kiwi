@@ -23,8 +23,8 @@ self.addEventListener("activate", (event) => {
 
 function isBypassed(url) {
   const path = url.pathname;
-  // The server answers these itself: the API, OTA installs and enrollment profiles.
-  return ["/api", "/ota", "/enroll"].some((p) => path === p || path.startsWith(`${p}/`)) || path === "/sw.js";
+  // The server answers these itself: the API and OTA installs.
+  return ["/api", "/ota"].some((p) => path === p || path.startsWith(`${p}/`)) || path === "/sw.js";
 }
 
 function storeResponse(event, cache, key, response) {

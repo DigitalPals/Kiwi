@@ -5,14 +5,13 @@ import { goBack } from "../lib/router";
 import { Icon, type IconName } from "./Icon";
 
 /** "‹ Settings": back in history, or to `fallback` when the page was opened directly. */
-export function BackBar({ label, fallback, trailing }: { label: string; fallback: string; trailing?: ComponentChildren }) {
+export function BackBar({ label, fallback }: { label: string; fallback: string }) {
   return (
     <div class="back-bar">
       <button type="button" class="back-button" onClick={() => goBack(fallback)}>
         <Icon name="back" size={24} strokeWidth={2.2} />
         {label}
       </button>
-      {trailing}
     </div>
   );
 }
@@ -190,7 +189,6 @@ export function Cell(props: {
 
 /** Tile colours per glyph, like iOS Settings; anything else gets the accent. */
 const TILE_COLORS: Partial<Record<IconName, string>> = {
-  people: "#ff9500",
   phone: "#007aff",
   bell: "#ff3b30",
   shield: "#2fae5f",

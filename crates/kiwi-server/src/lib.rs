@@ -9,8 +9,8 @@ pub mod config;
 pub mod db;
 pub mod devices;
 pub mod error;
-pub mod family;
 pub mod ota;
+pub mod owner;
 pub mod push;
 pub mod routes;
 pub mod scheduler;
@@ -61,10 +61,6 @@ pub struct Paths {
     pub work: PathBuf,
     pub icons: PathBuf,
     pub vapid: PathBuf,
-    /// Development profiles Kiwi created through App Store Connect.
-    pub profiles: PathBuf,
-    /// The App Store Connect API key (0600).
-    pub appstore: PathBuf,
 }
 
 impl Paths {
@@ -76,8 +72,6 @@ impl Paths {
             work: data.join("work"),
             icons: data.join("icons"),
             vapid: data.join("vapid.json"),
-            profiles: data.join("profiles"),
-            appstore: data.join("appstoreconnect.json"),
         }
     }
 }
@@ -92,8 +86,6 @@ pub struct Options {
     pub push: Option<Arc<dyn PushTransport>>,
     /// Base URL of the iTunes Search API ([`store::DEFAULT_URL`]).
     pub app_store_url: String,
-    /// Base URL of the App Store Connect API ([`kiwi_appstore::DEFAULT_URL`]).
-    pub appstore_connect_url: String,
 }
 
 impl Options {
@@ -111,16 +103,13 @@ impl Options {
                 tailscale.bin().display()
             );
         }
-        let mut profile_dirs = kiwi_signer::default_profile_dirs();
-        profile_dirs.push(Paths::new(&config.data_dir).profiles);
         Ok(Self {
             config,
             source_client: ClientOptions::default(),
-            signer: Arc::new(AppleSigner { profile_dirs }),
+            signer: Arc::new(AppleSigner),
             devices: Arc::new(SystemDevices { tailscale }),
             push: None,
             app_store_url: store::DEFAULT_URL.into(),
-            appstore_connect_url: kiwi_appstore::DEFAULT_URL.into(),
         })
     }
 }
@@ -149,7 +138,7 @@ pub struct Kiwi {
     settings: RwLock<Settings>,
     pub jobs: Jobs,
     pub automation: automation::Automation,
-    pub family: family::Family,
+    pub owner: owner::Owner,
     /// IPA byte ranges served per install token (completion of ranged downloads).
     pub served: ServedRanges,
     /// Cancelled on shutdown.
@@ -225,13 +214,7 @@ fn load_vapid(path: &Path, db: &Db) -> Result<kiwi_push::Vapid, String> {
 }
 
 fn prepare_dirs(paths: &Paths, data: &Path) -> std::io::Result<()> {
-    for dir in [
-        data,
-        &paths.downloads,
-        &paths.builds,
-        &paths.icons,
-        &paths.profiles,
-    ] {
+    for dir in [data, &paths.downloads, &paths.builds, &paths.icons] {
         std::fs::create_dir_all(dir)?;
     }
     // Temporary files of interrupted signing and downloads.
@@ -306,12 +289,11 @@ impl Kiwi {
         }
         let devicectl = opts.devices.devicectl_available().await;
         let team = db.meta("team_id").map_err(|e| e.to_string())?;
-        let family = family::Family::new(
+        let owner = owner::Owner::new(
             config.owner.clone(),
             db.meta("owner_login")
                 .map_err(|e| e.to_string())?
                 .filter(|o| !o.is_empty()),
-            opts.appstore_connect_url,
         );
         let hosts = AllowedHosts::new(&fallback_url(&config), config.listen);
         let kiwi = Arc::new(Self {
@@ -334,14 +316,13 @@ impl Kiwi {
             settings: RwLock::new(settings),
             jobs: Jobs::default(),
             automation,
-            family,
+            owner,
             served: ServedRanges::default(),
             cancel: CancellationToken::new(),
             kick: Notify::new(),
             config,
         });
-        family::refresh_required(&kiwi).map_err(|e| e.message)?;
-        family::refresh_owner(&kiwi, true).await;
+        owner::refresh(&kiwi, true).await;
         let info = kiwi.rescan_signing().await;
         match info.error(Utc::now()) {
             Some(e) => tracing::warn!("signing unavailable: {e}"),
@@ -362,11 +343,8 @@ impl Kiwi {
         *self.settings.write().unwrap() = settings;
     }
 
-    /// Identities and profiles, with the approved family devices profiles should include.
     pub fn signing_info(&self) -> SigningInfo {
-        let mut info = self.signing.read().unwrap().clone();
-        info.devices = self.family.required_devices();
-        info
+        self.signing.read().unwrap().clone()
     }
 
     /// Re-reads identities and profiles (blocking work on a worker thread), giving up after
@@ -389,8 +367,8 @@ impl Kiwi {
                 *current = Some(team);
             }
         }
-        *self.signing.write().unwrap() = info;
-        self.signing_info()
+        *self.signing.write().unwrap() = info.clone();
+        info
     }
 
     /// Team of the signing identity (remembered when the keychain is unavailable).

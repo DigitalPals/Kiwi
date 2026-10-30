@@ -191,6 +191,14 @@ CREATE TABLE enrollments (
 ALTER TABLE devices ADD COLUMN person_id TEXT;
 ALTER TABLE builds ADD COLUMN devices TEXT;
 "#,
+    // The family is gone: devices keep `person_id`, their Tailscale user, for the owner check.
+    r#"
+DROP TABLE enrollments;
+DROP TABLE registrations;
+DROP TABLE app_access;
+DROP TABLE people;
+ALTER TABLE builds DROP COLUMN devices;
+"#,
 ];
 
 pub struct Db {
@@ -316,8 +324,8 @@ pub struct DeviceRow {
     pub last_sync_at: Option<Time>,
     pub last_sync_error: Option<String>,
     pub udid: Option<String>,
-    /// The Tailscale user (person) the device belongs to; `None` for browser devices on the
-    /// Mac and devices seen before people existed (both count as the owner's).
+    /// The Tailscale user the device belongs to; `None` for browser devices on the Mac and
+    /// devices seen before Kiwi recorded users (both count as the owner's).
     pub person_id: Option<String>,
     pub first_seen: Time,
     pub last_seen: Time,
@@ -344,67 +352,6 @@ impl DeviceRow {
             last_seen: now,
         }
     }
-}
-
-/// A Tailscale user Kiwi has seen (`people`); see architecture.md "Family".
-#[derive(Debug, Clone, PartialEq)]
-pub struct PersonRow {
-    /// Tailscale login, or `node:<StableID>` for a node without a user.
-    pub id: String,
-    pub name: String,
-    /// Renamed by the owner: the Tailscale display name no longer replaces it.
-    pub renamed: bool,
-    /// Apps first seen after `new_apps_since` are allowed unless chosen by hand.
-    pub new_apps: bool,
-    pub new_apps_since: Option<Time>,
-    pub created_at: Time,
-    pub last_seen: Time,
-}
-
-/// Where a device's family registration stands (`registrations.status`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RegistrationStatus {
-    /// Enrolled; waiting for the owner.
-    Pending,
-    Approved,
-    Declined,
-}
-
-impl RegistrationStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Approved => "approved",
-            Self::Declined => "declined",
-        }
-    }
-    fn parse(s: &str) -> Self {
-        match s {
-            "approved" => Self::Approved,
-            "declined" => Self::Declined,
-            _ => Self::Pending,
-        }
-    }
-}
-
-/// A device's UDID from enrollment and the owner's decision (`registrations`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct RegistrationRow {
-    pub device_id: String,
-    pub udid: String,
-    /// `PRODUCT`, e.g. "iPhone16,2".
-    pub product: Option<String>,
-    /// `VERSION` (the OS build), e.g. "24A434".
-    pub os_build: Option<String>,
-    pub device_name: Option<String>,
-    pub status: RegistrationStatus,
-    pub requested_at: Time,
-    pub decided_at: Option<Time>,
-    /// App Store Connect device id, once Kiwi registered (or found) it in the account.
-    pub apple_id: Option<String>,
-    pub registered_at: Option<Time>,
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -477,24 +424,12 @@ pub struct BuildRow {
     /// `CFBundleShortVersionString` of the signed IPA, which can differ from the release's
     /// version (some sources list the tweak's version).
     pub app_version: Option<String>,
-    /// UDIDs every profile in the signed app includes (the devices it installs on); `None`
-    /// for builds made before Kiwi recorded them.
-    pub devices: Option<Vec<String>>,
 }
 
 impl BuildRow {
     /// Ready and not expired at `now`.
     pub fn usable(&self, now: Time) -> bool {
         self.status == BuildStatus::Ready && self.expires_at.is_none_or(|e| e > now)
-    }
-
-    /// Whether the build installs on the device with this UDID (`None`: unknown device, or
-    /// a build whose devices were not recorded).
-    pub fn covers(&self, udid: Option<&str>) -> bool {
-        match (udid, &self.devices) {
-            (Some(udid), Some(devices)) => devices.iter().any(|d| d.eq_ignore_ascii_case(udid)),
-            _ => true,
-        }
     }
 }
 
@@ -679,9 +614,6 @@ fn build_row(row: &Row) -> rusqlite::Result<BuildRow> {
         created_at: row.get("created_at")?,
         finished_at: row.get("finished_at")?,
         app_version: row.get("app_version")?,
-        devices: row
-            .get::<_, Option<String>>("devices")?
-            .and_then(|d| serde_json::from_str(&d).ok()),
     })
 }
 
@@ -719,35 +651,6 @@ fn install_row(row: &Row) -> rusqlite::Result<InstallRow> {
         installed_at: row.get("installed_at")?,
         last_seen_at: row.get("last_seen_at")?,
         removed_at: row.get("removed_at")?,
-    })
-}
-
-fn person_row(row: &Row) -> rusqlite::Result<PersonRow> {
-    Ok(PersonRow {
-        id: row.get("id")?,
-        name: row.get("name")?,
-        renamed: row.get("renamed")?,
-        new_apps: row.get("new_apps")?,
-        new_apps_since: row.get("new_apps_since")?,
-        created_at: row.get("created_at")?,
-        last_seen: row.get("last_seen")?,
-    })
-}
-
-fn registration_row(row: &Row) -> rusqlite::Result<RegistrationRow> {
-    let status: String = row.get("status")?;
-    Ok(RegistrationRow {
-        device_id: row.get("device_id")?,
-        udid: row.get("udid")?,
-        product: row.get("product")?,
-        os_build: row.get("os_build")?,
-        device_name: row.get("device_name")?,
-        status: RegistrationStatus::parse(&status),
-        requested_at: row.get("requested_at")?,
-        decided_at: row.get("decided_at")?,
-        apple_id: row.get("apple_id")?,
-        registered_at: row.get("registered_at")?,
-        error: row.get("error")?,
     })
 }
 
@@ -1213,6 +1116,16 @@ impl Db {
         })
     }
 
+    pub fn set_device_person(&self, id: &str, person_id: &str) -> rusqlite::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE devices SET person_id = ?2 WHERE id = ?1",
+                params![id, person_id],
+            )
+            .map(drop)
+        })
+    }
+
     /// Deletes cookie devices (`local:`) last seen before `before` that have no installs,
     /// install attempts or push subscriptions (e.g. duplicates from concurrent first requests).
     pub fn delete_stale_local_devices(&self, before: Time) -> rusqlite::Result<usize> {
@@ -1236,266 +1149,6 @@ impl Db {
         })
     }
 
-    // ---- family: people, app access, registrations, enrollments ----
-
-    pub fn people(&self) -> rusqlite::Result<Vec<PersonRow>> {
-        self.with(|c| {
-            c.prepare("SELECT * FROM people ORDER BY name COLLATE NOCASE")?
-                .query_map([], person_row)?
-                .collect()
-        })
-    }
-
-    pub fn person(&self, id: &str) -> rusqlite::Result<Option<PersonRow>> {
-        self.with(|c| {
-            c.query_row("SELECT * FROM people WHERE id = ?1", [id], person_row)
-                .optional()
-        })
-    }
-
-    /// Adds a person seen for the first time (named `name`, else `fallback`), or records
-    /// that they were seen; `name` (the Tailscale display name) replaces the stored one
-    /// unless the owner renamed them.
-    pub fn ensure_person(
-        &self,
-        id: &str,
-        name: Option<&str>,
-        fallback: &str,
-        now: Time,
-    ) -> rusqlite::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO people (id, name, created_at, last_seen)
-                     VALUES (?1, COALESCE(?2, ?3), ?4, ?4)
-                 ON CONFLICT (id) DO UPDATE SET last_seen = ?4,
-                     name = CASE WHEN renamed OR ?2 IS NULL THEN name ELSE ?2 END",
-                params![id, name, fallback, now],
-            )
-            .map(drop)
-        })
-    }
-
-    pub fn rename_person(&self, id: &str, name: &str) -> rusqlite::Result<bool> {
-        self.with(|c| {
-            Ok(c.execute(
-                "UPDATE people SET name = ?2, renamed = 1 WHERE id = ?1",
-                params![id, name],
-            )? > 0)
-        })
-    }
-
-    /// Turns "Apps You Add Later" on or off; turning it on counts apps from `now`.
-    pub fn set_person_new_apps(&self, id: &str, on: bool, now: Time) -> rusqlite::Result<bool> {
-        self.with(|c| {
-            Ok(c.execute(
-                "UPDATE people SET new_apps_since = CASE WHEN ?2 AND NOT new_apps THEN ?3
-                     ELSE new_apps_since END, new_apps = ?2
-                 WHERE id = ?1",
-                params![id, on, now],
-            )? > 0)
-        })
-    }
-
-    /// Forgets a person, their app choices and their devices' registrations.
-    pub fn delete_person(&self, id: &str) -> rusqlite::Result<bool> {
-        self.with(|c| {
-            let tx = c.unchecked_transaction()?;
-            tx.execute(
-                "DELETE FROM registrations WHERE device_id IN
-                     (SELECT id FROM devices WHERE person_id = ?1)",
-                [id],
-            )?;
-            tx.execute("DELETE FROM app_access WHERE person_id = ?1", [id])?;
-            let deleted = tx.execute("DELETE FROM people WHERE id = ?1", [id])? > 0;
-            tx.commit()?;
-            Ok(deleted)
-        })
-    }
-
-    pub fn set_device_person(&self, id: &str, person_id: &str) -> rusqlite::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE devices SET person_id = ?2 WHERE id = ?1",
-                params![id, person_id],
-            )
-            .map(drop)
-        })
-    }
-
-    /// Apps chosen by hand for a person: (source id, bundle id) -> allowed.
-    pub fn app_access(&self, person_id: &str) -> rusqlite::Result<HashMap<(String, String), bool>> {
-        self.with(|c| {
-            c.prepare("SELECT source_id, bundle_id, allowed FROM app_access WHERE person_id = ?1")?
-                .query_map([person_id], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))?
-                .collect()
-        })
-    }
-
-    pub fn set_app_access(
-        &self,
-        person_id: &str,
-        source_id: &str,
-        bundle_id: &str,
-        allowed: bool,
-        now: Time,
-    ) -> rusqlite::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT OR REPLACE INTO app_access (person_id, source_id, bundle_id, allowed,
-                     changed_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![person_id, source_id, bundle_id, allowed, now],
-            )
-            .map(drop)
-        })
-    }
-
-    pub fn registration(&self, device_id: &str) -> rusqlite::Result<Option<RegistrationRow>> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT * FROM registrations WHERE device_id = ?1",
-                [device_id],
-                registration_row,
-            )
-            .optional()
-        })
-    }
-
-    pub fn registrations(&self) -> rusqlite::Result<Vec<RegistrationRow>> {
-        self.with(|c| {
-            c.prepare("SELECT * FROM registrations ORDER BY requested_at")?
-                .query_map([], registration_row)?
-                .collect()
-        })
-    }
-
-    pub fn save_registration(&self, r: &RegistrationRow) -> rusqlite::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT OR REPLACE INTO registrations (device_id, udid, product, os_build,
-                     device_name, status, requested_at, decided_at, apple_id, registered_at, error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    r.device_id,
-                    r.udid,
-                    r.product,
-                    r.os_build,
-                    r.device_name,
-                    r.status.as_str(),
-                    r.requested_at,
-                    r.decided_at,
-                    r.apple_id,
-                    r.registered_at,
-                    r.error
-                ],
-            )
-            .map(drop)
-        })
-    }
-
-    /// The owner's decision; false when the device has no registration.
-    pub fn decide_registration(
-        &self,
-        device_id: &str,
-        status: RegistrationStatus,
-        now: Time,
-    ) -> rusqlite::Result<bool> {
-        self.with(|c| {
-            Ok(c.execute(
-                "UPDATE registrations SET status = ?2, decided_at = ?3, error = NULL
-                 WHERE device_id = ?1",
-                params![device_id, status.as_str(), now],
-            )? > 0)
-        })
-    }
-
-    /// Records the device's App Store Connect id (only for the UDID it was registered with).
-    pub fn set_registration_apple(
-        &self,
-        device_id: &str,
-        udid: &str,
-        apple_id: &str,
-        now: Time,
-    ) -> rusqlite::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE registrations SET apple_id = ?3, registered_at = COALESCE(registered_at, ?4),
-                     error = NULL
-                 WHERE device_id = ?1 AND udid = ?2",
-                params![device_id, udid, apple_id, now],
-            )
-            .map(drop)
-        })
-    }
-
-    pub fn set_registration_error(
-        &self,
-        device_id: &str,
-        error: Option<&str>,
-    ) -> rusqlite::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE registrations SET error = ?2 WHERE device_id = ?1",
-                params![device_id, error],
-            )
-            .map(drop)
-        })
-    }
-
-    pub fn delete_registration(&self, device_id: &str) -> rusqlite::Result<bool> {
-        self.with(|c| {
-            Ok(c.execute(
-                "DELETE FROM registrations WHERE device_id = ?1",
-                [device_id],
-            )? > 0)
-        })
-    }
-
-    /// A new enrollment token for a device (replacing its earlier ones).
-    pub fn create_enrollment(
-        &self,
-        token: &str,
-        device_id: &str,
-        now: Time,
-    ) -> rusqlite::Result<()> {
-        self.with(|c| {
-            let tx = c.unchecked_transaction()?;
-            tx.execute("DELETE FROM enrollments WHERE device_id = ?1", [device_id])?;
-            tx.execute(
-                "INSERT INTO enrollments (token, device_id, created_at) VALUES (?1, ?2, ?3)",
-                params![token, device_id, now],
-            )?;
-            tx.commit()
-        })
-    }
-
-    /// The device of an enrollment token created after `since`.
-    pub fn enrollment(&self, token: &str, since: Time) -> rusqlite::Result<Option<String>> {
-        self.with(|c| {
-            c.query_row(
-                "SELECT device_id, created_at FROM enrollments WHERE token = ?1",
-                [token],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Time>(1)?)),
-            )
-            .optional()
-            .map(|found| {
-                found
-                    .filter(|(_, at)| *at > since)
-                    .map(|(device, _)| device)
-            })
-        })
-    }
-
-    pub fn delete_enrollment(&self, token: &str) -> rusqlite::Result<()> {
-        self.with(|c| {
-            c.execute("DELETE FROM enrollments WHERE token = ?1", [token])
-                .map(drop)
-        })
-    }
-
-    pub fn prune_enrollments(&self, before: Time) -> rusqlite::Result<usize> {
-        self.with(|c| c.execute("DELETE FROM enrollments WHERE created_at < ?1", [before]))
-    }
-
     // ---- builds ----
 
     pub fn save_build(&self, b: &BuildRow) -> rusqlite::Result<()> {
@@ -1504,10 +1157,9 @@ impl Db {
                 "INSERT OR REPLACE INTO builds (id, source_id, bundle_id, app_name, icon_url, version,
                      build, release, artifact_sha256, signed_bundle_id, url_scheme, identity_sha1,
                      profile_uuids, signing_key, expires_at, ipa_path, size, status, step, progress,
-                     error, dropped_entitlements, created_at, finished_at, retryable, app_version,
-                     devices)
+                     error, dropped_entitlements, created_at, finished_at, retryable, app_version)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+                     ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
                 params![
                     b.id,
                     b.source_id,
@@ -1534,8 +1186,7 @@ impl Db {
                     b.created_at,
                     b.finished_at,
                     b.retryable,
-                    b.app_version,
-                    b.devices.as_ref().map(to_json)
+                    b.app_version
                 ],
             )
             .map(drop)
@@ -1949,6 +1600,47 @@ impl Db {
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    #[test]
+    fn migration_5_drops_the_family_and_keeps_device_users() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kiwi.db");
+        {
+            // A database from a Kiwi with the family (schema 4).
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..4] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 4).unwrap();
+            conn.execute_batch(
+                "INSERT INTO people (id, name, created_at, last_seen)
+                     VALUES ('alex@example.com', 'Alex', '2026-10-29T00:00:00Z', '2026-10-29T00:00:00Z');
+                 INSERT INTO devices (id, kind, first_seen, last_seen, person_id)
+                     VALUES ('ts:n1', 'tailscale', '2026-10-29T00:00:00Z', '2026-10-29T00:00:00Z',
+                         'alex@example.com');",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        let gone = db
+            .with(|c| {
+                c.query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name IN
+                         ('people', 'app_access', 'registrations', 'enrollments')",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(gone, 0);
+        let device = db.device("ts:n1").unwrap().unwrap();
+        assert_eq!(device.person_id.as_deref(), Some("alex@example.com"));
+        let now = Utc::now();
+        db.save_build(&crate::testutil::build_row("b1", BuildStatus::Ready, now))
+            .unwrap();
+        assert_eq!(db.builds().unwrap().len(), 1);
+    }
 
     #[test]
     fn catalog_and_store_batches_roll_back_on_failure() {

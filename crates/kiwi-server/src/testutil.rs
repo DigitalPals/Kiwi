@@ -107,7 +107,6 @@ pub fn build_row(id: &str, status: BuildStatus, now: Time) -> BuildRow {
         created_at: now,
         finished_at: None,
         app_version: None,
-        devices: None,
     }
 }
 

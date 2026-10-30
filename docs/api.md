@@ -14,10 +14,8 @@ RFC 3339 strings in UTC. All `/api` responses are `application/json` with
   `message` is user-readable. Codes used: `bad_request`, `csrf`, `not_found`,
   `conflict`, `source_fetch`, `source_parse`, `signing_unavailable`, `app_store` (502,
   the App Store could not be reached), `device_unidentified` (503), `bad_host` (421),
-  `forbidden` (403, only the owner may do this), `not_registered` (403, this iPhone is not
-  registered for the family yet), `not_in_profile` (409, the profile Kiwi signs with does not
-  include this iPhone yet), `apple` (502, App Store Connect refused or could not be reached),
-  `builds_off` (409, Kiwi Builds is turned off in Settings), `internal`.
+  `not_owner` (403, the device belongs to someone other than the owner), `builds_off` (409,
+  Kiwi Builds is turned off in Settings), `internal`.
 - Every request (`/api`, `/ota` and the web app) must be addressed to the public URL's
   host (`Host`, as `tailscale serve` forwards it) or to the listen address
   (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`); an `X-Forwarded-Host`, when
@@ -32,14 +30,8 @@ RFC 3339 strings in UTC. All `/api` responses are `application/json` with
   cookie) before sending other requests, so concurrent first requests do not each create
   a browser device.
 - Path parameters are URL-encoded. `bundle_id` contains dots; it is one path segment.
-- Roles (see "Family" below): the **owner** (the Tailscale user who owns the Mac, or
-  `--owner`) and browser devices on the Mac itself may use every endpoint. **Members** (other
-  Tailscale users) may use `/api/health`, `/api/me` (and `PATCH`, `POST /api/me/enroll`),
-  `/api/apps` (`GET` and `prepare`), `/api/builds/:id`, `/api/library`, `/api/updates`
-  (and `prepare`) and `/api/push/*`; everything else answers `403 forbidden`. A member only
-  sees the apps the owner allowed for them, and only once their iPhone is ready
-  (`Me.registration.ready`); until then `/api/apps` is empty and `prepare` answers
-  `403 not_registered`. Apps they may not use answer `404`.
+- Only the owner may use Kiwi (see "The owner" below): every endpoint but `/api/health`
+  answers other people's devices `403 not_owner`.
 
 ## Kiwi Builds (automation)
 
@@ -114,146 +106,19 @@ internal identifier; refreshing it returns the saved local catalogue without fet
 network. Raw artifacts and provenance files have no HTTP download route. See
 [kiwi-builds.md](kiwi-builds.md) for Mac setup and operational details.
 
-## Family
+## The owner
 
-Kiwi serves the owner's family. A **person** is a Tailscale user (`id` is their Tailscale
-login, e.g. `noah@example.com`; nodes without a user get `node:<StableID>`). The **owner** is the
-Tailscale user who owns the Mac (according to tailscaled), or `--owner`; legacy devices seen before
-people existed and browser devices on the Mac count as the owner's. Everyone else is a
-**member**: they see only the apps the owner allowed for them, once their iPhone is ready.
+Kiwi is one person's: the **owner**, the Tailscale user who owns the Mac (according to
+tailscaled), or `--owner`. Kiwi remembers the owner (meta `owner_login`), so they are still
+known while Tailscale is down. Devices whose Tailscale user is the owner, browser devices on
+the Mac itself and devices seen before Kiwi recorded users are the owner's.
 
-An iPhone becomes ready in three steps:
-
-1. **Enrollment.** `POST /api/me/enroll` returns `{ url }`; the web app opens it in Safari, which
-   downloads a one-time "Profile Service" configuration profile. When the user installs it in
-   Settings, iOS posts the UDID, model (`PRODUCT`), OS build (`VERSION`) and device name to
-   `POST /enroll/:token` (CMS-signed plist, not verified; the 128-bit token, valid for an
-   hour, authorizes it), and Kiwi answers `301` to `<public_url>/?enrolled=1`. Nothing stays
-   installed. The owner's own devices are approved at once.
-2. **Approval.** A member's device is `pending` until the owner approves or declines it; the
-   owner's devices get a push notification ("Register Noah's iPhone?", url
-   `/settings/family/devices/<id>`).
-3. **Registration with Apple.** With an App Store Connect API key (`PUT /api/family/apple`),
-   Kiwi registers approved UDIDs in the developer account and creates its own development
-   profiles ("Kiwi …") for the team wildcard App ID, and for explicit App IDs of apps it
-   signs, that include every enabled device; it saves them in `<data>/profiles` and rescans.
-   Without a key, the owner adds the UDID in the Apple Developer portal and a profile that
-   includes it (Xcode's or a manual one); Kiwi notices it on the next signing scan. The
-   device is **ready** when it is approved and the wildcard profile Kiwi signs with includes
-   its UDID; Kiwi then notifies it ("This iPhone is ready").
-
-Profiles that include more of the approved devices are preferred when signing, then the usual
-order (explicit before wildcard, latest expiry). A ready build is only installed on a device
-whose UDID its profiles include; otherwise `prepare` builds again, or answers
-`409 not_in_profile` when no profile includes the device yet.
-
-Which apps a member may use: an explicit choice per app (`PATCH .../apps`), else, while
-`new_apps` is on, every app Kiwi first saw after `new_apps` was turned on ("Apps You Add
-Later"). Turning an app off hides it and stops its updates; an installed copy keeps working
-until it expires. The owner's Browse choices (hidden/picked apps) do not affect members.
-
-```ts
-type RegistrationStatus = "none" | "pending" | "approved" | "declined";
-
-interface Registration {
-  status: RegistrationStatus;
-  udid: string | null;
-  product: string | null;           // "iPhone16,2" (from enrollment, else the installer UA)
-  os_build: string | null;          // "24A434"
-  requested_at: Timestamp | null;
-  decided_at: Timestamp | null;
-  apple_registered: boolean;        // in the developer account (registered by Kiwi or in a profile)
-  in_profile: boolean;              // the wildcard profile Kiwi signs with includes the UDID
-  ready: boolean;                   // the device may install apps (always true for the owner)
-  error: string | null;             // last registration error (owner views only)
-}
-
-interface FamilyDevice {
-  id: string;
-  name: string;
-  person_id: string | null;
-  model: string | null;             // machine identifier, e.g. "iPhone16,2"
-  os_version: string | null;
-  last_seen: Timestamp;
-  registration: Registration;
-}
-
-interface Person {
-  id: string;                       // Tailscale login, or "node:<StableID>"
-  name: string;                     // Tailscale display name unless renamed
-  role: "owner" | "member";
-  new_apps: boolean;                // "Apps You Add Later" are allowed
-  app_count: number;                // apps they may use (every app for the owner)
-  devices: FamilyDevice[];
-  last_seen: Timestamp;
-}
-
-interface PersonApp {               // one catalog app, for a person
-  source_id: string;
-  source_name: string;
-  bundle_id: string;
-  name: string;
-  subtitle: string | null;
-  icon_url: string | null;
-  tint_color: string | null;
-  allowed: boolean;
-  explicit: boolean;                // chosen by hand (else it follows `new_apps`)
-  installed_version: string | null; // on one of the person's devices
-}
-
-interface PersonDetail extends Person {
-  apps: PersonApp[];                // every app of the enabled sources, by name
-}
-
-interface AppleAccount {
-  connected: boolean;               // an App Store Connect API key is saved
-  issuer_id: string | null;
-  key_id: string | null;
-  devices: number | null;           // devices in the developer account at the last check
-  device_limit: number;             // 100 per device class and membership year
-  checked_at: Timestamp | null;
-  error: string | null;             // last App Store Connect error
-  profile: {                        // the wildcard profile Kiwi signs with
-    uuid: string; name: string; devices: number; expires_at: Timestamp; kiwi: boolean;
-  } | null;
-}
-
-interface Family {
-  people: Person[];                 // the owner first, then by name
-  pending: number;                  // devices waiting for approval
-  apple: AppleAccount;
-}
-```
-
-| Method | Path | Body | Response |
-|---|---|---|---|
-| POST | `/api/me/enroll` | | `{ url }` (a one-time enrollment profile URL for this device) |
-| GET | `/api/family` | | `Family` |
-| GET | `/api/family/people/:id` | | `PersonDetail` |
-| PATCH | `/api/family/people/:id` | `{ name?, new_apps? }` | `PersonDetail` |
-| PATCH | `/api/family/people/:id/apps` | `{ apps: { source_id, bundle_id, allowed }[] }` | `PersonDetail` (not for the owner: `400`) |
-| DELETE | `/api/family/people/:id` | | `204`: forgets a member, their choices and their devices' registrations (installed apps keep working until they expire; the devices stay in the Apple account) |
-| GET | `/api/family/devices/:id` | | `FamilyDevice` |
-| POST | `/api/family/devices/:id/approve` | | `FamilyDevice` (starts registration with Apple when a key is saved) |
-| POST | `/api/family/devices/:id/decline` | | `FamilyDevice` |
-| POST | `/api/family/devices/:id/register` | | `202 FamilyDevice` (tries the registration with Apple again) |
-| DELETE | `/api/family/devices/:id/registration` | | `204` (the device must enroll again) |
-| GET | `/api/family/apple` | | `AppleAccount` |
-| PUT | `/api/family/apple` | `{ issuer_id, key_id, private_key }` (`.p8` text) | `AppleAccount` (checked with App Store Connect first: `400`/`502 apple` with its message) |
-| DELETE | `/api/family/apple` | | `AppleAccount` (forgets the key) |
-| POST | `/api/family/apple/sync` | | `AppleAccount` (registers approved devices and refreshes profiles now) |
-
-Enrollment (no `/api` prefix, token-authorized):
-
-| Method | Path | Response |
-|---|---|---|
-| GET | `/enroll/:token/kiwi.mobileconfig` | `application/x-apple-aspen-config` Profile Service payload |
-| POST | `/enroll/:token` | `301` to `<public_url>/?enrolled=1` (`400` for an unknown or expired token or a body without a UDID) |
-
-Push payloads: to the owner's devices `{ "title": "Register Noah's iPhone?", "body": "Noah ·
-iPhone 15. Tap to choose apps and approve.", "url": "/settings/family/devices/<id>", "tag":
-"register:<id>" }`; to a member's device once it is ready `{ "title": "Kiwi", "body": "This
-iPhone is ready. Open Kiwi to install apps.", "url": "/", "tag": "registered" }`.
+Every other device gets `403 not_owner` from every endpoint but `/api/health`, with a message
+that names the owner ("This Kiwi belongs to alex@example.com. To use it here, sign in to
+Tailscale as alex@example.com on this device."). While Kiwi doesn't know the owner (a tagged
+Mac without `--owner`), that includes every device on the tailnet; the message says to install
+Kiwi again with `./install.sh --owner <your Tailscale login>`. The web app shows the message
+on a page of its own.
 
 ## Types
 
@@ -304,15 +169,7 @@ interface Me {
   };
   push: { vapid_public_key: string; subscribed: boolean };  // subscribed: this device has >= 1 subscription
   counts: { updates: number; installed: number; sources: number; source_errors: number; preparing: number };
-  warnings: Warning[];              // members only get warnings about their own installs and iOS version
-  access: Access;
-  registration: Registration;       // this device's family registration
-}
-
-interface Access {
-  role: "owner" | "member";
-  person: { id: string; name: string } | null;  // null for browser devices on the Mac
-  owner_name: string;               // the owner's first name ("Alex"), for "Apps from Alex"
+  warnings: Warning[];
 }
 
 interface Source {
@@ -401,8 +258,7 @@ interface AppSummary {
   tint_color: string | null;        // "#RRGGBB"
   category: string | null;
   unavailable: string | null;
-  orphaned: boolean;                // installed from a source that was removed, or an app the
-                                    // member may no longer use (detail URL is 404)
+  orphaned: boolean;                // installed from a source that was removed
   hidden: boolean;                  // not shown in Browse
   is_new: boolean;                  // added to a "picked" source since, not chosen yet
   original: Original | null;        // the App Store app it is based on, when known
@@ -452,16 +308,6 @@ interface AppDetail extends AppSummary {
                                     // App Store app (or the linked one is gone), "not based on an
                                     // App Store app", or not looked up yet
   other_versions: OtherVersion[];   // apps with the same original (or, without one, the same bundle id)
-  access: AppAccess[] | null;       // owner only: who may install it (owner first); null for members
-}
-
-interface AppAccess {
-  person_id: string;
-  name: string;
-  role: "owner" | "member";         // the owner always has every app
-  allowed: boolean;
-  installed_version: string | null; // installed on one of the person's devices
-  pending: boolean;                 // the person has no ready device yet
 }
 
 interface Build {

@@ -1,11 +1,9 @@
 import type {
   AppDetail,
-  AppleAccount,
   CoreDevice,
   Device,
   Identity,
   Profile,
-  Registration,
   Settings,
   Source,
   StoreApp,
@@ -89,41 +87,6 @@ export interface MockAttempt {
   manifest_at: number | null;
   install_ms: number;
   completed_at: number | null;
-  /** Whose device installs it (a key of `MockFamily.viewers`); the owner's when unset. */
-  viewer?: string;
-}
-
-/** A Tailscale user. */
-export interface MockPerson {
-  id: string;
-  name: string;
-  new_apps: boolean;
-  /** App key -> allowed, chosen by hand. */
-  choices: Record<string, boolean>;
-}
-
-/** A device the dev app can be viewed as (`?as=<key>`), with its own installs. */
-export interface MockViewer {
-  key: string;
-  person_id: string;
-  device: Device;
-  installs: MockInstall[];
-  subscriptions: Set<string>;
-  registration: Registration;
-  /** Registration with Apple finishes then (App Store Connect is connected). */
-  ready_at?: number;
-}
-
-export interface MockFamily {
-  owner: string;
-  people: MockPerson[];
-  /** The owner's ("alex") first; its device, installs and subscriptions are `MockDb`'s. */
-  viewers: MockViewer[];
-  apple: Omit<AppleAccount, "profile">;
-  /** A Kiwi-made profile replaced Xcode's once App Store Connect registered a device. */
-  kiwi_profile: string | null;
-  /** Enrollment token -> viewer key. */
-  enrollments: Map<string, string>;
 }
 
 export interface MockDb {
@@ -141,7 +104,6 @@ export interface MockDb {
   core_devices: CoreDevice[];
   identities: Identity[];
   profiles: Profile[];
-  family: MockFamily;
 }
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -858,135 +820,7 @@ export function createDb(now: number): MockDb {
     store_url: a.store_url.replace("/nl/", "/us/"),
   }));
 
-  const registration = (patch: Partial<Registration>): Registration => ({
-    status: "none",
-    udid: null,
-    product: null,
-    os_build: null,
-    requested_at: null,
-    decided_at: null,
-    apple_registered: false,
-    in_profile: false,
-    ready: false,
-    error: null,
-    ...patch,
-  });
-  const member = (id: string, name: string, tailscale: string, model: string, os: string): Device => ({
-    id,
-    name,
-    kind: "tailscale",
-    tailscale_name: tailscale,
-    os_version: os,
-    os_version_source: "installer",
-    model,
-    devicectl: null,
-    last_seen: iso(now - 3600_000),
-  });
-  const family: MockFamily = {
-    owner: "alex@example.com",
-    people: [
-      { id: "alex@example.com", name: "Alex Morgan", new_apps: false, choices: {} },
-      {
-        id: "emma@example.com",
-        name: "Emma",
-        new_apps: false,
-        choices: {
-          [key("ytlite", "com.google.ios.youtube")]: true,
-          [key("ytlite", "com.spotify.client")]: true,
-          [key("altstore", "com.rileytestut.Delta")]: true,
-          [key("driftywinds", "com.google.ios.youtubemusic")]: true,
-          [key("ytlite", "com.atebits.Tweetie2")]: false,
-        },
-      },
-      { id: "noah@example.com", name: "Noah", new_apps: false, choices: {} },
-      { id: "kim@example.com", name: "Kim de Vries", new_apps: false, choices: {} },
-    ],
-    viewers: [
-      {
-        key: "alex",
-        person_id: "alex@example.com",
-        device,
-        installs,
-        subscriptions: new Set(),
-        registration: registration({ ready: true }),
-      },
-      {
-        key: "emma",
-        person_id: "emma@example.com",
-        device: member("ts:nEMMA1CNTRL", "Emma's iPhone", "emma-iphone", "iPhone17,3", "27.0"),
-        installs: [
-          {
-            app_key: key("ytlite", "com.google.ios.youtube"),
-            version: "21.43.5",
-            build: "21.43.5",
-            origin: "kiwi",
-            verified: false,
-            installed_at: now - 9 * DAY,
-            expires_at: PROFILE_EXPIRES,
-            kiwi_scheme: true,
-          },
-          {
-            app_key: key("ytlite", "com.atebits.Tweetie2"),
-            version: "11.2",
-            build: "11.2",
-            origin: "kiwi",
-            verified: false,
-            installed_at: now - 30 * DAY,
-            expires_at: PROFILE_EXPIRES,
-            kiwi_scheme: true,
-          },
-        ],
-        subscriptions: new Set(),
-        registration: registration({
-          status: "approved",
-          udid: "00008140-00123456789A801E",
-          product: "iPhone17,3",
-          os_build: "24A335",
-          requested_at: iso(now - 17 * DAY),
-          decided_at: iso(now - 17 * DAY),
-          apple_registered: true,
-          in_profile: true,
-          ready: true,
-        }),
-      },
-      {
-        key: "noah",
-        person_id: "noah@example.com",
-        device: member("ts:nNOAH1CNTRL", "Noah's iPhone", "noah-iphone", "iPhone15,4", "27.0.1"),
-        installs: [],
-        subscriptions: new Set(),
-        registration: registration({
-          status: "pending",
-          udid: "00008110-001A2B3C4D5E801E",
-          product: "iPhone15,4",
-          os_build: "24A434",
-          requested_at: iso(now - 2 * 60_000),
-        }),
-      },
-      {
-        key: "kim",
-        person_id: "kim@example.com",
-        device: member("ts:nKIM1CNTRL", "kim-iphone", "kim-iphone", "iPhone18,3", "27.0.1"),
-        installs: [],
-        subscriptions: new Set(),
-        registration: registration({}),
-      },
-    ],
-    apple: {
-      connected: false,
-      issuer_id: null,
-      key_id: null,
-      devices: null,
-      device_limit: 100,
-      checked_at: null,
-      error: null,
-    },
-    kiwi_profile: null,
-    enrollments: new Map(),
-  };
-
   return {
-    family,
     device,
     installer_os: "27.0.1",
     store: { nl, us },

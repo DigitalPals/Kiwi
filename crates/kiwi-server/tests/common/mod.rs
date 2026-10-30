@@ -366,8 +366,6 @@ pub struct FakeSigner {
     pub signed: AtomicUsize,
     pub fail: Mutex<Option<String>>,
     pub profile_expiry: Mutex<DateTime<Utc>>,
-    /// Kiwi's own profile directory (`<data>/profiles`), read like the real signer does.
-    pub profile_dir: Mutex<Option<PathBuf>>,
     /// Requests the signer received.
     pub requests: Mutex<Vec<SignRequest>>,
 }
@@ -379,7 +377,6 @@ impl Default for FakeSigner {
             signed: AtomicUsize::new(0),
             fail: Mutex::new(None),
             profile_expiry: Mutex::new(Utc::now() + chrono::Duration::days(360)),
-            profile_dir: Mutex::new(None),
             requests: Mutex::default(),
         }
     }
@@ -391,21 +388,7 @@ impl Signer for FakeSigner {
     }
     fn profiles(&self) -> Vec<(PathBuf, Result<Profile, String>)> {
         let p = wildcard_profile(*self.profile_expiry.lock().unwrap());
-        let mut all = vec![(p.path.clone(), Ok(p))];
-        if let Some(dir) = self.profile_dir.lock().unwrap().clone() {
-            for (path, parsed) in kiwi_signer::load_profiles(&[dir]) {
-                all.push((
-                    path.clone(),
-                    parsed
-                        .map(|mut p| {
-                            p.path = path;
-                            p
-                        })
-                        .map_err(|e| e.to_string()),
-                ));
-            }
-        }
-        all
+        vec![(p.path.clone(), Ok(p))]
     }
     fn sign(
         &self,
@@ -430,14 +413,9 @@ impl Signer for FakeSigner {
         std::fs::copy(&req.input_ipa, &req.output_ipa).map_err(|e| e.to_string())?;
         self.signed.fetch_add(1, Ordering::SeqCst);
         self.requests.lock().unwrap().push(req.clone());
-        let profile = kiwi_signer::select_profile_for(
-            &req.profiles,
-            &req.identity,
-            &req.bundle_id,
-            &req.devices,
-            Utc::now(),
-        )
-        .map_err(|e| e.to_string())?;
+        let profile =
+            kiwi_signer::select_profile(&req.profiles, &req.identity, &req.bundle_id, Utc::now())
+                .map_err(|e| e.to_string())?;
         let info = kiwi_source::inspect_ipa(&req.input_ipa, &CancellationToken::new())
             .map_err(|e| e.to_string())?;
         Ok(SignReport {
@@ -503,8 +481,8 @@ impl FakeDevices {
         devices
     }
 
-    /// Adds a family member's iPhone at `ip`.
-    pub fn add_member(&self, ip: &str, stable_id: &str, login: &str, name: &str) {
+    /// Adds another Tailscale user's iPhone at `ip`.
+    pub fn add_peer(&self, ip: &str, stable_id: &str, login: &str, name: &str) {
         self.peers.lock().unwrap().insert(
             ip.parse().unwrap(),
             TailscalePeer {
@@ -673,26 +651,7 @@ impl TestKiwi {
         allow_simulators: bool,
         app_store_url: &str,
     ) -> Self {
-        Self::start_full(
-            dir,
-            devices,
-            allow_simulators,
-            app_store_url,
-            "http://127.0.0.1:9",
-        )
-        .await
-    }
-
-    /// With App Store Connect served at `appstore_connect_url` (e.g. a [`FakeAppStoreConnect`]).
-    pub async fn start_full(
-        dir: tempfile::TempDir,
-        devices: FakeDevices,
-        allow_simulators: bool,
-        app_store_url: &str,
-        appstore_connect_url: &str,
-    ) -> Self {
         let signer = Arc::new(FakeSigner::default());
-        *signer.profile_dir.lock().unwrap() = Some(dir.path().join("data/profiles"));
         let devices = Arc::new(devices);
         let push = Arc::new(FakePush::default());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -715,7 +674,6 @@ impl TestKiwi {
             devices: devices.clone(),
             push: Some(push.clone()),
             app_store_url: app_store_url.into(),
-            appstore_connect_url: appstore_connect_url.into(),
         })
         .await
         .unwrap();
@@ -757,7 +715,7 @@ impl TestKiwi {
         }
     }
 
-    /// Another tailnet device, as proxied by `tailscale serve` (see [`FakeDevices::add_member`]).
+    /// Another tailnet device, as proxied by `tailscale serve` (see [`FakeDevices::add_peer`]).
     pub fn device(&self, ip: &str) -> Api {
         Api {
             forwarded_for: Some(ip.into()),
@@ -944,333 +902,4 @@ pub async fn wait_until(mut cond: impl FnMut() -> bool) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("condition not reached");
-}
-
-// ---- family fixtures ----
-
-pub const NOAH_IP: &str = "100.64.0.8";
-pub const NOAH_ID: &str = "ts:nNOAH1CNTRL";
-pub const NOAH_LOGIN: &str = "noah@example.com";
-pub const NOAH_UDID: &str = "00008110-001A2B3C4D5E801E";
-/// The phone in [`wildcard_profile`].
-pub const ALEX_UDID: &str = "00008150-000000000000001E";
-
-fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
-    let len = content.len();
-    let mut out = vec![tag];
-    if len < 0x80 {
-        out.push(len as u8);
-    } else {
-        let bytes: Vec<u8> = len
-            .to_be_bytes()
-            .into_iter()
-            .skip_while(|&b| b == 0)
-            .collect();
-        out.push(0x80 | bytes.len() as u8);
-        out.extend(bytes);
-    }
-    out.extend_from_slice(content);
-    out
-}
-
-/// A CMS SignedData envelope around `content` (not really signed).
-pub fn cms(content: &[u8]) -> Vec<u8> {
-    let data_oid = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x01];
-    let signed_oid = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02];
-    let encap = tlv(
-        0x30,
-        &[tlv(0x06, &data_oid), tlv(0xa0, &tlv(0x04, content))].concat(),
-    );
-    let signed = tlv(
-        0x30,
-        &[tlv(0x02, &[1]), tlv(0x31, &[]), encap, tlv(0x31, &[])].concat(),
-    );
-    tlv(0x30, &[tlv(0x06, &signed_oid), tlv(0xa0, &signed)].concat())
-}
-
-/// A `.mobileprovision` for the test identity.
-pub fn mobileprovision(
-    uuid: &str,
-    name: &str,
-    app_id: &str,
-    devices: &[String],
-    expires: DateTime<Utc>,
-) -> Vec<u8> {
-    use plist::{Dictionary, Value};
-    let date = |t: DateTime<Utc>| Value::Date(std::time::SystemTime::from(t).into());
-    let mut entitlements = Dictionary::new();
-    entitlements.insert(
-        "application-identifier".into(),
-        Value::String(format!("{TEAM}.{app_id}")),
-    );
-    entitlements.insert(
-        "com.apple.developer.team-identifier".into(),
-        Value::String(TEAM.into()),
-    );
-    entitlements.insert("get-task-allow".into(), Value::Boolean(true));
-    entitlements.insert(
-        "keychain-access-groups".into(),
-        Value::Array(vec![Value::String(format!("{TEAM}.*"))]),
-    );
-    let mut root = Dictionary::new();
-    root.insert("UUID".into(), Value::String(uuid.into()));
-    root.insert("Name".into(), Value::String(name.into()));
-    root.insert(
-        "TeamIdentifier".into(),
-        Value::Array(vec![Value::String(TEAM.into())]),
-    );
-    root.insert(
-        "CreationDate".into(),
-        date(expires - chrono::Duration::days(365)),
-    );
-    root.insert("ExpirationDate".into(), date(expires));
-    root.insert(
-        "ProvisionedDevices".into(),
-        Value::Array(devices.iter().map(|d| Value::String(d.clone())).collect()),
-    );
-    root.insert("Entitlements".into(), Value::Dictionary(entitlements));
-    root.insert(
-        "DeveloperCertificates".into(),
-        Value::Array(vec![Value::Data(CERT_DER.to_vec())]),
-    );
-    root.insert(
-        "Platform".into(),
-        Value::Array(vec![Value::String("iOS".into())]),
-    );
-    let mut xml = Vec::new();
-    plist::to_writer_xml(&mut xml, &Value::Dictionary(root)).unwrap();
-    cms(&xml)
-}
-
-/// What iOS posts to a Profile Service URL.
-pub fn enrollment_body(token: &str, udid: &str, product: &str) -> Vec<u8> {
-    let xml = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0"><dict>
-<key>CHALLENGE</key><string>{token}</string>
-<key>DEVICE_NAME</key><string>iPhone</string>
-<key>PRODUCT</key><string>{product}</string>
-<key>UDID</key><string>{udid}</string>
-<key>VERSION</key><string>24A434</string>
-</dict></plist>"#
-    );
-    cms(xml.as_bytes())
-}
-
-/// An App Store Connect API key (`.p8`).
-pub fn p8() -> String {
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    let secret = [7u8; 32];
-    let ec = tlv(0x30, &[tlv(0x02, &[1]), tlv(0x04, &secret)].concat());
-    let algorithm = tlv(
-        0x30,
-        &[
-            tlv(0x06, &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01]),
-            tlv(0x06, &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]),
-        ]
-        .concat(),
-    );
-    let der = tlv(0x30, &[tlv(0x02, &[0]), algorithm, tlv(0x04, &ec)].concat());
-    format!(
-        "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
-        STANDARD.encode(der)
-    )
-}
-
-/// A device in the fake developer account: (id, udid, status).
-pub type AccountDevice = (String, String, String);
-
-#[derive(Clone, Default)]
-struct AscState {
-    devices: Arc<Mutex<Vec<AccountDevice>>>,
-    profiles: Arc<Mutex<Vec<Value>>>,
-    requests: Arc<Mutex<Vec<String>>>,
-    reject_key: Arc<AtomicBool>,
-}
-
-/// A fake App Store Connect API: devices, the team wildcard App ID, one certificate (the
-/// test identity's) and profiles built from the devices they name.
-pub struct FakeAppStoreConnect {
-    pub base: String,
-    pub devices: Arc<Mutex<Vec<AccountDevice>>>,
-    /// Requests to create profiles (JSON bodies).
-    pub profiles: Arc<Mutex<Vec<Value>>>,
-    /// "METHOD path" of every request.
-    pub requests: Arc<Mutex<Vec<String>>>,
-    /// Answers 401 while set.
-    pub reject_key: Arc<AtomicBool>,
-    cancel: CancellationToken,
-}
-
-impl FakeAppStoreConnect {
-    pub async fn start() -> Self {
-        use axum::{
-            extract::Request,
-            middleware::{self, Next},
-            routing::{patch, post},
-        };
-        use base64::{Engine, engine::general_purpose::STANDARD};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let state = AscState::default();
-        // Alex's phone is in the account already.
-        state
-            .devices
-            .lock()
-            .unwrap()
-            .push(("DALEX".into(), ALEX_UDID.into(), "ENABLED".into()));
-        let device_json = |(id, udid, status): &AccountDevice| {
-            json!({ "type": "devices", "id": id, "attributes": {
-                "name": id, "udid": udid, "platform": "IOS", "status": status,
-                "deviceClass": "IPHONE" }})
-        };
-        let guard = |State(s): State<AscState>, req: Request, next: Next| async move {
-            s.requests
-                .lock()
-                .unwrap()
-                .push(format!("{} {}", req.method(), req.uri().path()));
-            let bearer = req
-                .headers()
-                .get(header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v.starts_with("Bearer ey"));
-            if !bearer || s.reject_key.load(Ordering::SeqCst) {
-                return (
-                    axum::http::StatusCode::UNAUTHORIZED,
-                    axum::Json(json!({ "errors": [{ "status": "401", "title": "Unauthorized" }] })),
-                )
-                    .into_response();
-            }
-            next.run(req).await
-        };
-        let app = Router::new()
-            .route(
-                "/v1/devices",
-                get(move |State(s): State<AscState>| async move {
-                    let list: Vec<Value> = s.devices.lock().unwrap().iter().map(device_json).collect();
-                    axum::Json(json!({ "data": list, "links": {} }))
-                })
-                .post(move |State(s): State<AscState>, axum::Json(body): axum::Json<Value>| async move {
-                    let udid = body["data"]["attributes"]["udid"].as_str().unwrap().to_owned();
-                    let mut devices = s.devices.lock().unwrap();
-                    let device = (format!("D{}", devices.len() + 1), udid, "ENABLED".to_owned());
-                    devices.push(device.clone());
-                    (axum::http::StatusCode::CREATED, axum::Json(json!({ "data": device_json(&device) })))
-                }),
-            )
-            .route(
-                "/v1/devices/{id}",
-                patch(move |State(s): State<AscState>, axum::extract::Path(id): axum::extract::Path<String>| async move {
-                    let mut devices = s.devices.lock().unwrap();
-                    let d = devices.iter_mut().find(|d| d.0 == id).unwrap();
-                    d.2 = "ENABLED".into();
-                    axum::Json(json!({ "data": device_json(d) }))
-                }),
-            )
-            .route(
-                "/v1/bundleIds",
-                get(|| async {
-                    axum::Json(json!({ "data": [{ "type": "bundleIds", "id": "BWILD",
-                        "attributes": { "identifier": "*", "name": "XC Wildcard", "platform": "IOS" } }] }))
-                }),
-            )
-            .route(
-                "/v1/certificates",
-                get(move || async move {
-                    axum::Json(json!({ "data": [{ "type": "certificates", "id": "CDEV", "attributes": {
-                        "name": "Apple Development: Test", "certificateType": "DEVELOPMENT",
-                        "certificateContent": STANDARD.encode(CERT_DER) } }] }))
-                }),
-            )
-            .route(
-                "/v1/profiles",
-                post(move |State(s): State<AscState>, axum::Json(body): axum::Json<Value>| async move {
-                    s.profiles.lock().unwrap().push(body.clone());
-                    let ids: Vec<String> = body["data"]["relationships"]["devices"]["data"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|d| d["id"].as_str().unwrap().to_owned())
-                        .collect();
-                    let udids: Vec<String> = s
-                        .devices
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .filter(|d| ids.contains(&d.0))
-                        .map(|d| d.1.clone())
-                        .collect();
-                    let name = body["data"]["attributes"]["name"].as_str().unwrap().to_owned();
-                    let n = s.profiles.lock().unwrap().len();
-                    let uuid = format!("0000000{n}-0000-4000-8000-00000000000{n}");
-                    let content = mobileprovision(
-                        &uuid,
-                        &name,
-                        "*",
-                        &udids,
-                        Utc::now() + chrono::Duration::days(364),
-                    );
-                    (axum::http::StatusCode::CREATED, axum::Json(json!({ "data": {
-                        "type": "profiles", "id": format!("P{n}"), "attributes": {
-                            "name": name, "uuid": uuid, "profileType": "IOS_APP_DEVELOPMENT",
-                            "profileContent": STANDARD.encode(content) } } })))
-                }),
-            )
-            .layer(middleware::from_fn_with_state(state.clone(), guard))
-            .with_state(state.clone());
-        let cancel = CancellationToken::new();
-        let stop = cancel.clone();
-        tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(stop.cancelled_owned())
-                .await
-                .unwrap();
-        });
-        Self {
-            base,
-            devices: state.devices,
-            profiles: state.profiles,
-            requests: state.requests,
-            reject_key: state.reject_key,
-            cancel,
-        }
-    }
-}
-
-impl Drop for FakeAppStoreConnect {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-    }
-}
-
-/// Enrolls a device like iOS does: asks for a profile, downloads it and posts the UDID.
-/// Returns the redirect's location.
-pub async fn enroll(k: &TestKiwi, api: &Api, udid: &str) -> String {
-    let started = api.post("/api/me/enroll", json!({})).await;
-    assert_eq!(started.status, StatusCode::OK, "{}", started.body);
-    let url = started.body["url"].as_str().unwrap().to_owned();
-    let profile = api.request(Method::GET, &url).send().await.unwrap();
-    assert_eq!(profile.status(), StatusCode::OK);
-    assert_eq!(
-        profile.headers()["content-type"],
-        "application/x-apple-aspen-config"
-    );
-    let text = profile.text().await.unwrap();
-    let token = url
-        .strip_prefix("/enroll/")
-        .unwrap()
-        .strip_suffix("/kiwi.mobileconfig")
-        .unwrap()
-        .to_owned();
-    assert!(text.contains(&format!("https://kiwi.test/enroll/{token}")));
-    let posted = api
-        .request(Method::POST, &format!("/enroll/{token}"))
-        .header("Content-Type", "application/pkcs7-signature")
-        .body(enrollment_body(&token, udid, "iPhone15,4"))
-        .send()
-        .await
-        .unwrap();
-    let _ = k;
-    assert_eq!(posted.status(), StatusCode::MOVED_PERMANENTLY);
-    posted.headers()["location"].to_str().unwrap().to_owned()
 }

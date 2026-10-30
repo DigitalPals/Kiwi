@@ -25,17 +25,15 @@ pub trait Signer: Send + Sync + 'static {
     ) -> Result<SignReport, String>;
 }
 
-/// The keychain, Xcode's profile directories (and Kiwi's own) and `codesign` (macOS only).
-pub struct AppleSigner {
-    pub profile_dirs: Vec<PathBuf>,
-}
+/// The keychain, Xcode's profile directories and `codesign` (macOS only).
+pub struct AppleSigner;
 
 impl Signer for AppleSigner {
     fn identities(&self) -> Result<Vec<Identity>, String> {
         kiwi_signer::list_identities().map_err(|e| e.to_string())
     }
     fn profiles(&self) -> Vec<(PathBuf, Result<Profile, String>)> {
-        kiwi_signer::load_profiles(&self.profile_dirs)
+        kiwi_signer::load_profiles(&kiwi_signer::default_profile_dirs())
             .into_iter()
             .map(|(path, r)| (path, r.map_err(|e| e.to_string())))
             .collect()
@@ -99,8 +97,6 @@ pub struct SigningInfo {
     pub identity_error: Option<String>,
     pub profiles: Vec<Profile>,
     pub profile_errors: Vec<String>,
-    /// UDIDs of the approved family devices: profiles that include more of them win.
-    pub devices: Vec<String>,
 }
 
 /// How a bundle id would be signed now.
@@ -186,23 +182,19 @@ impl SigningInfo {
             identity_error,
             profiles,
             profile_errors,
-            devices: Vec::new(),
         }
     }
 
     fn plan_with(&self, profiles: &[Profile], bundle_id: &str, now: Time) -> Result<Plan, String> {
         let mut first_error = None;
         let mut best: Option<Plan> = None;
-        let rank = |p: &Plan| (p.profile.covered(&self.devices), p.expires_at);
         for identity in &self.identities {
-            match kiwi_signer::select_profile_for(profiles, identity, bundle_id, &self.devices, now)
-            {
+            match kiwi_signer::select_profile(profiles, identity, bundle_id, now) {
                 Ok(profile) => {
                     let expires_at = identity
                         .expires_at
                         .map_or(profile.expires_at, |e| e.min(profile.expires_at));
-                    let candidate = (profile.covered(&self.devices), expires_at);
-                    if best.as_ref().is_none_or(|b| candidate > rank(b)) {
+                    if best.as_ref().is_none_or(|b| expires_at > b.expires_at) {
                         best = Some(Plan {
                             identity: identity.clone(),
                             profile: profile.clone(),

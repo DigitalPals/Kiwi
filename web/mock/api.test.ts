@@ -1,15 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type {
   AppDetail,
-  AppleAccount,
   AppSummary,
   AutomationOverview,
   AutomationState,
   Build,
-  Family,
-  FamilyDevice,
   Me,
-  PersonDetail,
   Settings,
   Source,
   StoreApp,
@@ -19,15 +15,13 @@ import { compareVersions, createMockApi, shortName } from "./api.ts";
 function setup() {
   let now = Date.parse("2026-10-29T12:00:00Z");
   const api = createMockApi(() => now);
-  /** `as`: the viewer (family member) asking; the owner by default. */
-  const request = (method: string, path: string, body?: unknown, as?: string) => {
+  const request = (method: string, path: string, body?: unknown) => {
     const url = new URL(path, "http://localhost:5173");
-    const cookie = as ? { cookie: `kiwi_mock_as=${as}` } : {};
     return api.handle({
       method,
       path: url.pathname,
       query: url.searchParams,
-      headers: method === "GET" ? cookie : { ...cookie, "x-kiwi": "1", "content-type": "application/json" },
+      headers: method === "GET" ? {} : { "x-kiwi": "1", "content-type": "application/json" },
       body: body === undefined ? "" : JSON.stringify(body),
       origin: "http://localhost:5173",
     });
@@ -248,111 +242,5 @@ describe("mock api", () => {
     expect(compareVersions("1.10", "1.9")).toBe(1);
     expect(compareVersions("2.0", "2.0.0")).toBe(0);
     expect(compareVersions("1.0", "1.0.1")).toBe(-1);
-  });
-});
-
-describe("mock family", () => {
-  it("shows members only their apps and keeps the owner's pages to the owner", () => {
-    const { request } = setup();
-    const me = request("GET", "/api/me", undefined, "emma").json as Me;
-    expect(me.access).toEqual({ role: "member", person: { id: "emma@example.com", name: "Emma" }, owner_name: "Alex" });
-    expect(me.registration.ready).toBe(true);
-    expect(me.counts.sources).toBe(0);
-    const apps = request("GET", "/api/apps", undefined, "emma").json as AppSummary[];
-    expect(apps.map((a) => a.name)).toEqual(["Delta", "EeveeSpotify", "YouTubePlus", "YT Music Ultimate"]);
-    expect(apps.every((a) => !a.hidden && !a.is_new)).toBe(true);
-    for (const path of ["/api/sources", "/api/settings", "/api/family", "/api/automation"]) {
-      const r = request("GET", path, undefined, "emma");
-      expect(r.status, path).toBe(403);
-      expect((r.json as { error: { code: string; message: string } }).error).toEqual({ code: "forbidden", message: "Only Alex can do this." });
-    }
-    expect(request("GET", "/api/apps/ytlite/com.atebits.Tweetie2", undefined, "emma").status).toBe(404);
-    const library = request("GET", "/api/library", undefined, "emma").json as AppSummary[];
-    expect(library.find((a) => a.name === "BHTwitter")?.orphaned).toBe(true);
-    expect(library.find((a) => a.name === "YouTubePlus")?.orphaned).toBe(false);
-    // The owner's own view is unchanged, with who can install each app.
-    expect((request("GET", "/api/me").json as Me).access.role).toBe("owner");
-    const detail = request("GET", "/api/apps/ytlite/com.google.ios.youtube").json as AppDetail;
-    expect(detail.access?.map((a) => [a.name, a.allowed, a.installed_version])).toEqual([
-      ["Alex Morgan", true, "21.43.5"],
-      ["Emma", true, "21.43.5"],
-      ["Kim de Vries", false, null],
-      ["Noah", false, null],
-    ]);
-    expect((request("GET", "/api/apps/ytlite/com.google.ios.youtube", undefined, "emma").json as AppDetail).access).toBeNull();
-  });
-
-  it("registers a new iPhone: enroll, approve, add to a profile, pick apps", () => {
-    const { request } = setup();
-    const kim = (method: string, path: string, body?: unknown) => request(method, path, body, "kim");
-    expect((kim("GET", "/api/me").json as Me).registration.status).toBe("none");
-    expect(kim("GET", "/api/apps").json).toEqual([]);
-    const prepare = kim("POST", "/api/apps/ytlite/com.google.ios.youtube/prepare", {});
-    expect(prepare.status).toBe(403);
-    expect((prepare.json as { error: { code: string } }).error.code).toBe("not_registered");
-
-    const { url } = kim("POST", "/api/me/enroll", {}).json as { url: string };
-    expect(url).toMatch(/^\/enroll\/e-[\w-]+\/kiwi\.mobileconfig$/);
-    const enrolled = kim("GET", url);
-    expect(enrolled.status).toBe(302);
-    expect(enrolled.headers?.Location).toBe("/?enrolled=1");
-    expect(kim("GET", url).status).toBe(404);
-    const me = kim("GET", "/api/me").json as Me;
-    expect(me.registration.status).toBe("pending");
-    expect(me.device.name).toBe("Kim's iPhone");
-
-    const family = request("GET", "/api/family").json as Family;
-    expect(family.pending).toBe(2);
-    expect(family.people.map((p) => p.name)).toEqual(["Alex Morgan", "Emma", "Kim de Vries", "Noah"]);
-    const approved = request("POST", "/api/family/devices/ts%3AnKIM1CNTRL/approve", {}).json as FamilyDevice;
-    expect(approved.registration).toMatchObject({ status: "approved", in_profile: false });
-    expect((kim("GET", "/api/me").json as Me).registration.ready).toBe(false);
-    // Added to a profile by hand, then a rescan.
-    request("POST", "/api/signing/rescan", {});
-    expect((kim("GET", "/api/me").json as Me).registration.ready).toBe(true);
-
-    const person = request("PATCH", "/api/family/people/kim%40example.com/apps", {
-      apps: [{ source_id: "altstore", bundle_id: "com.rileytestut.Delta", allowed: true }],
-    }).json as PersonDetail;
-    expect(person.app_count).toBe(1);
-    expect(person.apps.find((a) => a.name === "Delta")).toMatchObject({ allowed: true, explicit: true });
-    expect((kim("GET", "/api/apps").json as AppSummary[]).map((a) => a.name)).toEqual(["Delta"]);
-    expect(request("PATCH", "/api/family/people/alex%40example.com/apps", { apps: [] }).status).toBe(400);
-
-    // Removing Kim: the iPhone has to register again.
-    expect(request("DELETE", "/api/family/people/kim%40example.com").status).toBe(204);
-    expect((kim("GET", "/api/me").json as Me).registration.status).toBe("none");
-  });
-
-  it("registers approved iPhones with App Store Connect after a moment", () => {
-    const { request, advance } = setup();
-    const bad = request("PUT", "/api/family/apple", { issuer_id: "x", key_id: "y", private_key: "z" });
-    expect(bad.status).toBe(400);
-    const key = { issuer_id: "57246542-96fe-1a63-e053-0824d011072a", key_id: "2x9r4hxf34", private_key: "-----BEGIN PRIVATE KEY-----" };
-    const apple = request("PUT", "/api/family/apple", key).json as AppleAccount;
-    expect(apple).toMatchObject({ connected: true, key_id: "2X9R4HXF34", devices: 3 });
-    request("POST", "/api/family/devices/ts%3AnNOAH1CNTRL/approve", {});
-    expect((request("GET", "/api/me", undefined, "noah").json as Me).registration.ready).toBe(false);
-    advance(5000);
-    expect((request("GET", "/api/me", undefined, "noah").json as Me).registration.ready).toBe(true);
-    const after = request("GET", "/api/family/apple").json as AppleAccount;
-    expect(after.profile).toMatchObject({ kiwi: true, devices: 4 });
-    expect(after.profile?.name).toMatch(/^Kiwi \* /);
-    expect((request("DELETE", "/api/family/apple").json as AppleAccount).connected).toBe(false);
-  });
-
-  it("installs on the member's own iPhone", () => {
-    const { request, advance } = setup();
-    const emma = (method: string, path: string, body?: unknown) => request(method, path, body, "emma");
-    const build = emma("POST", "/api/apps/altstore/com.rileytestut.Delta/prepare", {}).json as Build;
-    advance(30_000);
-    const ready = emma("GET", `/api/builds/${build.id}`).json as Build;
-    expect(ready.status).toBe("ready");
-    request("GET", `/ota/${new URL(decodeURIComponent(ready.install_url?.split("url=")[1] ?? "")).pathname.split("/")[2]}/manifest.plist`, undefined, "emma");
-    advance(10_000);
-    const library = emma("GET", "/api/library").json as AppSummary[];
-    expect(library.some((a) => a.name === "Delta")).toBe(true);
-    const owner = request("GET", "/api/library").json as AppSummary[];
-    expect(owner.some((a) => a.name === "Delta")).toBe(false);
   });
 });

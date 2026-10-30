@@ -1,15 +1,14 @@
-import { tabsFor, type Tab } from "../lib/routes";
+import { TABS, type Tab } from "../lib/routes";
 import { Icon } from "./Icon";
 
 /** A tab whose screen has something to fix shows a dot in this tone. */
 export type TabDots = Partial<Record<Tab, "warn" | "error">>;
 
-/** Members have three tabs (no Sources). */
-export function TabBar(props: { active: Tab | null; updates: number; dots?: TabDots; member?: boolean }) {
-  const { active, updates, dots = {}, member = false } = props;
+export function TabBar(props: { active: Tab | null; updates: number; dots?: TabDots }) {
+  const { active, updates, dots = {} } = props;
   return (
-    <nav class={member ? "tab-bar three" : "tab-bar"} aria-label="Main">
-      {tabsFor(member).map(({ tab, path, label }) => {
+    <nav class="tab-bar" aria-label="Main">
+      {TABS.map(({ tab, path, label }) => {
         const current = tab === active;
         const dot = dots[tab];
         return (

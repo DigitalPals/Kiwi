@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 pub use identity::{Identity, list_identities};
 pub use profile::{
     Profile, ProfileMatch, default_profile_dirs, load_profiles, parse_profile,
-    profile_entitlement_keys, select_profile, select_profile_for,
+    profile_entitlement_keys, select_profile,
 };
 pub use sign::{SignReport, SignRequest, SignStep, sign_ipa};
 
@@ -112,18 +112,6 @@ pub(crate) fn check_plist(bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Reads the plist dictionary a device signs with CMS, e.g. the device attributes iOS posts
-/// to a Profile Service URL (the signature is not verified). A plain XML or binary plist is
-/// accepted too. The plist is checked for depth and size before it is parsed.
-pub fn signed_plist(bytes: &[u8]) -> std::result::Result<plist::Dictionary, String> {
-    let content = der::cms_content(bytes).unwrap_or_else(|| bytes.to_vec());
-    if content.len() as u64 > MAX_PLIST_BYTES {
-        return Err("The plist is too large".into());
-    }
-    check_plist(&content)?;
-    plist::from_bytes(&content).map_err(|e| e.to_string())
-}
-
 pub(crate) fn require_macos() -> Result<()> {
     if cfg!(target_os = "macos") {
         Ok(())
@@ -135,31 +123,6 @@ pub(crate) fn require_macos() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reads_signed_and_plain_plists() {
-        let xml = br#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>
-<key>UDID</key><string>00008110-001A2B3C4D5E801E</string><key>PRODUCT</key><string>iPhone16,2</string>
-</dict></plist>"#;
-        for body in [testutil::cms(xml), xml.to_vec()] {
-            let dict = signed_plist(&body).unwrap();
-            assert_eq!(
-                dict.get("UDID").and_then(plist::Value::as_string),
-                Some("00008110-001A2B3C4D5E801E")
-            );
-        }
-        assert!(signed_plist(b"not a plist").is_err());
-        let deep = format!(
-            r#"<plist version="1.0">{}{}</plist>"#,
-            "<array>".repeat(100),
-            "</array>".repeat(100)
-        );
-        assert!(
-            signed_plist(deep.as_bytes())
-                .unwrap_err()
-                .contains("nested")
-        );
-    }
 
     #[test]
     fn signed_id_and_scheme() {

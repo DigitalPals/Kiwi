@@ -69,15 +69,7 @@ cd web
 VITE_MOCK=1 npm run dev
 ```
 
-Open the printed address. You are the owner, Alex. Add `?as=` to any page to see Kiwi from a
-family member's iPhone; it sticks until you switch back:
-
-| `?as=` | Viewer |
-|---|---|
-| `alex` | the owner (default) |
-| `emma` | a registered member |
-| `noah` | a member whose iPhone waits for approval |
-| `kim` | a member who hasn't registered yet |
+Open the printed address.
 
 The mock API follows [api.md](api.md) closely enough to exercise every state (downloads,
 signing progress, failures, updates, expiring apps, Kiwi Builds jobs). It cannot build or
@@ -113,7 +105,7 @@ the dev server's address as `--public-url` and point Vite at Kiwi:
 
 ```sh
 cd web
-KIWI_API=http://127.0.0.1:18742 npm run dev   # proxies /api, /ota and /enroll
+KIWI_API=http://127.0.0.1:18742 npm run dev   # proxies /api and /ota
 ```
 
 ## Trying a change on a Mac
@@ -139,7 +131,6 @@ crates/kiwi-source     AltStore sources, releases, IPA download and inspection
 crates/kiwi-signer     identities, provisioning profiles, re-signing (macOS)
 crates/kiwi-device     devicectl, Tailscale (LocalAPI or CLI), user agents
 crates/kiwi-push       VAPID and Web Push
-crates/kiwi-appstore   App Store Connect API
 crates/kiwi-server     the `kiwi` binary: HTTP API, SQLite, jobs, scheduler
 web/                   the PWA (src/), its mock API (mock/) and tests
 automation/            Kiwi Builds runner and pinned recipes

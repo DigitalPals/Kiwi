@@ -1,7 +1,4 @@
 import type {
-  AppChoice,
-  AppleAccount,
-  AppleKey,
   AutomationOverview,
   AutomationPreferences,
   AutomationState,
@@ -12,13 +9,9 @@ import type {
   Device,
   DevicePatch,
   DevicesResponse,
-  Family,
-  FamilyDevice,
   Health,
   Me,
   MePatch,
-  PersonDetail,
-  PersonPatch,
   PrepareRequest,
   PushSubscriptionBody,
   PushTestResult,
@@ -186,9 +179,6 @@ export function createClient(
   const del = (path: string) => request<void>("DELETE", path);
   const seg = encodeURIComponent;
   const appPath = (sourceId: string, bundleId: string) => `/api/apps/${seg(sourceId)}/${seg(bundleId)}`;
-  // Person ids are Tailscale logins ("noah@example.com"); device ids contain ":".
-  const personPath = (id: string) => `/api/family/people/${seg(id)}`;
-  const familyDevicePath = (id: string) => `/api/family/devices/${seg(id)}`;
 
   return {
     health: () => get<Health>("/api/health"),
@@ -246,24 +236,6 @@ export function createClient(
     devices: () => get<DevicesResponse>("/api/devices"),
     updateDevice: (id: string, body: DevicePatch) => patch<Device>(`/api/devices/${seg(id)}`, body),
     syncDevices: () => slowPost<DevicesResponse>("/api/devices/sync"),
-
-    /** A one-time enrollment profile URL for this device (open it in Safari). */
-    enroll: () => post<{ url: string }>("/api/me/enroll"),
-    family: () => get<Family>("/api/family"),
-    person: (id: string) => get<PersonDetail>(personPath(id)),
-    updatePerson: (id: string, body: PersonPatch) => patch<PersonDetail>(personPath(id), body),
-    setPersonApps: (id: string, apps: AppChoice[]) => patch<PersonDetail>(`${personPath(id)}/apps`, { apps }),
-    removePerson: (id: string) => del(personPath(id)),
-    familyDevice: (id: string) => get<FamilyDevice>(familyDevicePath(id)),
-    approveDevice: (id: string) => post<FamilyDevice>(`${familyDevicePath(id)}/approve`),
-    declineDevice: (id: string) => post<FamilyDevice>(`${familyDevicePath(id)}/decline`),
-    registerDevice: (id: string) => post<FamilyDevice>(`${familyDevicePath(id)}/register`),
-    forgetRegistration: (id: string) => del(`${familyDevicePath(id)}/registration`),
-    apple: () => get<AppleAccount>("/api/family/apple"),
-    /** Checked with App Store Connect before it is saved. */
-    connectApple: (body: AppleKey) => request<AppleAccount>("PUT", "/api/family/apple", body, true),
-    disconnectApple: () => request<AppleAccount>("DELETE", "/api/family/apple"),
-    syncApple: () => slowPost<AppleAccount>("/api/family/apple/sync"),
   };
 }
 

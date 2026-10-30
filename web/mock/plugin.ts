@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
-import { VIEWER_COOKIE, createMockApi, type MockApi } from "./api.ts";
+import { createMockApi, type MockApi } from "./api.ts";
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -60,17 +60,7 @@ export function mockApi(): Plugin {
           const svg = art[1] === "icon" ? iconSvg(info.name, info.tint) : screenshotSvg(info.name, info.tint, Number(art[3] ?? 1));
           return send(res, 200, "image/svg+xml", svg);
         }
-        // `?as=emma` views the app as a family member's iPhone (`?as=alex` is the owner again).
-        const as = url.searchParams.get("as");
-        if (as !== null && req.method === "GET" && !url.pathname.startsWith("/api/")) {
-          url.searchParams.delete("as");
-          res.statusCode = 302;
-          res.setHeader("Set-Cookie", `${VIEWER_COOKIE}=${/^[a-z]+$/.test(as) ? as : "alex"}; Path=/; SameSite=Lax`);
-          res.setHeader("Location", url.pathname + url.search);
-          res.end();
-          return;
-        }
-        if (!["/api/", "/ota/", "/enroll/"].some((p) => url.pathname.startsWith(p))) return next();
+        if (!["/api/", "/ota/"].some((p) => url.pathname.startsWith(p))) return next();
 
         void (async () => {
           const body = await readBody(req);

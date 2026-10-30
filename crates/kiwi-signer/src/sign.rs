@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Error, Identity, Profile, Result, archive,
     bundle::{self, CodeKind, remove_path, short},
-    entitlements, macho, parse_profile, process, require_macos, select_profile_for,
+    entitlements, macho, parse_profile, process, require_macos, select_profile,
 };
 
 /// Longest one `codesign` call may run. It blocks while macOS waits for an answer to a
@@ -35,10 +35,6 @@ pub struct SignRequest {
     pub bundle_id: String,
     pub url_scheme: Option<String>,
     pub strip_watch: bool,
-    /// UDIDs the build should install on: profiles that include more of them are chosen
-    /// first (see [`select_profile_for`]).
-    #[serde(default)]
-    pub devices: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,13 +225,7 @@ fn sign_with(
 ) -> Result<SignReport> {
     validate_request(req)?;
     // Fail before extracting when the main app cannot be signed at all.
-    select_profile_for(
-        &req.profiles,
-        &req.identity,
-        &req.bundle_id,
-        &req.devices,
-        now,
-    )?;
+    select_profile(&req.profiles, &req.identity, &req.bundle_id, now)?;
     let check = || {
         if cancel.load(Ordering::Relaxed) {
             Err(Error::Cancelled)
@@ -270,8 +260,7 @@ fn sign_with(
     let mut dropped_keys = BTreeSet::new();
     let mut profiles: Vec<&Profile> = Vec::new();
     for (i, b) in prepared.bundles.iter().enumerate() {
-        let profile =
-            select_profile_for(&req.profiles, &req.identity, &b.new_id, &req.devices, now)?;
+        let profile = select_profile(&req.profiles, &req.identity, &b.new_id, now)?;
         let original = match &b.executable {
             Some(exe) => match macho::entitlements(exe) {
                 Ok(ent) => ent.unwrap_or_default(),
@@ -610,7 +599,6 @@ mod tests {
             url_scheme: Some(crate::url_scheme_for(&bundle_id)),
             bundle_id,
             strip_watch: true,
-            devices: Vec::new(),
         };
         Setup { dir, req }
     }

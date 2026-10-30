@@ -1,8 +1,7 @@
 # Security
 
-Kiwi holds the keys to your apps: it signs with your Apple Development certificate, can
-hold an App Store Connect key and installs software on your family's iPhones. Please report
-security problems privately.
+Kiwi holds the keys to your apps: it signs with your Apple Development certificate and
+installs software on your iPhones. Please report security problems privately.
 
 ## Reporting
 
@@ -14,15 +13,14 @@ could do with it. You'll get an answer within a week.
 
 - Kiwi listens on `127.0.0.1` only. `tailscale serve` publishes it to your tailnet over
   HTTPS. The installer refuses to run when Tailscale Funnel would put it on the internet.
-- Tailscale identifies every device and person; members only reach the member endpoints
-  and the apps the owner gave them.
+- Tailscale identifies every device and its user. Only the Tailscale user who owns the Mac
+  (or the one given with `--owner`) may use Kiwi; everyone else gets `403 not_owner`.
 - Requests must be addressed to Kiwi's own host name (DNS rebinding is refused with
   `421`), and every change needs `X-Kiwi: 1` with a JSON body, which blocks cross-site
   requests.
 - Source and download URLs must be HTTPS and may not point at private or loopback
   addresses. IPAs and plists from sources are size- and depth-checked before they're read.
-- Kiwi never asks for an Apple ID password. Signing uses your keychain through `codesign`;
-  the optional App Store Connect key is stored with mode 0600 in Kiwi's data directory.
+- Kiwi never asks for an Apple ID password. Signing uses your keychain through `codesign`.
 - Kiwi Builds keeps its App Store sign-in in ipatool's own keyring on the Mac; Kiwi's API
   and database never see it.
 

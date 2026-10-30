@@ -54,7 +54,6 @@ fn signs_real_ipa() {
         url_scheme: Some(url_scheme_for(&bundle_id)),
         bundle_id: bundle_id.clone(),
         strip_watch: true,
-        devices: Vec::new(),
     };
     let started = Instant::now();
     let report = sign_ipa(&req, &AtomicBool::new(false), &|step| {

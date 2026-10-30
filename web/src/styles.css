@@ -340,11 +340,6 @@ img {
   backdrop-filter: saturate(180%) blur(20px);
 }
 
-.tab-bar.three {
-  grid-template-columns: repeat(3, 1fr);
-  width: min(calc(100% - 2 * var(--gutter)), 320px);
-}
-
 .tab {
   position: relative;
   display: flex;
@@ -1200,7 +1195,7 @@ a.banner {
 }
 
 /* App icons in cells are wider than the plain glyphs. */
-.cell + .cell:has(> .app-icon, > .pick-link > .app-icon, > .tile-icon, > .avatar)::before {
+.cell + .cell:has(> .app-icon, > .pick-link > .app-icon, > .tile-icon)::before {
   left: 62px;
 }
 
@@ -2450,68 +2445,6 @@ p.small {
   font-size: 14px;
 }
 
-.sheet-steps {
-  margin-bottom: 4px;
-}
-
-/* Family: registration, avatars and people */
-
-.avatar {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--fill);
-  color: var(--label2);
-  font-weight: 650;
-  letter-spacing: 0;
-}
-
-.welcome {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  margin: 18px 0 22px;
-  text-align: center;
-}
-
-.welcome .state-title {
-  font-size: 27px;
-}
-
-.step-num {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  background: var(--fill);
-  color: var(--label);
-  font-size: 14px;
-  font-weight: 650;
-}
-
-.step-num.done {
-  background: var(--accent);
-  color: var(--accent-on);
-}
-
-.step-num.off {
-  color: var(--label3);
-}
-
-.step-num.busy {
-  background: none;
-}
-
-.cells.steps .cell + .cell::before {
-  left: 52px;
-}
-
 .button-block {
   display: flex;
   width: 100%;
@@ -2519,52 +2452,6 @@ p.small {
   margin-top: 18px;
   border-radius: 14px;
   font-size: 17px;
-}
-
-.person-header {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin: 6px 0 22px;
-}
-
-.person-header h1 {
-  margin: 0;
-  font-family: var(--rounded);
-  font-size: 26px;
-  font-weight: 800;
-  letter-spacing: -0.02em;
-  overflow-wrap: anywhere;
-}
-
-.person-header p {
-  margin: 2px 0 0;
-  color: var(--label2);
-  font-size: 14px;
-  overflow-wrap: anywhere;
-}
-
-.nav-danger {
-  color: var(--red);
-}
-
-.form-cell input {
-  width: 100%;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--label);
-  font-size: 15px;
-  text-align: right;
-}
-
-.file-button input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
 }
 
 @media (min-width: 760px) {

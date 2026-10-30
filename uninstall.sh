@@ -8,9 +8,8 @@
 # when it points at Kiwi; other paths stay), /etc/newsyslog.d/kiwi.conf, the installed app
 # ("~/Library/Application Support/Kiwi/app", app.prev, app.new, app.old, app.bad) and a
 # copy that deploy/deploy.sh synced to ~/kiwi-build. Data ("~/Library/Application
-# Support/Kiwi": kiwi.db and its kiwi.db.bak-* backups, vapid.json, appstoreconnect.json,
-# profiles, downloads, builds, icons, automation) and logs (~/Library/Logs/Kiwi) are kept
-# unless --purge is given; the Kiwi Builds toolchain (~/.kiwi-builder-tools) is never
+# Support/Kiwi": kiwi.db and its kiwi.db.bak-* backups, vapid.json, downloads, builds,
+# icons, automation) and logs (~/Library/Logs/Kiwi) are kept unless --purge is given; the Kiwi Builds toolchain (~/.kiwi-builder-tools) is never
 # touched. KIWI_MAC can be set in deploy/deploy.env.
 set -euo pipefail
 

@@ -36,7 +36,6 @@ export default defineConfig({
       : {
           "/api": { target: apiTarget },
           "/ota": { target: apiTarget },
-          "/enroll": { target: apiTarget },
         },
   },
   build: {

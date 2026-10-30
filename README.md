@@ -44,15 +44,12 @@ can only be reached from your own tailnet.
   profile can't grant before you install it.
 - **A real Home Screen app.** Kiwi is a PWA with badges, Web Push notifications, light and
   dark mode and offline fallbacks.
-- **Family.** Share Kiwi with people on your tailnet and choose which apps each person
-  gets. With an optional App Store Connect key, Kiwi registers their iPhones with Apple and
-  keeps its development profiles up to date.
 - **App Store originals.** Patched apps show the App Store app they're based on and warn you
   when the App Store is ahead.
 - **Kiwi Builds (optional, off by default).** Build patched YouTube, YouTube Music, Twitch,
   X and Reddit apps on your Mac from pinned open-source tweaks, on a schedule.
 - **Private by design.** Kiwi listens on `127.0.0.1` only. `tailscale serve` publishes it to
-  your tailnet over HTTPS, never to the internet.
+  your tailnet over HTTPS, never to the internet, and only your own Tailscale user can use it.
 
 ## Screenshots
 
@@ -97,13 +94,6 @@ can only be reached from your own tailnet.
     </td>
     <td align="center">
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/family-dark.png">
-        <img src="docs/screenshots/family-light.png" alt="Family">
-      </picture>
-      <br><sub><b>Family</b>: apps per person</sub>
-    </td>
-    <td align="center">
-      <picture>
         <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/builds-dark.png">
         <img src="docs/screenshots/builds-light.png" alt="Kiwi Builds">
       </picture>
@@ -145,7 +135,7 @@ flowchart LR
 ```
 
 1. Kiwi checks your sources on a schedule and works out, per iPhone, what you can install
-   or update. Tailscale tells it which device and person is asking.
+   or update. Tailscale tells it which device is asking; only your own devices get in.
 2. When you tap **Get** or **Update**, Kiwi downloads and checks the IPA and re-signs it
    with your Apple Development identity and a matching development profile.
 3. iOS installs it from Kiwi's HTTPS address with an over-the-air manifest
@@ -185,7 +175,6 @@ To update later, run `git pull && ./install.sh`; to remove Kiwi, run `./uninstal
 |---|---|
 | [Install](docs/install.md) | Everything from the signing certificate to the first install on your iPhone |
 | [Using Kiwi](docs/using-kiwi.md) | Sources, Browse, installs and updates, signing, notifications, settings |
-| [Family](docs/family.md) | Sharing Kiwi with other people on your tailnet and registering their iPhones |
 | [Kiwi Builds](docs/kiwi-builds.md) | The optional patched-app builder: what it does, Mac setup, the apps |
 | [Operations](docs/operations.md) | Where everything lives, configuration, logs, backups, updating, rolling back |
 | [Troubleshooting](docs/troubleshooting.md) | Fixes for the usual problems |
@@ -205,9 +194,13 @@ expires, usually after a year), and Kiwi reminds you before then.
 development profile, and a wildcard profile is what lets it sign any app. Free accounts
 can't create those, so plan on a paid membership.
 
+**Can other people on my tailnet use it?** No. Kiwi is for one person: the Tailscale user
+who owns the Mac. Anyone else who opens it sees that it's yours, and can't browse, install
+or change anything.
+
 **Does Kiwi send my apps or data anywhere?** No. Kiwi talks to the sources you add, Apple
-(App Store versions and, if you add a key, App Store Connect) and the Web Push service of
-your devices. Everything else stays on your Mac.
+(App Store versions) and the Web Push service of your devices. Everything else stays on
+your Mac.
 
 ## Disclaimer
 

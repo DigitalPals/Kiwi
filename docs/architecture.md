@@ -1,7 +1,7 @@
 # Kiwi architecture
 
-Kiwi is a private, self-hosted app store for sideloading IPAs onto your own and your
-family's iPhones. It runs on an always-on Mac, is reachable only over Tailscale, and needs no
+Kiwi is a private, self-hosted app store for sideloading IPAs onto your own iPhones. It runs
+on an always-on Mac, is reachable only over Tailscale, and needs no
 Apple ID sign-in, anisette server or pairing file in the install path:
 
 1. Kiwi reads AltStore-format sources (for example
@@ -9,7 +9,7 @@ Apple ID sign-in, anisette server or pairing file in the install path:
 2. It downloads a release IPA and re-signs it on the Mac with Apple's `codesign`, using the
    Apple Development identity in your login keychain and the development provisioning
    profiles Xcode manages (`~/Library/Developer/Xcode/UserData/Provisioning Profiles/`, also
-   `~/Library/MobileDevice/Provisioning Profiles/`) or Kiwi creates through App Store Connect.
+   `~/Library/MobileDevice/Provisioning Profiles/`).
 3. The phone installs it over the air with
    `itms-services://?action=download-manifest&url=<https manifest>`. HTTPS with a trusted
    certificate comes from `tailscale serve` (`https://mac-studio.example.ts.net`).
@@ -44,7 +44,6 @@ crates/kiwi-source      AltStore source fetching/parsing, release selection, IPA
 crates/kiwi-signer      provisioning profiles, identities, IPA re-signing with codesign (macOS)
 crates/kiwi-device      devicectl wrapper, Tailscale (LocalAPI or CLI), user-agent parsing
 crates/kiwi-push        VAPID keys + Web Push (RFC 8030/8291/8292) sender
-crates/kiwi-appstore    App Store Connect API client (ES256 team key): devices, App IDs, certificates, profiles
 crates/kiwi-server      axum HTTP server, SQLite state, jobs, scheduler; binary `kiwi`
 web/                    Vite + Preact + TypeScript PWA (built to web/dist, served by kiwi-server)
 automation/             Kiwi Builds: the build runner (Python) and pinned app recipes
@@ -143,12 +142,6 @@ the public URL or a `mailto:`), TTL, urgency and topic. Outcomes are delivered, 
 are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
 `*.notify.windows.com`). Tested against the RFC 8291 Appendix A vector.
 
-### kiwi-appstore
-
-App Store Connect API client authenticated with a team key (ES256 JWT): register and enable
-devices, find or create the wildcard App ID, list development certificates and create
-development profiles (see "Family").
-
 ## Server (kiwi-server, binary `kiwi`)
 
 - axum on `127.0.0.1:8742` (`--listen`). Only `tailscale serve` exposes it.
@@ -159,13 +152,12 @@ development profiles (see "Family").
   use besides the listen address, see "Security"), `--tailscale-socket` (tailscaled's
   LocalAPI, default `/var/run/tailscaled.socket`), `--tailscale-bin` (the CLI, used without
   that socket; default `/opt/homebrew/bin/tailscale`), `--owner` (the owner's Tailscale
-  login, see "Family"), `--allow-simulators` (treat simulators as linkable devices, for
+  login, see "The owner"), `--allow-simulators` (treat simulators as linkable devices, for
   testing only). `install.sh` passes the address and the Tailscale CLI it found explicitly.
 - SQLite (`rusqlite`, bundled) at `<data>/kiwi.db`, migrations embedded and versioned.
 - Data layout: `downloads/<sha256>.ipa` (content addressed), `builds/<build_id>/<Name>.ipa`,
   `work/` (temporary, cleared at start), `icons/<sha256(url)>.png`, `vapid.json` (0600),
-  `appstoreconnect.json` (optional, 0600), `profiles/` (profiles Kiwi created through App
-  Store Connect), `automation/` (Kiwi Builds), `kiwi.lock`.
+  `automation/` (Kiwi Builds), `kiwi.lock`.
 - At start Kiwi takes an exclusive lock on `<data>/kiwi.lock` before any startup cleanup
   (clearing `work/`, failing interrupted builds); a second instance exits with an error
   instead of damaging the running one.
@@ -187,7 +179,9 @@ development profiles (see "Family").
   store_url, checked_at.
 - `devices`: id (`ts:<StableID>` or `local:<random>`), kind, name, tailscale_name,
   os_version + os_version_source (`devicectl` > `installer` > `manual` > `safari`), model,
-  devicectl_id (link to a paired CoreDevice), udid, first_seen, last_seen.
+  devicectl_id (link to a paired CoreDevice), udid, person_id (the device's Tailscale user:
+  their login, or `node:<StableID>`; `NULL` for browser devices on the Mac and devices from
+  before Kiwi recorded users), first_seen, last_seen.
 - `builds`: device-independent signed artifacts. id, source_id, bundle_id (original),
   version, build, release JSON, artifact_sha256, signed_bundle_id, url_scheme,
   identity_sha1, profile_uuids, expires_at, ipa_path, size, status
@@ -209,19 +203,9 @@ development profiles (see "Family").
   follow the Mac: the App Store country is the region of its locale (`AppleLocale`, else
   `us`). `kiwi_builds` is off unless the owner turns it on; a Kiwi whose Kiwi Builds state
   already had apps added keeps it on.
-- `people`: id (Tailscale login, or `node:<StableID>`), name (the Tailscale display name until
-  renamed), renamed, new_apps, new_apps_since, created_at, last_seen. `devices.person_id`
-  names a device's person (`NULL` for browser devices on the Mac and devices from before
-  people existed; both count as the owner's).
-- `app_access`: per (person, source_id, bundle_id): allowed, changed_at.
-- `registrations`: per device: udid, product, os_build, device_name, status
-  (`pending|approved|declined`), requested_at, decided_at, apple_id (App Store Connect device
-  id), registered_at, error.
-- `enrollments`: token (128-bit), device_id, created_at; valid for an hour, deleted on use.
-- `builds.devices`: UDIDs every embedded profile includes (`NULL` for older builds, then
-  computed from the profiles' files when they are still there).
-- `meta`: also `owner_login` (the last owner Tailscale reported) and `apple_devices`,
-  `apple_checked_at`, `apple_error` (App Store Connect state).
+- `meta`: also `owner_login` (the last owner Tailscale reported).
+- Schema 5 dropped the family's `people`, `app_access`, `registrations`, `enrollments` and
+  `builds.devices`.
 
 ### Device identification
 
@@ -243,50 +227,18 @@ a row read before an `await`, so concurrent changes are not reverted. The same h
 sources: a refresh writes only the fetch results, so a source disabled meanwhile stays
 disabled.
 
-### Family
+### The owner
 
-The owner is the Tailscale user who owns the Mac (LocalAPI `status?peers=false`: the `User` of
-`Self.UserID`, asked at start and, while unknown, at most every 30 s; saved in `meta`), unless
-`--owner` names them. Every other Tailscale user is a member; each request's device is given
-its person from whois (`UserProfile.LoginName`). While the owner is unknown, other
-people are members (never owners). Browser devices on the Mac are the owner's.
+Kiwi is its owner's alone. The owner is the Tailscale user who owns the Mac (LocalAPI
+`status?peers=false`: the `User` of `Self.UserID`, asked at start and, while unknown, at most
+every 30 s from the scheduler; saved in `meta`), unless `--owner` names them. Each request's
+device records its Tailscale user from whois (`UserProfile.LoginName`) in `person_id`.
 
-Members may use the member endpoints in api.md ("Conventions"); owner-only handlers take the
-`Owner` extractor, which answers `403 forbidden`. A member sees an app when their device is
-ready and the app is allowed: by an explicit choice, else, while "Apps You Add Later" is on,
-when Kiwi first saw it (`app_prefs.first_seen`) after the switch was turned on. Everything
-per device follows from that: Browse, details (`404` otherwise), prepare, builds, updates,
-auto-prepare and notifications. Installs of apps they may no longer use stay in My Apps,
-without updates or a detail page. The owner's Browse choices never hide apps from members.
-
-Enrollment uses Apple's Profile Service: `POST /api/me/enroll` makes a one-time token and
-`/enroll/<token>/kiwi.mobileconfig` asks iOS for `UDID`, `PRODUCT`, `VERSION` and
-`DEVICE_NAME`; iOS posts them (a CMS-signed plist, read without verifying the signature, depth
-and size checked) to `/enroll/<token>`, which answers `301` to the web app. The request comes
-over Tailscale from the same phone; the token alone authorizes it. Kiwi names an unnamed
-device ("Emma's iPhone"), records the model, and either approves it (the owner's devices, or
-the same UDID approved before) or asks the owner with a push notification on each of their
-devices.
-
-Approved UDIDs are the "required devices": signing plans and `codesign` prefer profiles that
-include more of them (`select_profile_for`), then the usual order. A build records the UDIDs
-its profiles include; a ready build is only offered to (and reused for) a device it includes,
-and `prepare` answers `409 not_in_profile` when even the best profile lacks the device. Only
-enrolled UDIDs gate installs; devicectl's UDID is shown but does not, so a linked phone keeps
-installing as before. devicectl links a paired phone to the approved device with its UDID.
-
-With an App Store Connect key (`appstoreconnect.json`, 0600, checked with Apple before it is
-saved), approving a device starts a registration job (one at a time; the scheduler retries
-every 10 minutes while approved devices are missing from the profile): approved UDIDs are
-registered (or re-enabled) in the developer account, then, when the wildcard profile Kiwi
-signs with lacks a registered device, Kiwi creates "Kiwi * <time>" for the team wildcard App ID
-(created as "Kiwi Wildcard" when missing) with the keychain identity's development
-certificates and every enabled iOS device, and the same for explicit App IDs whose profiles
-Kiwi would sign catalog apps with. New profiles go to `<data>/profiles` (scanned with Xcode's
-directories), replacing Kiwi's older ones for the same App ID; nothing is deleted at Apple.
-Then signing is rescanned, and a member's approved device that the wildcard profile now
-includes is told "This iPhone is ready" (also when the owner added it by hand; checked every
-minute).
+The `Ctx` extractor every API handler but `/api/health` takes answers `403 not_owner` for a
+device whose user is not the owner (also while the owner is unknown, when only browser
+devices on the Mac get in), so other people on the tailnet can't browse, install, sign or
+change anything. The message names the owner, or says to pass `--owner` for a tagged Mac.
+The scheduler likewise prepares updates and sends notifications only for the owner's devices.
 
 ### App actions
 
@@ -438,7 +390,8 @@ subscriptions made with the old key are deleted (each device subscribes again).
 
 - Bind loopback only; Tailscale provides access control: `tailscale serve` publishes `/`
   with HTTPS to the tailnet only. `install.sh` refuses to install while Funnel is on for the
-  Mac's name and never replaces another `/` mapping.
+  Mac's name and never replaces another `/` mapping. Within the tailnet, only the owner's
+  devices may use the API (see "The owner").
 - Requests must name the public URL's host or the listen address
   (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`) in `Host`, and an
   `X-Forwarded-Host` must be the public host; otherwise `421 bad_host`. A DNS-rebinding
@@ -449,8 +402,7 @@ subscriptions made with the old key are deleted (each device subscribes again).
 - Source and download URLs go through kiwi-source validation (https, no credentials,
   no private/loopback targets). Push endpoints must pass `endpoint_allowed`.
 - Paths are never built from user input except through validated ids.
-- The signing identity, App Store Connect key and Apple sign-in for Kiwi Builds stay on the
-  Mac; the API never returns credentials or private keys.
+- The signing identity and the Apple sign-in for Kiwi Builds stay on the Mac; the API never returns credentials or private keys.
 
 ## Web app (web/)
 
@@ -466,12 +418,11 @@ a touch of gold) behind the large title; titles use SF Pro Rounded. Amber marks 
 (expiring within a month), red errors (failed, expiring within a week). Two button styles:
 filled for the one tap that installs (Install, Update when the build is ready), grey with
 accent text for everything else; on an app's colour these become white and frosted. Settings
-rows have white glyphs on coloured tiles, like iOS; people get grey initials.
+rows have white glyphs on coloured tiles, like iOS.
 Four tabs; routes: `/` (Browse), `/apps` (My Apps), `/sources`, `/settings`, `/sources/:id`
 (a source's page), `/builds` and `/builds/:app` (Kiwi Builds, under Sources; earlier
 `/settings/builds` and `/automation` links still work), `/settings/signing`,
-`/settings/device`, `/settings/notifications`, the family pages under `/settings/family` and
-`/app/:sourceId/:bundleId`. `/updates` and `/library` (the earlier Updates and Library tabs,
+`/settings/device`, `/settings/notifications` and `/app/:sourceId/:bundleId`. `/updates` and `/library` (the earlier Updates and Library tabs,
 still used by older notifications) open My Apps.
 
 Warnings appear where they are fixed rather than as banners on every screen: an expiring
@@ -498,7 +449,7 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
   Below: an info strip (version, size, minimum iOS, signature time left or source; with an
   original, its App Store version replaces the minimum iOS, in amber when ahead), then
   what's new, screenshots and the description; Kiwi Builds apps link to their patches
-  and schedule; "Who Can Install" (owner, a switch per member), "Original App" (the App Store
+  and schedule; "Original App" (the App Store
   app with a link, this app's and the App Store's version and date, how it was matched; or
   "Not in the App Store" with "Link…"), other versions of the same app; then the installed
   build, version history (install a specific version), privacy descriptions and Information
@@ -525,20 +476,10 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
   refresh, the error and diagnostics, "All Apps" or "Apps I Pick" with a switch per app (new
   ones marked New), and Remove Source. Kiwi Builds (`/builds`) lists the added apps, the ones
   to add, its source's settings and the Mac's setup.
-- Family (owner): Settings › Family lists people (the owner first, members with their app
-  count or a pending device), the App Store Connect account (devices of 100, Kiwi's profile)
-  and leads to a person's page (devices, "Apps You Add Later", a switch per app, rename,
-  remove), a device's page (the approval screen while pending: the person's apps, Approve and
-  Register, Decline; else its registration steps, UDID, manual instructions or Try Again) and
-  the App Store Connect key form. App pages show "Who Can Install" with a switch per member.
-- Members: until their device is ready, a registration screen replaces the tabs (Welcome with
-  "Register This iPhone", or Almost There with the three steps, polling `/api/me`). Then three
-  tabs (no Sources): Browse lists "Apps from Alex" (no source picker or hidden apps) with a
-  dismissible Developer Mode banner, My Apps opens the Developer Mode guide once after the
-  first install, and Settings has only this iPhone and notifications.
+- Another person's device: once `/api/me` answers `403 not_owner`, "Not Your Kiwi" with the
+  server's message replaces the tabs.
 - Settings is a short index: Kiwi's card (deep green with a slowly turning kiwi slice, the
-  version, public host, and whether signing is ready, with a pulse, or expiring), Family
-  (with "N waiting"), this iPhone (iOS version, amber when unknown) and Notifications (on or
+  version, public host, and whether signing is ready, with a pulse, or expiring), this iPhone (iOS version, amber when unknown) and Notifications (on or
   off), the Mac (Signing with its expiry, App Store country),
   Updates (source refresh interval, auto-prepare updates, notify on updates/expiry, remove
   watch apps) and Kiwi Builds (a switch that asks for confirmation before turning it on). Sub-pages: Signing (ready or why not, the certificates, the profiles named by
@@ -555,9 +496,6 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
 - Badge: on load and focus, set `navigator.setAppBadge(updates)` or clear it.
 
 ## Not in scope yet
-
-- Deleting Kiwi's earlier profiles or removed people's devices at Apple, and signing the
-  enrollment profile (iOS shows it as unsigned).
 
 - Creating App IDs, app groups or profiles automatically (Kiwi already prefers an exact
   App ID profile when Xcode has one).

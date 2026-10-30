@@ -19,7 +19,6 @@ const SCREENS = {
   sources: "/sources",
   builds: "/builds",
   build: "/builds/youtube",
-  family: "/settings/family",
   settings: "/settings",
 };
 

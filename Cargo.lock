@@ -1204,22 +1204,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kiwi-appstore"
-version = "0.2.0"
-dependencies = [
- "base64 0.22.1",
- "hex",
- "p256",
- "reqwest",
- "serde",
- "serde_json",
- "sha1",
- "thiserror",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "kiwi-device"
 version = "0.2.0"
 dependencies = [
@@ -1263,13 +1247,11 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "hex",
- "kiwi-appstore",
  "kiwi-device",
  "kiwi-push",
  "kiwi-signer",
  "kiwi-source",
  "libc",
- "p256",
  "plist",
  "reqwest",
  "rusqlite",

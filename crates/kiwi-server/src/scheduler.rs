@@ -14,7 +14,7 @@ use crate::{
     Kiwi,
     actions::{Decision, UpdateReason, same_release},
     builds,
-    db::{BuildRow, BuildStatus, Time},
+    db::{BuildRow, BuildStatus, DeviceRow, Time},
     devices,
     error::ApiResult,
     push::{self, Payload},
@@ -77,7 +77,7 @@ pub async fn run(kiwi: Arc<Kiwi>) {
 
 pub async fn tick(kiwi: &Arc<Kiwi>, timers: &mut Timers) {
     crate::automation::tick(kiwi);
-    crate::family::tick(kiwi).await;
+    crate::owner::tick(kiwi).await;
     let settings = kiwi.settings();
     refresh_due_sources(kiwi, &settings).await;
     if let Err(e) = store::refresh(kiwi).await {
@@ -201,7 +201,7 @@ pub async fn retry_builds(kiwi: &Arc<Kiwi>) -> ApiResult<()> {
             let (false, Some(index)) = (newer, index) else {
                 continue;
             };
-            match builds::prepare_release(kiwi, &app, index, None).await {
+            match builds::prepare_release(kiwi, &app, index).await {
                 Ok(b) => {
                     tracing::info!(build = %b.id, failed = %failed.id, app = %a.name, "retrying build")
                 }
@@ -341,11 +341,11 @@ pub fn update_notice(u: &Update<'_>, phase: Phase, badge: usize) -> (String, Pay
 /// "ready" once a build is ready; "available" when nothing will be prepared automatically
 /// (auto-prepare is off, it failed, or the build failed and is not retried).
 pub async fn process_updates(kiwi: &Arc<Kiwi>, settings: &Settings) -> ApiResult<()> {
-    for device in kiwi.db.devices()? {
+    // Only the owner's devices; other people's can't use Kiwi.
+    for device in owner_devices(kiwi)? {
         let public = kiwi.default_public_url();
-        let (updates, udid) = {
+        let updates = {
             let view = View::load(kiwi, &device, &public)?;
-            let udid = view.udid().map(str::to_owned);
             let updates = view.updates();
             let mut queue = Vec::new();
             for (app, _) in &updates {
@@ -359,13 +359,13 @@ pub async fn process_updates(kiwi: &Arc<Kiwi>, settings: &Settings) -> ApiResult
                     queue.push((app.clone(), target));
                 }
             }
-            ((updates.len(), queue), udid)
+            (updates.len(), queue)
         };
         let (count, queue) = updates;
         let mut unprepared = HashSet::new();
         for (app, target) in queue {
             let a = app.app();
-            match builds::prepare_release(kiwi, &app, target, udid.as_deref()).await {
+            match builds::prepare_release(kiwi, &app, target).await {
                 Ok(b) => {
                     kiwi.jobs
                         .auto_prepare_result(&app.source.id, &a.bundle_id, None);
@@ -451,9 +451,15 @@ pub fn expiry_threshold(expires_at: Time, now: Time) -> Option<i64> {
         .find(|t| days_left <= *t as f64)
 }
 
+fn owner_devices(kiwi: &Kiwi) -> ApiResult<Vec<DeviceRow>> {
+    let mut devices = kiwi.db.devices()?;
+    devices.retain(|d| crate::owner::is_owner(kiwi, d));
+    Ok(devices)
+}
+
 pub async fn expiry_warnings(kiwi: &Arc<Kiwi>) -> ApiResult<()> {
     let now = Utc::now();
-    for device in kiwi.db.devices()? {
+    for device in owner_devices(kiwi)? {
         if kiwi.db.subscriptions(&device.id)?.is_empty() {
             continue;
         }

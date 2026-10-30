@@ -143,7 +143,7 @@ check_system() {
 	if [ "$profiles" -gt 0 ]; then
 		good "$profiles provisioning profile(s)"
 	else
-		note "No provisioning profiles yet: build any app for your iPhone once in Xcode (see docs/install.md), or give Kiwi an App Store Connect key (Settings › Family)"
+		note "No provisioning profiles yet: build any app for your iPhone once in Xcode (see docs/install.md)"
 	fi
 	for tool in jq sqlite3 curl; do
 		if ! command -v "$tool" >/dev/null; then

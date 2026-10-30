@@ -36,17 +36,9 @@ impl ApiError {
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, "conflict", message)
     }
-    /// Only the owner may do this.
-    pub fn forbidden(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::FORBIDDEN, "forbidden", message)
-    }
-    /// The device is not registered for the family yet.
-    pub fn not_registered(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::FORBIDDEN, "not_registered", message)
-    }
-    /// The profile Kiwi signs with does not include the device yet.
-    pub fn not_in_profile(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::CONFLICT, "not_in_profile", message)
+    /// The device belongs to someone other than the owner.
+    pub fn not_owner(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, "not_owner", message)
     }
     /// Kiwi Builds is turned off in Settings.
     pub fn builds_off() -> Self {

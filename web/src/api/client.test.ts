@@ -50,24 +50,6 @@ describe("api client", () => {
     expect(calls[0]?.init.credentials).toBe("same-origin");
   });
 
-  it("encodes family ids and sends the App Store Connect key with PUT", async () => {
-    const { calls, client } = await primed(() => json({}));
-    await client.setPersonApps("noah@example.com", [{ source_id: "s", bundle_id: "b", allowed: true }]);
-    await client.approveDevice("ts:nNOAH1");
-    await client.connectApple({ issuer_id: "i", key_id: "k", private_key: "p" });
-    await client.disconnectApple();
-    expect(calls.map((c) => `${c.init.method} ${c.input}`)).toEqual([
-      "PATCH /api/family/people/noah%40example.com/apps",
-      "POST /api/family/devices/ts%3AnNOAH1/approve",
-      "PUT /api/family/apple",
-      "DELETE /api/family/apple",
-    ]);
-    expect(calls[0]?.init.body).toBe(JSON.stringify({ apps: [{ source_id: "s", bundle_id: "b", allowed: true }] }));
-    expect(calls[2]?.init.body).toBe(JSON.stringify({ issuer_id: "i", key_id: "k", private_key: "p" }));
-    expect(headers(calls[2])["X-Kiwi"]).toBe("1");
-    expect(calls[3]?.init.body).toBeUndefined();
-  });
-
   it("sends an empty JSON object for body-less POSTs and no body for DELETE", async () => {
     const { calls, client } = await primed((call) => (call.init.method === "DELETE" ? new Response(null, { status: 204 }) : json([])));
     await client.prepareUpdates();

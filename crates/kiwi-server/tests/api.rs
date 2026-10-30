@@ -964,7 +964,6 @@ async fn builds_left_running_fail_at_startup() {
             created_at: chrono::Utc::now(),
             finished_at: None,
             app_version: None,
-            devices: None,
         })
         .unwrap();
         std::fs::create_dir_all(data.join("work/sign-leftover")).unwrap();

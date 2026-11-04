@@ -520,7 +520,10 @@ impl<'a> View<'a> {
             name: a.name.clone(),
             developer: a.developer.clone(),
             subtitle: a.subtitle.clone(),
-            icon_url: a.icon_url.as_ref().map(|u| u.to_string()),
+            icon_url: a
+                .icon_url
+                .as_ref()
+                .map(|u| crate::linked::client_icon(u.as_str())),
             tint_color: a.tint_color.clone(),
             category: a.category.clone(),
             unavailable,
@@ -602,7 +605,10 @@ impl<'a> View<'a> {
                     source_name: o.source.source.catalog.name.clone(),
                     bundle_id: a.bundle_id.clone(),
                     name: a.name.clone(),
-                    icon_url: a.icon_url.as_ref().map(|u| u.to_string()),
+                    icon_url: a
+                        .icon_url
+                        .as_ref()
+                        .map(|u| crate::linked::client_icon(u.as_str())),
                     tint_color: a.tint_color.clone(),
                     version: target
                         .and_then(|i| a.releases.get(i))
@@ -629,7 +635,7 @@ impl<'a> View<'a> {
             name: install.name.clone(),
             developer: install.developer.clone(),
             subtitle: None,
-            icon_url: install.icon_url.clone(),
+            icon_url: install.icon_url.as_deref().map(crate::linked::client_icon),
             tint_color: None,
             category: None,
             unavailable: None,

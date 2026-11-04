@@ -50,7 +50,7 @@ export interface MockApp {
 }
 
 /** Counts are computed from the apps. */
-export type MockSource = Omit<Source, "shown_count" | "new_count" | "kind">;
+export type MockSource = Omit<Source, "shown_count" | "new_count" | "kind" | "ipa_url">;
 
 /** An App Store app; `slug` names its placeholder icon. */
 export interface MockStoreApp extends Omit<StoreApp, "short_name" | "icon_url"> {

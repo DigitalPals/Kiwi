@@ -89,15 +89,27 @@ pub enum SourceInput {
     },
 }
 
+/// Whether the URL names this machine (`localhost` or a loopback address literal).
+pub(crate) fn is_loopback(url: &Url) -> bool {
+    matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+}
+
+/// What a user pasted, as the URL to fetch. A missing scheme means HTTPS, and plain HTTP is
+/// upgraded to HTTPS (Kiwi never fetches over HTTP except from loopback, for local
+/// catalogs and tests).
 pub fn source_input(value: &str) -> Result<SourceInput> {
-    let mut url = network_url(value.trim())?;
-    if url.scheme() != "https"
-        && !matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
-    {
-        return Err(Error::new(
-            "Source URL",
-            "Sources require HTTPS (HTTP is allowed only on loopback for local catalogs)",
-        ));
+    let value = value.trim();
+    let with_scheme;
+    let value = if value.contains("://") {
+        value
+    } else {
+        with_scheme = format!("https://{value}");
+        &with_scheme
+    };
+    let mut url = network_url(value)?;
+    if url.scheme() != "https" && !is_loopback(&url) {
+        url.set_scheme("https")
+            .map_err(|()| Error::new("Source URL", "Use an HTTPS URL"))?;
     }
     url.set_fragment(None);
     if matches!(url.host_str(), Some("github.com" | "www.github.com")) {

@@ -12,8 +12,16 @@ import { BUILDS_PATH, sourcePath } from "../lib/routes";
 
 /** "4 apps · updated 12 min ago", how many Browse shows, or that it is off. */
 function SourceLine({ source }: { source: Source }) {
-  if (!source.enabled) return <>Off · {plural(source.app_count, "app")}</>;
+  if (!source.enabled) return <>Off · {source.kind === "ipa" ? linkKind(source) : plural(source.app_count, "app")}</>;
   if (source.error) return <span class="tone-danger">Failed: {source.error}</span>;
+  if (source.kind === "ipa") {
+    return (
+      <>
+        {source.subtitle ? `${source.subtitle} · ${linkKind(source).toLowerCase()}` : linkKind(source)}
+        {source.last_success_at && ` · checked ${formatRelative(source.last_success_at)}`}
+      </>
+    );
+  }
   const picked = source.shown_count < source.app_count;
   return (
     <>
@@ -62,6 +70,11 @@ function SourceRow({ source, onChange }: { source: Source; onChange: (source: So
   );
 }
 
+/** "IPA link" or "Download page": what Kiwi follows for an app added by link. */
+function linkKind(source: Source): string {
+  return source.url === source.ipa_url ? "IPA link" : "Download page";
+}
+
 /** "YouTube · 4 more available": the apps Kiwi builds and the ones it could. */
 function buildsLine(overview: AutomationOverview): string {
   const added = overview.apps.filter((a) => a.added).length;
@@ -86,7 +99,10 @@ function BuildsRow() {
   );
 }
 
-/** The URL of an AltStore source; the server checks it before adding it. */
+/**
+ * The URL of an AltStore source, a download page or an IPA; the server checks it (and
+ * downloads an IPA) before adding it.
+ */
 function AddSourceSheet({ onAdded, onClose }: { onAdded: (source: Source) => void; onClose: () => void }) {
   const [url, setUrl] = useState("");
   const add = useTask(async () => {
@@ -117,11 +133,11 @@ function AddSourceSheet({ onAdded, onClose }: { onAdded: (source: Source) => voi
         >
           <label class="add-source">
             <Icon name="link" size={18} />
-            <span class="visually-hidden">Source URL</span>
+            <span class="visually-hidden">Source, download page or IPA URL</span>
             <input
               type="url"
               inputMode="url"
-              placeholder="https://…/apps.json"
+              placeholder="https://…/apps.json or …/App.ipa"
               value={url}
               onInput={(e) => {
                 setUrl(e.currentTarget.value);
@@ -140,8 +156,8 @@ function AddSourceSheet({ onAdded, onClose }: { onAdded: (source: Source) => voi
           ) : (
             <p class="add-source-status">
               {add.pending
-                ? "Fetching and checking the source…"
-                : "An AltStore source, e.g. a repository's apps.json. GitHub file links work too."}
+                ? "Checking the link… An IPA is downloaded first, which can take a few minutes."
+                : "An AltStore source (a repository's apps.json), an app's download page or a link to an IPA. GitHub file links work too."}
             </p>
           )}
           <button type="submit" class="button button-block" disabled={!url.trim() || add.pending}>
@@ -178,14 +194,20 @@ export function Sources() {
     reloadMe();
   };
 
-  // Kiwi Builds has its own row above the AltStore sources.
+  // Kiwi Builds has its own row above the AltStore sources; apps added by link get their own.
   const list = sources.data?.filter((s) => s.kind !== "local_build");
+  const feeds = list?.filter((s) => s.kind === "feed") ?? [];
+  const links = list?.filter((s) => s.kind === "ipa") ?? [];
   let content;
   if (!list) {
     content = sources.error ? <ErrorState error={sources.error} onRetry={sources.reload} /> : <Loading />;
   } else if (list.length === 0) {
     content = (
-      <Empty icon="sources" title="No Sources" message="Add an AltStore source, for example a repository's apps.json.">
+      <Empty
+        icon="sources"
+        title="No Sources"
+        message="Add an AltStore source such as a repository's apps.json, an app's download page or an IPA link."
+      >
         <button type="button" class="button" onClick={() => setAdding(true)}>
           Add a Source
         </button>
@@ -193,11 +215,22 @@ export function Sources() {
     );
   } else {
     content = (
-      <Section title="AltStore Sources" footer="Open a source to pick which of its apps appear in Browse, turn it off or remove it.">
-        {list.map((source) => (
-          <SourceRow key={source.id} source={source} onChange={replace} />
-        ))}
-      </Section>
+      <>
+        {feeds.length > 0 && (
+          <Section title="AltStore Sources" footer="Open a source to pick which of its apps appear in Browse, turn it off or remove it.">
+            {feeds.map((source) => (
+              <SourceRow key={source.id} source={source} onChange={replace} />
+            ))}
+          </Section>
+        )}
+        {links.length > 0 && (
+          <Section title="Apps from Links" footer="Kiwi checks each link with your sources and gets the new IPA when it changes.">
+            {links.map((source) => (
+              <SourceRow key={source.id} source={source} onChange={replace} />
+            ))}
+          </Section>
+        )}
+      </>
     );
   }
 

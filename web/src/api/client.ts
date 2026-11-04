@@ -35,6 +35,8 @@ export class ApiError extends Error {
 }
 
 type Method = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+/** Request time limit: normal, slow (`true`) or long enough to download an IPA. */
+type Speed = boolean | "download";
 type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
 export const NETWORK_ERROR_MESSAGE = "Can't reach Kiwi. Check that the Mac running Kiwi is online and Tailscale is connected.";
@@ -48,9 +50,11 @@ export const TIMEOUT_MESSAGE = "Kiwi didn't answer in time. Try again.";
 export interface Timeouts {
   normal: number;
   slow: number;
+  /** Adding or refreshing a source, which downloads the IPA of an app added by link. */
+  download: number;
 }
 
-const TIMEOUTS: Timeouts = { normal: 30_000, slow: 120_000 };
+const TIMEOUTS: Timeouts = { normal: 30_000, slow: 120_000, download: 900_000 };
 
 /** Turns any thrown value into a message suitable for the UI. */
 export function errorMessage(error: unknown): string {
@@ -114,7 +118,7 @@ export function createClient(
     return result;
   }
 
-  async function request<T>(method: Method, path: string, body?: unknown, slow = false): Promise<T> {
+  async function request<T>(method: Method, path: string, body?: unknown, slow: Speed = false): Promise<T> {
     await (session ?? me().catch(() => undefined));
     if (method === "GET") return read<T>(path);
     reads.clear();
@@ -126,9 +130,10 @@ export function createClient(
     }
   }
 
-  async function send<T>(method: Method, path: string, body?: unknown, slow = false): Promise<T> {
+  async function send<T>(method: Method, path: string, body?: unknown, slow: Speed = false): Promise<T> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), slow ? timeouts.slow : timeouts.normal);
+    const limit = slow === "download" ? timeouts.download : slow ? timeouts.slow : timeouts.normal;
+    const timer = setTimeout(() => controller.abort(), limit);
     try {
       return await exchange<T>(method, path, body, controller.signal);
     } catch (error) {
@@ -196,10 +201,10 @@ export function createClient(
     updateMe: (body: MePatch) => patch<Me>("/api/me", body),
 
     sources: () => get<Source[]>("/api/sources"),
-    addSource: (url: string) => slowPost<Source>("/api/sources", { url }),
+    addSource: (url: string) => request<Source>("POST", "/api/sources", { url }, "download"),
     updateSource: (id: string, body: SourcePatch) => patch<Source>(`/api/sources/${seg(id)}`, body),
     removeSource: (id: string) => del(`/api/sources/${seg(id)}`),
-    refreshSource: (id: string) => slowPost<Source>(`/api/sources/${seg(id)}/refresh`),
+    refreshSource: (id: string) => request<Source>("POST", `/api/sources/${seg(id)}/refresh`, undefined, "download"),
     refreshSources: () => slowPost<Source[]>("/api/sources/refresh"),
 
     /** `hidden`: include apps hidden from Browse (each says whether it is). */

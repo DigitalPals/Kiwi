@@ -29,11 +29,27 @@ pub async fn add(kiwi: &Kiwi, input: &str) -> ApiResult<SourceRow> {
     {
         return Err(conflict());
     }
-    let source = kiwi
+    let source = match kiwi
         .sources
-        .add(url.as_str(), &cancel)
+        .find(url, &cancel)
         .await
-        .map_err(ApiError::source)?;
+        .map_err(ApiError::source)?
+    {
+        kiwi_source::Found::Source(source) => source,
+        kiwi_source::Found::Ipa { ipa, page } => {
+            // Checked before the download, which can take minutes.
+            if kiwi
+                .catalog
+                .source(&crate::linked::key(&ipa, page.as_ref()))
+                .is_some()
+            {
+                return Err(conflict());
+            }
+            crate::linked::build(kiwi, ipa, page.as_ref(), None, &cancel)
+                .await
+                .map_err(ApiError::source)?
+        }
+    };
     if kiwi.catalog.source(&source.key).is_some() {
         return Err(conflict());
     }
@@ -77,7 +93,11 @@ pub async fn refresh(kiwi: &Kiwi, id: &str) -> ApiResult<SourceRow> {
     }
     kiwi.catalog
         .modify(id, |current| current.last_attempt_at = Some(started));
-    let result = kiwi.sources.refresh(&row.source, &kiwi.cancel).await;
+    let result = if row.source.link.is_some() {
+        crate::linked::refresh(kiwi, &row.source, &kiwi.cancel).await
+    } else {
+        kiwi.sources.refresh(&row.source, &kiwi.cancel).await
+    };
     let now = Utc::now();
     // The source may have been changed or removed meanwhile: apply the fetch to its
     // current state.

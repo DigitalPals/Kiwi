@@ -105,7 +105,7 @@ describe("api client", () => {
         init.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
       });
     };
-    const client = createClient(hang, { normal: 10, slow: 60 });
+    const client = createClient(hang, { normal: 10, slow: 60, download: 60 });
     const started = Date.now();
     await expect(client.me()).rejects.toMatchObject({ status: 0, code: "timeout", message: TIMEOUT_MESSAGE });
     await expect(client.refreshSources()).rejects.toMatchObject({ code: "timeout" });

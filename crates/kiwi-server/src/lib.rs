@@ -9,6 +9,7 @@ pub mod config;
 pub mod db;
 pub mod devices;
 pub mod error;
+pub mod linked;
 pub mod ota;
 pub mod owner;
 pub mod push;

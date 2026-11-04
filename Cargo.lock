@@ -1289,6 +1289,8 @@ name = "kiwi-source"
 version = "0.2.0"
 dependencies = [
  "chrono",
+ "crc32fast",
+ "flate2",
  "hex",
  "json5",
  "percent-encoding",

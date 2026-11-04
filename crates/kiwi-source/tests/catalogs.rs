@@ -76,10 +76,25 @@ fn preserves_meaningful_query_parameters_and_rejects_credentials_and_schemes() {
         "file:///etc/passwd",
         "javascript:alert(1)",
         "https://user:pass@example.test/feed",
-        "http://example.test/feed",
+        "ftp://example.test/feed",
     ] {
         assert!(source_input(url).is_err());
     }
+    // Plain HTTP is upgraded and a missing scheme means HTTPS; loopback keeps HTTP.
+    for url in [
+        "http://example.test/feed",
+        "example.test/feed",
+        " example.test/feed ",
+    ] {
+        assert_eq!(
+            source_input(url).unwrap(),
+            SourceInput::Canonical(Url::parse("https://example.test/feed").unwrap())
+        );
+    }
+    assert_eq!(
+        source_input("http://127.0.0.1:8080/feed").unwrap(),
+        SourceInput::Canonical(Url::parse("http://127.0.0.1:8080/feed").unwrap())
+    );
     assert!(network_url("https://cdn.example.test/artifact?signature=keep-me").is_ok());
 }
 #[test]
@@ -504,6 +519,7 @@ fn sources_round_trip_through_json_with_defaults() {
         last_modified: Some("Wed, 01 Jan 2025 00:00:00 GMT".into()),
         last_success: Some(chrono::Utc::now()),
         error: Some("HTTP 503".into()),
+        link: None,
     };
     let json = serde_json::to_string(&source).unwrap();
     let back: Source = serde_json::from_str(&json).unwrap();

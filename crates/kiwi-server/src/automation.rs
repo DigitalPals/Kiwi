@@ -1222,6 +1222,7 @@ fn source_row(kiwi: &Kiwi, update: Option<Update<'_>>) -> ApiResult<Option<Sourc
             last_modified: None,
             last_success: Some(now),
             error: None,
+            link: None,
         },
     }))
 }

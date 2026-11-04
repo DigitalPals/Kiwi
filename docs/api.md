@@ -190,8 +190,9 @@ interface Me {
 
 interface Source {
   id: string;
-  kind: "feed" | "local_build";     // local_build is Kiwi's generated source
-  url: string;
+  kind: "feed" | "ipa" | "local_build"; // ipa: an IPA link or download page; local_build: Kiwi Builds
+  url: string;                      // the feed, the IPA link or the download page
+  ipa_url: string | null;           // ipa: the IPA its app comes from now
   name: string;
   subtitle: string | null;
   icon_url: string | null;
@@ -210,6 +211,10 @@ interface Source {
 // Browse shows an app unless it was hidden by hand. With "picked", it shows only apps turned
 // on by hand; apps a source adds later stay hidden and are `is_new` until turned on or off.
 // Hiding only affects Browse: installed apps still show in My Apps and get updates.
+// An ipa source has one app, read from the IPA (name, version, icon). On refresh Kiwi looks
+// for a new IPA link on its download page and asks the IPA's server (HEAD: ETag,
+// Last-Modified, Content-Length) whether the file changed; only then is it downloaded again.
+// Icons taken from IPAs have `icon_url` `/api/icons/<sha256>.png`.
 // The built-in local_build source cannot be deleted. Its enabled switch controls source
 // visibility; automation scheduling is managed separately through the automation API.
 
@@ -389,10 +394,11 @@ interface Settings {
 | GET | `/api/me` | | `Me` |
 | PATCH | `/api/me` | `{ name?, os_version? }` (`os_version: null` clears a manual value) | `Me` |
 | GET | `/api/sources` | | `Source[]` (by position) |
-| POST | `/api/sources` | `{ url }` | `201 Source` (fetched and parsed before saving; `409 conflict` if present) |
+| POST | `/api/sources` | `{ url }` | `201 Source` (fetched and parsed before saving; `409 conflict` if present). `url` may be an AltStore source, a web page (the AltStore source an `altstore://` or `sidestore://source?url=` button links, else the page's first `.ipa` link) or an IPA, which is downloaded before the answer. `http://` and scheme-less URLs are fetched over HTTPS |
+| GET | `/api/icons/:file` | | `image/png`, an icon Kiwi took from an IPA (cacheable) |
 | PATCH | `/api/sources/:id` | `{ enabled?, browse?: "all" \| "picked" }` | `Source` (switching to `"picked"` again restarts what counts as new) |
 | DELETE | `/api/sources/:id` | | `204` (keeps installs; their apps become orphaned) |
-| POST | `/api/sources/:id/refresh` | | `Source` (after the refresh) |
+| POST | `/api/sources/:id/refresh` | | `Source` (after the refresh; may download an `ipa` source's new IPA) |
 | POST | `/api/sources/refresh` | | `Source[]` (refreshes all enabled) |
 | GET | `/api/apps?q=&source=&hidden=` | | `AppSummary[]` (enabled sources, sorted by name; apps hidden from Browse only with `hidden=1`) |
 | GET | `/api/apps/:source_id/:bundle_id` | | `AppDetail` |

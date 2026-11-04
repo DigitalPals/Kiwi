@@ -72,10 +72,58 @@ pub fn ipa(version: &str, build: &str) -> Vec<u8> {
     zip.finish().unwrap().into_inner()
 }
 
-/// Serves `/feed.json`, `/other.json` (another source with an app of the same bundle id),
+/// A 2 × 2 PNG header: enough for Kiwi to take it as an app icon.
+pub fn icon_png() -> Vec<u8> {
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    for (kind, data) in [
+        (&b"IHDR"[..], &[0, 0, 0, 2, 0, 0, 0, 2, 8, 6, 0, 0, 0][..]),
+        (b"IEND", &[]),
+    ] {
+        png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        png.extend_from_slice(kind);
+        png.extend_from_slice(data);
+        png.extend_from_slice(&[0; 4]);
+    }
+    png
+}
+
+/// An IPA with a Home Screen name and an icon, as an app added by link would have.
+pub fn linked_ipa(version: &str, build: &str) -> Vec<u8> {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options =
+        zip::write::SimpleFileOptions::default().last_modified_time(zip::DateTime::default());
+    zip.start_file("Payload/Linked.app/Info.plist", options)
+        .unwrap();
+    write!(
+        zip,
+        r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>{BUNDLE}</string>
+<key>CFBundleDisplayName</key><string>Linked App</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+<key>CFBundleVersion</key><string>{build}</string>
+<key>MinimumOSVersion</key><string>16.0</string>
+<key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+<key>UIDeviceFamily</key><array><integer>1</integer></array>
+<key>CFBundleIcons</key><dict><key>CFBundlePrimaryIcon</key><dict>
+<key>CFBundleIconFiles</key><array><string>AppIcon60x60</string></array></dict></dict>
+</dict></plist>"#
+    )
+    .unwrap();
+    zip.start_file("Payload/Linked.app/AppIcon60x60@2x.png", options)
+        .unwrap();
+    zip.write_all(&icon_png()).unwrap();
+    zip.start_file("Payload/Linked.app/Linked", options)
+        .unwrap();
+    zip.write_all(&vec![0x42; 300_000 + build.len()]).unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
+/// Serves `/page` (HTML), `/feed.json`, `/other.json` (another source with an app of the same bundle id),
 /// `/ipa/app-<version>.ipa`, `/icon.png`, `/html` and `/broken.json`.
 pub struct Fixture {
     pub base: String,
+    /// The HTML `/page` serves.
+    pub page: Arc<Mutex<String>>,
     pub feed: Arc<Mutex<Value>>,
     pub other: Arc<Mutex<Value>>,
     ipas: Arc<Mutex<HashMap<String, Vec<u8>>>>,
@@ -144,6 +192,7 @@ fn store_answer(s: &FixtureState, query: &str, search: bool) -> axum::response::
 
 #[derive(Clone)]
 struct FixtureState {
+    page: Arc<Mutex<String>>,
     feed: Arc<Mutex<Value>>,
     other: Arc<Mutex<Value>>,
     ipas: Arc<Mutex<HashMap<String, Vec<u8>>>>,
@@ -160,6 +209,7 @@ impl Fixture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let state = FixtureState {
+            page: Arc::default(),
             feed: Arc::new(Mutex::new(Value::Null)),
             other: Arc::new(Mutex::new(Value::Null)),
             ipas: Arc::default(),
@@ -207,6 +257,12 @@ impl Fixture {
                 get(|| async { ([(header::CONTENT_TYPE, "image/png")], PNG) }),
             )
             .route(
+                "/page",
+                get(|State(s): State<FixtureState>| async move {
+                    axum::response::Html(s.page.lock().unwrap().clone())
+                }),
+            )
+            .route(
                 "/html",
                 get(|| async { axum::response::Html("<html>login</html>") }),
             )
@@ -240,6 +296,7 @@ impl Fixture {
         });
         let fixture = Self {
             base,
+            page: state.page,
             feed: state.feed,
             other: state.other,
             ipas: state.ipas,
@@ -254,6 +311,12 @@ impl Fixture {
         fixture.set_releases(&[("1.0", "1")]);
         fixture.set_other_releases(&[("1.0", "1")]);
         fixture
+    }
+
+    /// Serves `bytes` at `/ipa/<name>`; returns its URL.
+    pub fn put_ipa(&self, name: &str, bytes: Vec<u8>) -> String {
+        self.ipas.lock().unwrap().insert(name.into(), bytes);
+        format!("{}/ipa/{name}", self.base)
     }
 
     pub fn feed_url(&self) -> String {

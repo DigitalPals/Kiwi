@@ -22,3 +22,6 @@ url.workspace = true
 tempfile.workspace = true
 percent-encoding = "2"
 json5 = "0.4"
+# Icons: CgBI PNGs are converted to standard ones (both already used by `zip`).
+flate2 = "1"
+crc32fast = "1"

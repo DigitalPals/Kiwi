@@ -58,8 +58,12 @@ export interface Me {
 
 export interface Source {
   id: string;
-  kind: "feed" | "local_build";
+  /** "ipa": an IPA link or a download page; Kiwi reads the app from the IPA. */
+  kind: "feed" | "ipa" | "local_build";
+  /** The source's URL, an IPA's link, or the download page Kiwi follows. */
   url: string;
+  /** The IPA an "ipa" source's app comes from now. */
+  ipa_url: string | null;
   name: string;
   subtitle: string | null;
   icon_url: string | null;

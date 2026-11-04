@@ -22,6 +22,22 @@ Open a source to choose what Browse shows from it:
 The source's page also turns it off (its apps disappear without being removed), refreshes
 it, or removes it.
 
+### Apps from links
+
+Not every app has an AltStore source. The same **+** also takes:
+
+- **A download page**, such as an app's website. When the page has an **Add to AltStore**
+  or **Add to SideStore** button, Kiwi adds that source instead, so you get release notes
+  and every version. Otherwise Kiwi follows the page's first link to an `.ipa` file.
+- **A link to an IPA** (`https://…/App.ipa`).
+
+Kiwi downloads the IPA and reads the app's name, version and icon from it, so adding one
+takes as long as the download. The app appears under **Apps from Links** in Sources and in
+Browse like any other. Each time Kiwi checks your sources it looks for a new IPA link on
+the page and asks the IPA's server whether the file changed, and downloads it again only
+then. A server that doesn't say (no ETag, Last-Modified or size) gets only page changes
+noticed. Links starting with `http://` are fetched over HTTPS.
+
 ## Browse
 
 Browse lists the apps from all your sources: **Fresh This Week** at the top, then every

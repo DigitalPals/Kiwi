@@ -72,6 +72,14 @@ checks, progress and cancellation, and safe archive inspection (`inspect_ipa`,
 `permissions`). Sources stay `Serialize + Deserialize`; Kiwi persists them in SQLite. The
 OS version of a device is optional: without it every release is eligible.
 
+`SourceClient::find` tells what a pasted URL offers: an AltStore source, a download page
+(scanned for `altstore://`/`sidestore://source?url=` buttons, `.ipa` links and its
+`apple-touch-icon`; a source wins over an IPA) or an IPA. Apps added by link
+(`Source::link`) are downloaded with `download_linked` (inspected, not validated against a
+release), and `ipa_icon` converts their loose Xcode icon (CgBI PNG) into a standard PNG. The
+server's `linked` module builds their one-app catalog and refreshes it: page first, then a
+`HEAD` request whose ETag, Last-Modified and length are compared with the stored ones.
+
 ### kiwi-signer (macOS)
 
 Lists signing identities (`security find-identity` / `find-certificate`), loads and parses
@@ -477,8 +485,9 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
   keyed by signed bundle id). "Check Now" refreshes the sources.
 - Sources: "Built on Your Mac" (Kiwi Builds, while it is on: its apps and how many more can be added), then
   the AltStore sources, one row each (apps and last update, "4 of 10 apps in Browse", "N new",
-  warnings, off, or the error with Retry), opening the source's page; **+** adds a source by
-  URL in a sheet (validated by the server). A source's page (`/sources/:id`): on/off, URL,
+  warnings, off, or the error with Retry), then "Apps from Links" (IPA links and download
+  pages), opening the source's page; **+** adds a source, download page or IPA by URL in a
+  sheet (validated by the server). A source's page (`/sources/:id`): on/off, URL,
   refresh, the error and diagnostics, "All Apps" or "Apps I Pick" with a switch per app (new
   ones marked New), and Remove Source. Kiwi Builds (`/builds`) lists the added apps, the ones
   to add, its source's settings and the Mac's setup.

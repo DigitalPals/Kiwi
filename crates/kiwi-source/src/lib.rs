@@ -1,17 +1,21 @@
 //! Public, unauthenticated AltStore-format sources: fetching, parsing, release selection, and
-//! validated IPA downloads.
+//! validated IPA downloads. Also IPA links and download pages that offer no source.
 //!
 //! Ported from `plume_source` in the Plume Impactor fork (same author, MIT), without its
 //! account scoping and JSON file stores: Kiwi persists [`Source`] in SQLite.
 mod artifact;
 mod catalog;
+mod icon;
 mod network;
+mod page;
 mod source;
 mod urls;
 
 pub use artifact::*;
 pub use catalog::*;
+pub use icon::{browser_png, ipa_icon};
 pub use network::*;
+pub use page::{PageLinks, page_links};
 pub use source::*;
 pub use tokio_util::sync::CancellationToken;
 pub use url::Url;

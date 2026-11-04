@@ -173,6 +173,7 @@ pub fn source_row(id: &str, apps: Vec<App>) -> SourceRow {
             last_modified: None,
             last_success: Some(now),
             error: None,
+            link: None,
         },
     }
 }

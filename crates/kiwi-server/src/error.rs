@@ -83,7 +83,9 @@ impl ApiError {
     pub fn source(error: kiwi_source::Error) -> Self {
         let message = error.to_string();
         match error.stage {
-            "Source parse" => Self::new(StatusCode::UNPROCESSABLE_ENTITY, "source_parse", message),
+            "Source parse" | "IPA validation" => {
+                Self::new(StatusCode::UNPROCESSABLE_ENTITY, "source_parse", message)
+            }
             "URL" | "Source URL" => Self::bad_request(message),
             _ => Self::new(StatusCode::BAD_GATEWAY, "source_fetch", message),
         }

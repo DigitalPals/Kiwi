@@ -1,4 +1,4 @@
-use crate::{Catalog, Url};
+use crate::{Catalog, Url, Validators};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -24,6 +24,25 @@ pub struct Source {
     pub last_success: Option<DateTime<Utc>>,
     #[serde(default)]
     pub error: Option<String>,
+    /// Set when the "source" is an IPA link or a download page rather than an AltStore
+    /// source; its catalog is then built from the IPA. `etag` and `last_modified` belong to
+    /// the page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<IpaLink>,
+}
+
+/// Where an app added by link comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpaLink {
+    /// The IPA the current release was downloaded from.
+    pub ipa: Url,
+    /// The download page it was found on, checked for a new IPA link on refresh.
+    #[serde(default)]
+    pub page: Option<Url>,
+    /// The IPA's validators when it was downloaded (from `HEAD`), to notice a new file at
+    /// the same URL.
+    #[serde(default)]
+    pub validators: Validators,
 }
 fn yes() -> bool {
     true

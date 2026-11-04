@@ -1,5 +1,5 @@
 use crate::{
-    CancellationToken, DeviceProfile, Error, MAX_IPA_BYTES, Release, Result, SourceClient,
+    CancellationToken, DeviceProfile, Error, MAX_IPA_BYTES, Release, Result, SourceClient, Url,
     compare_numeric, platform_matches,
 };
 use sha2::{Digest, Sha256};
@@ -53,6 +53,8 @@ impl ValidatedArtifact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IpaMetadata {
     pub bundle_id: String,
+    /// The Home Screen name (`CFBundleDisplayName`, else `CFBundleName`).
+    pub name: Option<String>,
     pub version: String,
     pub build: Option<String>,
     pub min_os: Option<String>,
@@ -68,6 +70,67 @@ fn download_time_limit(size: Option<u64>) -> Duration {
     Duration::from_secs(20 * 60 + bytes / (128 * 1024))
 }
 
+/// What an HTTP server says identifies a file's current content.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Validators {
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub last_modified: Option<String>,
+    #[serde(default)]
+    pub length: Option<u64>,
+}
+impl Validators {
+    pub(crate) fn from_headers(headers: &reqwest::header::HeaderMap) -> Self {
+        let text = |name| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned)
+        };
+        Self {
+            etag: text(reqwest::header::ETAG),
+            last_modified: text(reqwest::header::LAST_MODIFIED),
+            length: text(reqwest::header::CONTENT_LENGTH).and_then(|v| v.parse().ok()),
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.etag.is_none() && self.last_modified.is_none() && self.length.is_none()
+    }
+    /// Whether the file changed since `old`: a validator both have differs. Weak and
+    /// strong forms of an ETag count as the same (compressing proxies weaken them).
+    pub fn changed_from(&self, old: &Self) -> bool {
+        fn differs<T: PartialEq>(a: &Option<T>, b: &Option<T>) -> bool {
+            matches!((a, b), (Some(a), Some(b)) if a != b)
+        }
+        let strong = |e: &Option<String>| {
+            e.as_deref()
+                .map(|e| e.strip_prefix("W/").unwrap_or(e).to_owned())
+        };
+        differs(&strong(&self.etag), &strong(&old.etag))
+            || differs(&self.last_modified, &old.last_modified)
+            || differs(&self.length, &old.length)
+    }
+}
+
+/// An IPA downloaded into a private temporary file, not yet inspected.
+struct Fetched {
+    file: tempfile::NamedTempFile,
+    sha256: String,
+    size: u64,
+}
+
+/// An IPA from a link (no source): downloaded and inspected, with what identifies it.
+#[derive(Debug)]
+pub struct LinkedIpa {
+    pub artifact: ValidatedArtifact,
+    pub size: u64,
+    /// From the download response.
+    pub validators: Validators,
+}
+
 impl SourceClient {
     /// Downloads into a private temporary file in `dir`, checks size and SHA-256, then
     /// inspects the archive and validates its metadata against the release. Device
@@ -81,10 +144,126 @@ impl SourceClient {
         cancel: &CancellationToken,
         progress: &DownloadProgress,
     ) -> Result<ValidatedArtifact> {
-        self.check_url(&release.download_url)?;
         if let Some(reason) = device.and_then(|d| release.incompatibility(d)) {
             return Err(Error::new("IPA validation", reason));
         }
+        let (fetched, _) = self
+            .fetch_ipa(&release.download_url, release.size, dir, cancel, progress)
+            .await?;
+        let Fetched { file, sha256, size } = fetched;
+        if let Some(expected) = release.size
+            && size != expected
+        {
+            return Err(Error::new(
+                "IPA validation",
+                format!("Size mismatch: expected {expected} bytes, received {size}"),
+            ));
+        }
+        if release
+            .sha256
+            .as_ref()
+            .is_some_and(|expected| expected != &sha256)
+        {
+            return Err(Error::new(
+                "IPA validation",
+                format!(
+                    "SHA-256 mismatch: expected {}, actual {sha256}",
+                    release.sha256.as_deref().unwrap()
+                ),
+            ));
+        }
+        let expected = release.clone();
+        let bundle = bundle_id.to_owned();
+        let target = device.cloned();
+        let cancellation = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            let metadata = inspect_ipa(file.path(), &cancellation)?;
+            validate_metadata(&metadata, &expected, &bundle, target.as_ref())?;
+            if cancellation.is_cancelled() {
+                return Err(Error::new("IPA validation", "Cancelled"));
+            }
+            Ok(ValidatedArtifact {
+                file,
+                sha256,
+                metadata,
+            })
+        })
+        .await
+        .map_err(|e| Error::new("IPA validation", e))?
+    }
+
+    /// Downloads and inspects the IPA at `url`, which no source describes: its metadata
+    /// comes from the archive.
+    pub async fn download_linked(
+        &self,
+        url: &Url,
+        dir: &Path,
+        cancel: &CancellationToken,
+        progress: &DownloadProgress,
+    ) -> Result<LinkedIpa> {
+        let (fetched, validators) = self.fetch_ipa(url, None, dir, cancel, progress).await?;
+        let Fetched { file, sha256, size } = fetched;
+        let cancellation = cancel.clone();
+        let artifact = tokio::task::spawn_blocking(move || {
+            let metadata = inspect_ipa(file.path(), &cancellation)?;
+            if !crate::valid_bundle_id(&metadata.bundle_id) {
+                return Err(Error::new(
+                    "IPA validation",
+                    format!("Invalid bundle ID {:?}", metadata.bundle_id),
+                ));
+            }
+            Ok(ValidatedArtifact {
+                file,
+                sha256,
+                metadata,
+            })
+        })
+        .await
+        .map_err(|e| Error::new("IPA validation", e))??;
+        Ok(LinkedIpa {
+            artifact,
+            size,
+            validators,
+        })
+    }
+
+    /// What identifies the file at `url` now, from a `HEAD` request. Empty when the
+    /// server answers `HEAD` without any validator.
+    pub async fn validators(&self, url: &Url, cancel: &CancellationToken) -> Result<Validators> {
+        self.check_url(url)?;
+        let cancelled = || Error::new("Update check", "Cancelled");
+        let _permit = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled()),
+            p = self.permits.acquire() => p.map_err(|e| Error::new("Update check", e))?,
+        };
+        let request = self
+            .client
+            .head(url.clone())
+            .timeout(Duration::from_secs(30));
+        let response = tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled()),
+            r = request.send() => r.map_err(|e| crate::network::request_error("Update check", e))?,
+        };
+        if !response.status().is_success() {
+            return Err(Error::new(
+                "Update check",
+                format!("The IPA link answered HTTP {}.", response.status()),
+            ));
+        }
+        Ok(Validators::from_headers(response.headers()))
+    }
+
+    /// Streams the IPA at `url` into a private temporary file in `dir`, hashing it.
+    /// `size`: the declared size, for the time limit and progress.
+    async fn fetch_ipa(
+        &self,
+        url: &Url,
+        size: Option<u64>,
+        dir: &Path,
+        cancel: &CancellationToken,
+        progress: &DownloadProgress,
+    ) -> Result<(Fetched, Validators)> {
+        self.check_url(url)?;
         let _permit = tokio::select! { _=cancel.cancelled()=>return Err(Error::new("Download","Cancelled")),p=self.permits.acquire()=>p.map_err(|e|Error::new("Download",e))? };
         let started = tokio::time::Instant::now();
         let too_slow = || {
@@ -93,8 +272,8 @@ impl SourceClient {
                 "The download took too long. Retry on a faster connection.",
             )
         };
-        let deadline = started + download_time_limit(release.size);
-        let mut response = tokio::select! { _=cancel.cancelled()=>return Err(Error::new("Download","Cancelled")),_=tokio::time::sleep_until(deadline)=>return Err(too_slow()),r=self.client.get(release.download_url.clone()).send()=>r.map_err(|e|crate::network::request_error("Download",e))? };
+        let deadline = started + download_time_limit(size);
+        let mut response = tokio::select! { _=cancel.cancelled()=>return Err(Error::new("Download","Cancelled")),_=tokio::time::sleep_until(deadline)=>return Err(too_slow()),r=self.client.get(url.clone()).send()=>r.map_err(|e|crate::network::request_error("Download",e))? };
         if !response.status().is_success() {
             return Err(Error::new(
                 "Download",
@@ -110,16 +289,15 @@ impl SourceClient {
                 "Server returned HTML instead of an IPA (login page, expired link, or rate limit)",
             ));
         }
+        let validators = Validators::from_headers(response.headers());
         let length = response.content_length();
-        if length.is_some_and(|n| n > MAX_IPA_BYTES)
-            || release.size.is_some_and(|n| n > MAX_IPA_BYTES)
-        {
+        if length.is_some_and(|n| n > MAX_IPA_BYTES) || size.is_some_and(|n| n > MAX_IPA_BYTES) {
             return Err(Error::new("Download", "IPA exceeds 4 GiB limit"));
         }
         progress
             .total
-            .store(length.or(release.size).unwrap_or(0), Ordering::Relaxed);
-        let deadline = started + download_time_limit(length.or(release.size));
+            .store(length.or(size).unwrap_or(0), Ordering::Relaxed);
+        let deadline = started + download_time_limit(length.or(size));
         tokio::fs::create_dir_all(dir)
             .await
             .map_err(|e| Error::new("Download", e))?;
@@ -148,7 +326,7 @@ impl SourceClient {
             if size > MAX_IPA_BYTES {
                 return Err(Error::new("Download", "IPA exceeds 4 GiB limit"));
             }
-            // Hashing each network chunk is bounded work. Full archive work runs below on a worker.
+            // Hashing each network chunk is bounded work. Full archive work runs on a worker.
             hash.update(&chunk);
             output
                 .write_all(&chunk)
@@ -174,46 +352,14 @@ impl SourceClient {
                 format!("Incomplete response: received {size} bytes, expected {length:?}"),
             ));
         }
-        if let Some(expected) = release.size
-            && size != expected
-        {
-            return Err(Error::new(
-                "IPA validation",
-                format!("Size mismatch: expected {expected} bytes, received {size}"),
-            ));
-        }
-        let sha256 = hex::encode(hash.finalize());
-        if release
-            .sha256
-            .as_ref()
-            .is_some_and(|expected| expected != &sha256)
-        {
-            return Err(Error::new(
-                "IPA validation",
-                format!(
-                    "SHA-256 mismatch: expected {}, actual {sha256}",
-                    release.sha256.as_deref().unwrap()
-                ),
-            ));
-        }
-        let expected = release.clone();
-        let bundle = bundle_id.to_owned();
-        let target = device.cloned();
-        let cancellation = cancel.clone();
-        tokio::task::spawn_blocking(move || {
-            let metadata = inspect_ipa(temp.path(), &cancellation)?;
-            validate_metadata(&metadata, &expected, &bundle, target.as_ref())?;
-            if cancellation.is_cancelled() {
-                return Err(Error::new("IPA validation", "Cancelled"));
-            }
-            Ok(ValidatedArtifact {
+        Ok((
+            Fetched {
                 file: temp,
-                sha256,
-                metadata,
-            })
-        })
-        .await
-        .map_err(|e| Error::new("IPA validation", e))?
+                sha256: hex::encode(hash.finalize()),
+                size,
+            },
+            validators,
+        ))
     }
 }
 
@@ -416,6 +562,10 @@ pub fn inspect_ipa(path: &Path, cancel: &CancellationToken) -> Result<IpaMetadat
         .unwrap_or_default();
     Ok(IpaMetadata {
         bundle_id,
+        name: string("CFBundleDisplayName")
+            .or_else(|| string("CFBundleName"))
+            .map(|n| n.trim().to_owned())
+            .filter(|n| !n.is_empty()),
         version,
         build: string("CFBundleVersion"),
         min_os: string("MinimumOSVersion"),
@@ -432,7 +582,7 @@ const MAX_PLIST_VALUES: usize = 1_000_000;
 
 /// Checks a plist's nesting and size with the (non-recursive) event reader before it is
 /// deserialized.
-fn check_plist(bytes: &[u8]) -> std::result::Result<(), String> {
+pub(crate) fn check_plist(bytes: &[u8]) -> std::result::Result<(), String> {
     use plist::stream::{Event, Reader};
     let mut depth = 0usize;
     for (count, event) in Reader::new(std::io::Cursor::new(bytes)).enumerate() {

@@ -37,6 +37,9 @@ can only be reached from your own tailnet.
 - **Browse AltStore sources.** Add any source URL (raw GitHub and `blob` links included;
   modern and legacy feeds). Search, sort, see what's fresh this week, and hide apps you
   don't want or show only the ones you pick.
+- **Apps without a source.** Paste an app's download page or a link to its IPA. Kiwi
+  picks up the page's AltStore source when it has one, and otherwise keeps checking the
+  link for a new IPA.
 - **One-tap installs and updates.** Kiwi signs the right release for each iPhone's iOS
   version and hands it to iOS's own installer. Updates can be downloaded and signed in the
   background, so they're ready when you tap **Update**.
@@ -180,7 +183,8 @@ Plan on about half an hour, most of it in Apple's developer portal.
    The installer ends with Kiwi's address, such as `https://your-mac.your-tailnet.ts.net`.
 4. **Add Kiwi to your iPhone.** Open that address in Safari, tap **Share › Add to Home
    Screen** and open Kiwi from the Home Screen. Settings should say **Ready to sign**.
-5. **Install your first app.** In **Sources**, tap **+** and paste an AltStore source URL.
+5. **Install your first app.** In **Sources**, tap **+** and paste an AltStore source URL
+   (or an app's download page, or a link to an IPA).
    Tap **Get** on an app in **Browse** and confirm when iOS asks. The first time you open
    an app Kiwi signed, iOS asks you to turn on **Developer Mode** (Settings › Privacy &
    Security).

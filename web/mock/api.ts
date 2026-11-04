@@ -153,12 +153,12 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
   function sourceJson(source: MockSource): Source {
     if (source.id === BUILD_SOURCE) {
       const apps = db.apps.filter((a) => a.source_id === source.id);
-      return { ...source, kind: "local_build", app_count: apps.length, shown_count: apps.filter(isShown).length, new_count: 0 };
+      return { ...source, kind: "local_build", ipa_url: null, app_count: apps.length, shown_count: apps.filter(isShown).length, new_count: 0 };
     }
     const apps = db.apps.filter((a) => a.source_id === source.id);
     // Sources without fixture apps keep their stated count, as if every app were shown.
-    if (apps.length === 0) return { ...source, kind: "feed", shown_count: source.browse === "all" ? source.app_count : 0, new_count: 0 };
-    return { ...source, kind: "feed", app_count: apps.length, shown_count: apps.filter(isShown).length, new_count: apps.filter(isNew).length };
+    if (apps.length === 0) return { ...source, kind: "feed", ipa_url: null, shown_count: source.browse === "all" ? source.app_count : 0, new_count: 0 };
+    return { ...source, kind: "feed", ipa_url: null, app_count: apps.length, shown_count: apps.filter(isShown).length, new_count: apps.filter(isNew).length };
   }
 
   function storeApps(): MockStoreApp[] {

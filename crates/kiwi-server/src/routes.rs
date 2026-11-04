@@ -51,6 +51,7 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .route("/sources/refresh", post(refresh_sources))
         .route("/sources/{id}", patch(patch_source).delete(delete_source))
         .route("/sources/{id}/refresh", post(refresh_source))
+        .route("/icons/{file}", get(icon))
         .route("/apps", get(list_apps))
         .route(
             "/apps/{source_id}/{bundle_id}",
@@ -193,7 +194,8 @@ async fn api_guard(mut req: Request, next: Next) -> Response {
     };
     response
         .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        .entry(header::CACHE_CONTROL)
+        .or_insert(HeaderValue::from_static("no-store"));
     response
 }
 
@@ -526,8 +528,32 @@ async fn add_source(
     _: Ctx,
     JsonBody(body): JsonBody<AddSource>,
 ) -> ApiResult<Response> {
-    let row = sources::add(&kiwi, &body.url).await?;
+    // Adding an IPA downloads it, which can outlast the request (the iPhone may suspend the
+    // web app): the source is added even when nobody waits for the answer.
+    let task = tokio::spawn({
+        let kiwi = kiwi.clone();
+        async move { sources::add(&kiwi, &body.url).await }
+    });
+    let row = task.await.map_err(ApiError::internal)??;
     Ok((StatusCode::CREATED, source_json(&kiwi, &row)?).into_response())
+}
+
+/// An icon Kiwi took from an IPA (see [`crate::linked`]). Its name is its SHA-256.
+async fn icon(State(kiwi): K, _: Ctx, P(file): P<String>) -> ApiResult<Response> {
+    let not_found = || ApiError::not_found("Icon not found.");
+    let path = crate::linked::icon_file(&kiwi, &file).ok_or_else(not_found)?;
+    let bytes = tokio::fs::read(path).await.map_err(|_| not_found())?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (
+                header::CACHE_CONTROL,
+                "private, max-age=31536000, immutable",
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -565,7 +591,12 @@ async fn delete_source(State(kiwi): K, _: Ctx, P(id): P<String>) -> ApiResult<St
 }
 
 async fn refresh_source(State(kiwi): K, _: Ctx, P(id): P<String>) -> ApiResult<Json<SourceJson>> {
-    let row = sources::refresh(&kiwi, &id).await?;
+    // Finishes without a waiting client too: an app added by link may download its IPA.
+    let task = tokio::spawn({
+        let kiwi = kiwi.clone();
+        async move { sources::refresh(&kiwi, &id).await }
+    });
+    let row = task.await.map_err(ApiError::internal)??;
     kiwi.kick.notify_one();
     source_json(&kiwi, &row)
 }

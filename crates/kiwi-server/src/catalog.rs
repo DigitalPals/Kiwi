@@ -57,8 +57,11 @@ impl CatalogState {
 #[derive(Debug, Serialize)]
 pub struct SourceJson {
     pub id: String,
+    /// `feed`, `ipa` (an IPA link or download page) or `local_build`.
     pub kind: &'static str,
     pub url: String,
+    /// The IPA an `ipa` source's app comes from now.
+    pub ipa_url: Option<String>,
     pub name: String,
     pub subtitle: Option<String>,
     pub icon_url: Option<String>,
@@ -90,13 +93,19 @@ impl SourceJson {
             id: row.id.clone(),
             kind: if row.id == crate::automation::SOURCE_ID {
                 "local_build"
+            } else if row.source.link.is_some() {
+                "ipa"
             } else {
                 "feed"
             },
+            ipa_url: row.source.link.as_ref().map(|l| l.ipa.to_string()),
             url: row.url.clone(),
             name: catalog.name.clone(),
             subtitle: catalog.subtitle.clone(),
-            icon_url: catalog.icon_url.as_ref().map(|u| u.to_string()),
+            icon_url: catalog
+                .icon_url
+                .as_ref()
+                .map(|u| crate::linked::client_icon(u.as_str())),
             enabled: row.enabled,
             app_count: catalog.apps.len(),
             browse: row.browse,

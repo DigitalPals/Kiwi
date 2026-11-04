@@ -1,6 +1,7 @@
 use crate::{
-    CancellationToken, Error, Result, Source, SourceInput, Url, github_raw, is_public_ip,
-    network_url, parse_catalog, public_url, source_input, source_key, urls::BLOCKED,
+    CancellationToken, Error, PageLinks, Result, Source, SourceInput, Url, github_raw,
+    is_public_ip, network_url, page_links, parse_catalog, public_url, source_input, source_key,
+    urls::BLOCKED,
 };
 use reqwest::{
     Client, StatusCode,
@@ -209,22 +210,46 @@ impl SourceClient {
         previous: Option<&Source>,
         cancel: &CancellationToken,
     ) -> Result<Option<Source>> {
-        self.check_url(&url)?;
+        let validators = previous.map(|old| (old.etag.clone(), old.last_modified.clone()));
+        let Some(response) = self.get(&url, validators, cancel).await? else {
+            return Ok(None);
+        };
+        if is_html(&response) {
+            return Err(Error::new(
+                "Source fetch",
+                "Server returned HTML, not JSON. Check the raw URL or whether the source requires login.",
+            ));
+        }
+        let body = limited_body(response.response, MAX_FEED_BYTES, cancel, "Source fetch").await?;
+        self.parse_source(url, body, response.etag, response.last_modified, cancel)
+            .await
+            .map(Some)
+    }
+    /// A `GET` for a feed or page; `None` for `304 Not Modified` when `validators` (ETag,
+    /// Last-Modified) were sent.
+    async fn get(
+        &self,
+        url: &Url,
+        validators: Option<(Option<String>, Option<String>)>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<Fetched>> {
+        self.check_url(url)?;
         let _permit = tokio::select! { _=cancel.cancelled()=>return Err(Error::new("Source fetch","Cancelled")),p=self.permits.acquire()=>p.map_err(|e|Error::new("Source fetch",e))? };
         let mut request = self
             .client
             .get(url.clone())
             .timeout(Duration::from_secs(60));
-        if let Some(old) = previous {
-            if let Some(etag) = &old.etag {
+        let conditional = validators.is_some();
+        if let Some((etag, last)) = validators {
+            if let Some(etag) = etag {
                 request = request.header(IF_NONE_MATCH, etag);
             }
-            if let Some(last) = &old.last_modified {
+            if let Some(last) = last {
                 request = request.header(IF_MODIFIED_SINCE, last);
             }
         }
         let response = tokio::select! { _=cancel.cancelled()=>return Err(Error::new("Source fetch","Cancelled")),r=request.send()=>r.map_err(|e|crate::network::request_error("Source fetch",e))? };
-        if response.status() == StatusCode::NOT_MODIFIED && previous.is_some() {
+        if response.status() == StatusCode::NOT_MODIFIED && conditional {
             return Ok(None);
         }
         if !response.status().is_success() {
@@ -236,13 +261,6 @@ impl SourceClient {
                 ),
             ));
         }
-        if is_html(&response) {
-            return Err(Error::new(
-                "Source fetch",
-                "Server returned HTML, not JSON. Check the raw URL or whether the source requires login.",
-            ));
-        }
-        let fetched_url = response.url().clone();
         let header = |name| {
             response
                 .headers()
@@ -250,16 +268,28 @@ impl SourceClient {
                 .and_then(|s| s.to_str().ok())
                 .map(str::to_owned)
         };
-        let etag = header(ETAG);
-        let last_modified = header(LAST_MODIFIED);
-        let bytes = limited_body(response, MAX_FEED_BYTES, cancel, "Source fetch").await?;
-        let catalog = tokio::task::spawn_blocking(move || parse_catalog(&bytes, &fetched_url))
+        Ok(Some(Fetched {
+            etag: header(ETAG),
+            last_modified: header(LAST_MODIFIED),
+            response,
+        }))
+    }
+    async fn parse_source(
+        &self,
+        url: Url,
+        bytes: Vec<u8>,
+        etag: Option<String>,
+        last_modified: Option<String>,
+        cancel: &CancellationToken,
+    ) -> Result<Source> {
+        let base = url.clone();
+        let catalog = tokio::task::spawn_blocking(move || parse_catalog(&bytes, &base))
             .await
             .map_err(|e| Error::new("Source parse", e))??;
         if cancel.is_cancelled() {
             return Err(Error::new("Source fetch", "Cancelled"));
         }
-        Ok(Some(Source {
+        Ok(Source {
             key: source_key(&url),
             url,
             enabled: true,
@@ -268,7 +298,109 @@ impl SourceClient {
             last_modified,
             last_success: Some(chrono::Utc::now()),
             error: None,
-        }))
+            link: None,
+        })
+    }
+    /// What the URL a user pasted offers: an AltStore source, a download page (its
+    /// AltStore source when it links one, otherwise its first IPA link) or an IPA.
+    pub async fn find(&self, url: Url, cancel: &CancellationToken) -> Result<Found> {
+        if url.path().to_ascii_lowercase().ends_with(".ipa") {
+            self.check_url(&url)?;
+            return Ok(Found::Ipa {
+                ipa: url,
+                page: None,
+            });
+        }
+        let fetched = self
+            .get(&url, None, cancel)
+            .await?
+            .ok_or_else(|| Error::new("Source fetch", "Unexpected 304 for a new source"))?;
+        if is_html(&fetched) {
+            let page = self.read_page(url, fetched, cancel).await?;
+            if let Some(source) = page.links.sources.first() {
+                let source = self
+                    .fetch(source.clone(), None, cancel)
+                    .await
+                    .map_err(|e| {
+                        Error::new(
+                            e.stage,
+                            format!(
+                                "The page links an AltStore source ({source}), but: {}",
+                                e.detail
+                            ),
+                        )
+                    })?;
+                return source
+                    .map(Found::Source)
+                    .ok_or_else(|| Error::new("Source fetch", "Unexpected 304 for a new source"));
+            }
+            let Some(ipa) = page.links.ipas.first().cloned() else {
+                return Err(Error::new(
+                    "Source fetch",
+                    "This page links no AltStore source and no IPA. Paste the source's or the IPA's own URL.",
+                ));
+            };
+            return Ok(Found::Ipa {
+                ipa,
+                page: Some(page),
+            });
+        }
+        let mut response = fetched.response;
+        // An IPA (a ZIP archive) behind a URL without the extension.
+        let first = tokio::select! { _=cancel.cancelled()=>return Err(Error::new("Source fetch","Cancelled")),r=response.chunk()=>r.map_err(|e|request_error("Source fetch",e))? };
+        let first = first.map(|b| b.to_vec()).unwrap_or_default();
+        if first.starts_with(b"PK\x03\x04") {
+            return Ok(Found::Ipa {
+                ipa: url,
+                page: None,
+            });
+        }
+        let body =
+            limited_body_after(response, first, MAX_FEED_BYTES, cancel, "Source fetch").await?;
+        self.parse_source(url, body, fetched.etag, fetched.last_modified, cancel)
+            .await
+            .map(Found::Source)
+    }
+    /// A download page's links now; `None` when it has not changed since `previous`
+    /// (its ETag and Last-Modified).
+    pub async fn page(
+        &self,
+        url: &Url,
+        previous: (Option<String>, Option<String>),
+        cancel: &CancellationToken,
+    ) -> Result<Option<DownloadPage>> {
+        let Some(fetched) = self.get(url, Some(previous), cancel).await? else {
+            return Ok(None);
+        };
+        if !is_html(&fetched) {
+            return Err(Error::new(
+                "Source fetch",
+                "The download page is no longer a web page.",
+            ));
+        }
+        self.read_page(url.clone(), fetched, cancel).await.map(Some)
+    }
+    async fn read_page(
+        &self,
+        url: Url,
+        fetched: Fetched,
+        cancel: &CancellationToken,
+    ) -> Result<DownloadPage> {
+        let base = fetched.response.url().clone();
+        let body = limited_body(
+            fetched.response,
+            crate::page::MAX_PAGE_BYTES as u64,
+            cancel,
+            "Source fetch",
+        )
+        .await?;
+        let html = String::from_utf8_lossy(&body);
+        Ok(DownloadPage {
+            links: page_links(&html, &base),
+            url,
+            etag: fetched.etag,
+            last_modified: fetched.last_modified,
+        })
     }
     /// Fetches artwork (icons, screenshots), at most [`MAX_IMAGE_BYTES`].
     pub async fn image(&self, url: &Url, cancel: &CancellationToken) -> Result<Vec<u8>> {
@@ -313,6 +445,42 @@ impl SourceClient {
         limited_body(response, max, cancel, stage).await
     }
 }
+/// A successful `GET`, with the validators for the next conditional one.
+pub(crate) struct Fetched {
+    response: reqwest::Response,
+    etag: Option<String>,
+    last_modified: Option<String>,
+}
+impl std::ops::Deref for Fetched {
+    type Target = reqwest::Response;
+    fn deref(&self) -> &reqwest::Response {
+        &self.response
+    }
+}
+
+/// What a pasted URL offers (see [`SourceClient::find`]).
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // One per added source.
+pub enum Found {
+    /// An AltStore source, possibly the one a download page links.
+    Source(Source),
+    /// An IPA, and the download page it was found on.
+    Ipa {
+        ipa: Url,
+        page: Option<DownloadPage>,
+    },
+}
+
+/// A download page and what it links.
+#[derive(Debug, Clone)]
+pub struct DownloadPage {
+    /// The page's URL as added (before redirects).
+    pub url: Url,
+    pub links: PageLinks,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
 pub(crate) fn is_html(response: &reqwest::Response) -> bool {
     response
         .headers()
@@ -321,7 +489,7 @@ pub(crate) fn is_html(response: &reqwest::Response) -> bool {
         .is_some_and(|s| s.contains("text/html") || s.contains("application/xhtml"))
 }
 pub(crate) async fn limited_body(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     max: u64,
     cancel: &CancellationToken,
     stage: &'static str,
@@ -329,7 +497,19 @@ pub(crate) async fn limited_body(
     if response.content_length().is_some_and(|n| n > max) {
         return Err(Error::new(stage, "Response exceeds size limit"));
     }
-    let mut bytes = vec![];
+    limited_body_after(response, vec![], max, cancel, stage).await
+}
+/// The rest of a body whose start (`bytes`) was already read.
+async fn limited_body_after(
+    mut response: reqwest::Response,
+    mut bytes: Vec<u8>,
+    max: u64,
+    cancel: &CancellationToken,
+    stage: &'static str,
+) -> Result<Vec<u8>> {
+    if bytes.len() as u64 > max {
+        return Err(Error::new(stage, "Response exceeds size limit"));
+    }
     loop {
         let chunk = tokio::select! { _=cancel.cancelled()=>return Err(Error::new(stage,"Cancelled")),r=response.chunk()=>r.map_err(|e|request_error(stage,e))? };
         let Some(chunk) = chunk else {

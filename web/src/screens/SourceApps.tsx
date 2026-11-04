@@ -46,6 +46,8 @@ function AppCell(props: { app: AppSummary; onToggle: (app: AppSummary, shown: bo
 /** On or off, the URL, refreshing and the source's warnings. */
 function SourceSettings({ source, onChange }: { source: Source; onChange: (source: Source) => void }) {
   const local = source.kind === "local_build";
+  const link = source.kind === "ipa";
+  const page = link && source.ipa_url !== source.url;
   const [optimistic, setOptimistic] = useState<boolean | null>(null);
   const toggle = useTask(async (enabled: boolean) => {
     setOptimistic(enabled);
@@ -68,8 +70,14 @@ function SourceSettings({ source, onChange }: { source: Source; onChange: (sourc
       )}
       <Section footer={error ? <span class="danger">{error}</span> : source.subtitle}>
         <Cell
-          label={local ? "Show in Kiwi" : "Use This Source"}
-          sub={local ? "Kiwi Builds' apps in Browse and My Apps" : "Turn off to hide its apps without removing it"}
+          label={local ? "Show in Kiwi" : link ? "Use This Link" : "Use This Source"}
+          sub={
+            local
+              ? "Kiwi Builds' apps in Browse and My Apps"
+              : link
+                ? "Turn off to hide its app without removing it"
+                : "Turn off to hide its apps without removing it"
+          }
         >
           <Toggle
             checked={optimistic ?? source.enabled}
@@ -83,9 +91,15 @@ function SourceSettings({ source, onChange }: { source: Source; onChange: (sourc
         ) : (
           <>
             <div class="cell cell-stacked">
-              <div class="cell-label">URL</div>
+              <div class="cell-label">{page ? "Download Page" : link ? "IPA Link" : "URL"}</div>
               <div class="source-url">{source.url}</div>
             </div>
+            {page && source.ipa_url && (
+              <div class="cell cell-stacked">
+                <div class="cell-label">Current IPA</div>
+                <div class="source-url">{source.ipa_url}</div>
+              </div>
+            )}
             <Cell label={source.error ? "Try Again" : "Refresh"} sub={checked}>
               <button
                 type="button"

@@ -174,7 +174,7 @@ def macho_info(data):
     return encrypted, libraries
 
 
-def inspect_ipa(path, bundle_id, *, decrypted=False, markers=(), removable=False, extensions=()):
+def inspect_ipa(path, bundle_id, *, decrypted=False, markers=(), removable=False):
     """Validate an IPA of `bundle_id`. `markers` must name injected libraries the main
     executable loads; `removable` skips extensions that injection will remove."""
     if path.stat().st_size > MAX_IPA:
@@ -229,20 +229,6 @@ def inspect_ipa(path, bundle_id, *, decrypted=False, markers=(), removable=False
         for marker in markers:
             if not any(marker in n.lower() for n in seen) or not any(marker in lib.lower() for lib in libraries):
                 raise BuildError(f"The {marker} patch is missing from the app or its executable load commands")
-        for extension in extensions:
-            base = root + "/" + extension["path"]
-            if base + "/Info.plist" not in seen:
-                raise BuildError("The required keyboard extension is missing")
-            entry = archive.getinfo(base + "/Info.plist")
-            if entry.file_size > 4 * 1024**2:
-                raise BuildError("The keyboard Info.plist is too large")
-            nested = plistlib.loads(archive.read(entry))
-            executable = nested.get("CFBundleExecutable", "")
-            if nested.get("CFBundleIdentifier") != extension["bundle_id"] or not executable or "/" in executable or executable in (".", ".."):
-                raise BuildError("The keyboard extension identity is invalid")
-            code = macho_info(archive.read(base + "/" + executable))
-            if code is None or code[0] or any(not any(m in lib.lower() for lib in code[1]) for m in extension["markers"]):
-                raise BuildError("The keyboard extension is encrypted or does not load its required patch")
         return info
 
 
@@ -426,76 +412,6 @@ class Builder:
         checks.append({"name": "Private decryption enrollment", "ready": bool(models) and all(p.stat().st_mode & 0o077 == 0 for p in models)})
         return {"checks": checks, "ready": all(c["ready"] for c in checks)}
 
-    def native_toolchain(self):
-        """Native recipes use Xcode directly, without App Store/tweak tooling."""
-        if sys.platform != "darwin":
-            raise BuildError("Native iOS builds need a Mac with full Xcode installed.", True)
-        self.env.setdefault("DEVELOPER_DIR", "/Applications/Xcode.app/Contents/Developer")
-        try:
-            sdk = self.command(["xcrun", "--sdk", "iphoneos", "--show-sdk-version"], capture=True).strip()
-            compiler = self.command(["xcrun", "--sdk", "iphoneos", "swiftc", "--version"], capture=True).strip()
-            for tool in ("codesign", "say", "afconvert", "ditto", "curl"):
-                self.tool(tool)
-        except BuildError as error:
-            raise BuildError("Install full Xcode and its iOS SDK on the Mac to build Rambler.", True) from error
-        return {"sdk": sdk, "compiler": compiler}
-
-    def native_sources(self, app):
-        source = (app.get("native") or app["integration"])["source"]
-        if not re.fullmatch(r"[a-z0-9-]+", source):
-            raise BuildError("Invalid native source identifier")
-        manifest = self.root / "native" / f"{source}.json"
-        if not manifest.is_file() or manifest.stat().st_size > 1024**2:
-            raise BuildError("The native app source is missing. Update and restart Kiwi on the Mac.", True)
-        files = json.loads(manifest.read_text())
-        if not isinstance(files, dict) or not files:
-            raise BuildError("Invalid native source manifest")
-        for name, text in files.items():
-            path = PurePosixPath(name)
-            if (path.is_absolute() or ".." in path.parts or "\\" in name or not path.parts
-                    or not isinstance(text, str)):
-                raise BuildError("Native source paths must stay inside their source")
-        return files, digest(manifest)
-
-    def native_plan(self, app, options):
-        emit("stage", stage="Checking native iOS build tools")
-        try:
-            toolchain = self.native_toolchain()
-        except BuildError:
-            emit("health", checks=[{"name": "Native iOS build tools", "ready": False}], ready=False)
-            raise
-        emit("health", checks=[{"name": "Native iOS build tools", "ready": True}], ready=True)
-        tweaks, name = self.options(app, options)
-        _, source_sha = self.native_sources(app)
-        plan = {"app": app["id"], "external_id": f"native-{source_sha[:16]}", "version": app["native"]["version"],
-                "recipe": {"toolchain": self.toolchain, "app": app}, "tweaks": tweaks, "name": name,
-                "runner_sha256": digest(Path(__file__)), "native_source_sha256": source_sha, "toolchain": toolchain}
-        plan["key"] = recipe_key(plan)
-        emit("plan", plan=plan)
-
-    def native_dependency(self, app):
-        dependency = (app.get("native") or app["integration"])["dependency"]
-        sha = dependency["sha256"]
-        if not re.fullmatch(r"[0-9a-f]{64}", sha) or not dependency["url"].startswith("https://"):
-            raise BuildError("Native dependencies must use HTTPS and a pinned SHA-256")
-        cache = self.tools / "native-inputs"
-        cache.mkdir(mode=0o700, exist_ok=True)
-        target = cache / f"{sha}.apk"
-        if target.is_file() and digest(target) == sha:
-            return target
-        emit("stage", stage="Downloading pinned Rambler caller metadata")
-        partial = target.with_suffix(".partial")
-        try:
-            self.command([self.tool("curl"), "--fail", "--location", "--max-filesize", str(100 * 1024**2),
-                          "--max-time", "600", "--output", partial, dependency["url"]], timeout=660,
-                         message="The pinned Rambler dependency could not be downloaded. Retry the build on the Mac.")
-            if partial.stat().st_size > 100 * 1024**2 or digest(partial) != sha:
-                raise BuildError("The Rambler dependency does not match its pinned SHA-256")
-            os.replace(partial, target)
-        finally:
-            partial.unlink(missing_ok=True)
-        return target
-
     def setup(self):
         if sys.platform != "darwin":
             raise BuildError("Setup must run on macOS")
@@ -575,8 +491,6 @@ class Builder:
         return tweaks, name if app.get("names") else None
 
     def plan(self, app, options):
-        if app.get("native"):
-            return self.native_plan(app, options)
         health = self.doctor()
         emit("health", **health)
         if not health["ready"]:
@@ -604,9 +518,6 @@ class Builder:
                 "recipe": {"toolchain": self.toolchain, "app": app}, "tweaks": tweaks, "name": name,
                 "runner_sha256": digest(Path(__file__)),
                 "toolchain": json.loads((self.tools / "setup.json").read_text())}
-        if app.get("integration"):
-            _, plan["native_source_sha256"] = self.native_sources(app)
-            plan["native_toolchain"] = self.native_toolchain()
         plan["key"] = recipe_key(plan)
         emit("plan", plan=plan)
 
@@ -694,47 +605,29 @@ class Builder:
                 or plan["recipe"] != {"toolchain": self.toolchain, "app": app} or plan["runner_sha256"] != digest(Path(__file__))):
             raise BuildError("The build plan changed; check for updates again")
         tweaks, name = self.options(app, plan)
-        if app.get("native"):
-            return self.build_native(app, plan, sequence, job_dir)
-        if app.get("integration"):
-            _, source_sha = self.native_sources(app)
-            if source_sha != plan.get("native_source_sha256") or plan.get("native_toolchain") != self.native_toolchain():
-                raise BuildError("The Gboard build inputs changed; check for updates again")
         original = job_dir / "original.ipa"
         emit("stage", stage=f"Downloading original {app['name']}")
         self.ipa(["download", "--app-id", app["app_id"], "--external-version-id", plan["external_id"], "--platform", "iphone", "--purchase", "--output", str(original)])
         info = inspect_ipa(original, app["bundle_id"])
         if info.get("CFBundleShortVersionString") != plan["version"]:
             raise BuildError(f"Apple served a different {app['name']} version than requested")
-        if app.get("integration") and info.get("CFBundleVersion") != app["integration"]["build"]:
-            raise BuildError("Apple served a different Gboard build than the inspected integration supports")
         original_sha = digest(original)
         emit("stage", stage=f"Decrypting {app['name']}")
         decrypted = job_dir / "decrypted.ipa"
         self.command([self.tool("unfairplay"), "decrypt", "--input", original, "--output", decrypted, "--model", self.root / "models"], timeout=1800,
                      message="Decryption failed. Verify the Mac enrollment matches the App Store account.")
         original.unlink()
-        inspect_ipa(decrypted, app["bundle_id"], decrypted=True, removable=not app.get("integration"))
+        inspect_ipa(decrypted, app["bundle_id"], decrypted=True, removable=True)
+        products = self.compile_tweaks(app, tweaks, job_dir)
+        emit("stage", stage="Injecting tweaks")
         injected = job_dir / "injected.ipa"
-        if app.get("integration"):
-            source, output, caller, sample, _ = self.prepare_rambler(app, plan, job_dir, "native_toolchain")
-            emit("stage", stage="Compiling native Gboard Rambler hooks")
-            self.command(["/bin/bash", source / "build-gboard.sh", output], timeout=300,
-                         message="The native Gboard Rambler hooks did not compile.")
-            products = [output / "KiwiGboardRambler.dylib"]
-            emit("stage", stage="Integrating Rambler and preserving Gboard's keyboard")
-            self.command([sys.executable, source / "inject-gboard.py", decrypted, products[0], caller, sample, injected, "--pinned"],
-                         message="Gboard integration failed. The app must match the inspected 2.3.19 build.")
-        else:
-            products = self.compile_tweaks(app, tweaks, job_dir)
-            emit("stage", stage="Injecting tweaks")
-            self.command([self.tool("cyan"), "-i", decrypted, "-o", injected, "-uwef", *products,
-                          *(["-n", name] if name else []), "-b", app["bundle_id"]], timeout=1800,
-                         message=f"Tweak injection failed. The new {app['name']} build may need an updated patch recipe.")
+        self.command([self.tool("cyan"), "-i", decrypted, "-o", injected, "-uwef", *products,
+                      *(["-n", name] if name else []), "-b", app["bundle_id"]], timeout=1800,
+                     message=f"Tweak injection failed. The new {app['name']} build may need an updated patch recipe.")
         candidate = job_dir / "candidate.ipa"
         stamp_revision(injected, candidate, sequence)
         emit("stage", stage="Validating patched executables")
-        patched = inspect_ipa(candidate, app["bundle_id"], decrypted=True, markers=app["markers"], extensions=app.get("extensions", []))
+        patched = inspect_ipa(candidate, app["bundle_id"], decrypted=True, markers=app["markers"])
         for key in ("CFBundleVersion", "CFBundleShortVersionString"):
             if not info.get(key) or patched.get(key) != info[key]:
                 raise BuildError(f"Patching changed {app['name']}’s original version metadata")
@@ -745,68 +638,10 @@ class Builder:
                       "original_sha256": original_sha, "sha256": sha, "built_at": time.time(),
                       "packages": [{"name": p.name, "sha256": tree_digest(p)} for p in products],
                       "runtime_tested": False}
-        if app.get("integration"):
-            provenance.update(native_source_sha256=plan["native_source_sha256"],
-                              dependency_sha256=app["integration"]["dependency"]["sha256"], speech_service_verified=True)
         (self.root / "artifacts" / f"{sha}.json").write_bytes(canonical(provenance))
         emit("artifact", sha256=sha, version=patched["CFBundleShortVersionString"], build=patched["CFBundleVersion"], revision=sequence,
              min_os=patched.get("MinimumOSVersion"), size=artifact.stat().st_size,
-             notes=f"{app['name']} {plan['version']} · Apple build {plan['external_id']}\n{app['tweak']} compiled from pinned sources.\nRecipe {expected_key[:12]}. Not yet tested on a physical device.")
-
-    def prepare_rambler(self, app, plan, job_dir, toolchain_key="toolchain"):
-        files, source_sha = self.native_sources(app)
-        if source_sha != plan.get("native_source_sha256") or plan[toolchain_key] != self.native_toolchain():
-            raise BuildError("The native build inputs changed; check for updates again")
-        source = job_dir / "source"
-        source.mkdir()
-        for name, text in files.items():
-            path = source / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text)
-        dependency = self.native_dependency(app)
-        emit("stage", stage="Extracting private Rambler caller configuration")
-        caller = job_dir / "caller.json"
-        self.command([sys.executable, source / "extract-caller.py", dependency, caller],
-                     message="The pinned Rambler caller configuration could not be extracted.")
-        sample = job_dir / "sample.wav"
-        self.command(["/bin/bash", source / "make-sample.sh", sample],
-                     message="The Mac could not generate Rambler's synthetic speech sample.")
-        output = job_dir / "output"
-        emit("stage", stage="Testing and compiling the native Rambler client")
-        for mode in ("test", "cli"):
-            self.command(["/bin/bash", source / "build.sh", mode, output], timeout=300,
-                         message="The native Rambler client did not compile or pass its protocol tests.")
-        emit("stage", stage="Verifying Rambler speech corrections")
-        raw = self.command([output / "rambler-cli", caller, sample], capture=True, timeout=90,
-                           message="Rambler's speech service check failed. The previous release remains available.")
-        result = json.loads(raw)
-        text = result.get("text", "").lower()
-        if result.get("voiceEditing") is not True or result.get("completed") is not True or "wednesday" not in text or "tuesday" in text:
-            raise BuildError("Rambler did not return the expected spoken correction; the build was not published")
-        return source, output, caller, sample, source_sha
-
-    def build_native(self, app, plan, sequence, job_dir):
-        source, output, caller, sample, source_sha = self.prepare_rambler(app, plan, job_dir)
-        emit("stage", stage="Building the Rambler iPhone app")
-        self.command(["/bin/bash", source / "build.sh", "device", output, caller, sample], timeout=300,
-                     message="The native Rambler iPhone app did not compile.")
-        candidate = job_dir / "candidate.ipa"
-        stamp_revision(output / "RamblerPoC.ipa", candidate, sequence)
-        emit("stage", stage="Validating native iOS executables")
-        info = inspect_ipa(candidate, app["bundle_id"], decrypted=True)
-        if info.get("CFBundleShortVersionString") != plan["version"] or info.get("CFBundleVersion") != app["native"]["build"]:
-            raise BuildError("The native app version differs from its recipe")
-        sha = digest(candidate)
-        artifact = self.root / "artifacts" / f"{sha}.ipa"
-        os.replace(candidate, artifact)
-        provenance = {"plan": plan, "sequence": sequence, "base_build": info["CFBundleVersion"],
-                      "sha256": sha, "built_at": time.time(), "native_source_sha256": source_sha,
-                      "dependency_sha256": app["native"]["dependency"]["sha256"],
-                      "speech_service_verified": True, "runtime_tested": False}
-        artifact.with_suffix(".json").write_bytes(canonical(provenance))
-        emit("artifact", sha256=sha, version=info["CFBundleShortVersionString"], build=info["CFBundleVersion"], revision=sequence,
-             min_os=info.get("MinimumOSVersion"), size=artifact.stat().st_size,
-             notes=f"{app['name']} {plan['version']} · Native iOS client\nBuilt from Kiwi's bundled Swift sources. Synthetic Rambler speech correction verified.\nRecipe {plan['key'][:12]}. Physical iPhone recording remains untested.")
+             notes=f"{app['name']} {plan['version']} · Apple build {plan['external_id']}\n{app['tweak']} and tweaks compiled from pinned sources.\nRecipe {expected_key[:12]}. Not yet tested on a physical device.")
 
 
 def main():

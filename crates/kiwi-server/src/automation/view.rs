@@ -185,14 +185,7 @@ pub fn app_view(kiwi: &Kiwi, id: &str) -> ApiResult<AppView> {
     let mut state = kiwi.automation.snapshot();
     let app = state.apps.remove(id).unwrap_or_default();
     let jobs = state.jobs.into_iter().filter(|j| j.app == id).collect();
-    let checks = state.app_checks.remove(id).unwrap_or_else(|| {
-        if recipe.native.is_some() {
-            Vec::new()
-        } else {
-            state.checks
-        }
-    });
-    Ok(build_view(kiwi, recipe, app, jobs, checks))
+    Ok(build_view(kiwi, recipe, app, jobs, state.checks))
 }
 
 /// Every app Kiwi can build, with its latest jobs, and the shared Mac setup checks.

@@ -71,7 +71,7 @@ export function overviewSummary(overview: AutomationOverview): string {
   if (running) return `${running.name}: ${activeJob(running)!.stage}`;
   const attention = added.find(needsAttention);
   if (attention) return `${attention.name} needs attention`;
-  if (added.length === 0) return "Build and sign apps on your Mac";
+  if (added.length === 0) return "Patch and sign App Store apps on your Mac";
   return added.length <= 2 ? added.map((a) => a.name).join(" and ") : plural(added.length, "app");
 }
 

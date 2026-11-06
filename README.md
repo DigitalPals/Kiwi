@@ -51,9 +51,7 @@ can only be reached from your own tailnet.
 - **App Store originals.** Patched apps show the App Store app they're based on and warn you
   when the App Store is ahead.
 - **Kiwi Builds (optional, off by default).** Build patched YouTube, YouTube Music, Twitch,
-  X and Reddit apps on your Mac from pinned open-source tweaks, on a schedule. Experimental
-  extras bring Rambler dictation (filler words removed, spoken corrections applied) to a
-  patched Gboard keyboard and a small dictation app.
+  X and Reddit apps on your Mac from pinned open-source tweaks, on a schedule.
 - **Private by design.** Kiwi listens on `127.0.0.1` only. `tailscale serve` publishes it to
   your tailnet over HTTPS, never to the internet, and only your own Tailscale user can use it.
 
@@ -244,8 +242,7 @@ your Mac.
 Kiwi is an independent project. It is not affiliated with Apple, AltStore or Tailscale.
 Install only apps you trust and are allowed to use. Kiwi Builds modifies App Store apps and
 may break their terms of service; it is off unless you turn it on, and it's for your own
-devices only. Its Rambler apps use a private Google speech service that Google may close
-at any time. See [Kiwi Builds](docs/kiwi-builds.md) before you use it.
+devices only. See [Kiwi Builds](docs/kiwi-builds.md) before you use it.
 
 ## License
 

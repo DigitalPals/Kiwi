@@ -33,7 +33,6 @@ const LEGACY_META: &str = "youtube_automation_v1";
 const RECIPES: &str = include_str!("../../../automation/recipes.json");
 const RUNNER: &str = include_str!("../../../automation/runner.py");
 
-mod native;
 mod view;
 pub use view::{AppView, Overview, app_view, overview};
 
@@ -60,9 +59,6 @@ pub struct Recipe {
     /// When set, build only this supported App Store version.
     #[serde(default)]
     pub app_version: Option<String>,
-    /// Native app recipe; absent for patched App Store apps.
-    #[serde(default)]
-    pub native: Option<Value>,
     pub interval_minutes: u32,
     /// Releases kept in the source (and their inputs on disk).
     pub retain: usize,
@@ -246,8 +242,6 @@ pub struct State {
     /// Newest first, at most [`JOBS_PER_APP`] per app.
     pub jobs: Vec<Job>,
     pub checks: Vec<Value>,
-    /// App-specific requirements; native apps do not need App Store enrollment.
-    pub app_checks: BTreeMap<String, Vec<Value>>,
 }
 const JOBS_PER_APP: usize = 30;
 
@@ -283,7 +277,6 @@ impl From<LegacyState> for State {
             apps: BTreeMap::from([("youtube".into(), youtube)]),
             jobs: old.jobs,
             checks: old.checks,
-            app_checks: BTreeMap::new(),
         }
     }
 }
@@ -309,6 +302,9 @@ impl Automation {
                 None => State::default(),
             },
         };
+        // Apps whose recipe Kiwi no longer ships (Rambler PoC and Gboard Rambler).
+        state.apps.retain(|id, _| recipe(id).is_ok());
+        state.jobs.retain(|j| recipe(&j.app).is_ok());
         for recipe in recipes() {
             state
                 .apps
@@ -345,9 +341,11 @@ impl Automation {
                 std::fs::rename(temporary, path).map_err(|e| e.to_string())?;
             }
         }
-        native::install(&root)?;
-        // The single-app recipe this file replaced.
+        // The single-app recipe this file replaced, and the retired Rambler apps' sources
+        // and their cached caller-metadata download.
         let _ = std::fs::remove_file(root.join("recipe.json"));
+        let _ = std::fs::remove_dir_all(root.join("native"));
+        let _ = std::fs::remove_dir_all(root.join("tools/native-inputs"));
         Ok(Self {
             state: Mutex::new(state),
             running: Mutex::new(None),
@@ -760,10 +758,7 @@ async fn runner(
                         .clone();
                     kiwi.automation
                         .change(&kiwi.db, |s| {
-                            s.app_checks.insert(job.app.clone(), checks.clone());
-                            if recipe(&job.app)?.native.is_none() {
-                                s.checks = checks;
-                            }
+                            s.checks = checks;
                             Ok(())
                         })
                         .map_err(failed)?;
@@ -848,7 +843,7 @@ async fn execute(
         .ok_or_else(|| failed(format!("Missing {} version", recipe.name)))?;
     let external = plan["external_id"]
         .as_str()
-        .ok_or_else(|| failed("Missing build identifier"))?;
+        .ok_or_else(|| failed("Missing Apple build identifier"))?;
     kiwi.automation
         .job(&kiwi.db, id, |j| {
             j.version = Some(version.into());
@@ -882,7 +877,7 @@ async fn execute(
     let artifact = events
         .iter()
         .find(|e| e["event"] == "artifact")
-        .ok_or_else(|| failed("The builder returned no IPA"))?;
+        .ok_or_else(|| failed("The builder returned no patched IPA"))?;
     let release = validate_artifact(kiwi, recipe, artifact, version, job.sequence, token).await?;
     let update = (recipe, preferences.name.as_deref(), release.clone());
     let row = source_row(kiwi, Some(update.clone()))
@@ -1225,6 +1220,21 @@ fn source_row(kiwi: &Kiwi, update: Option<Update<'_>>) -> ApiResult<Option<Sourc
             link: None,
         },
     }))
+}
+
+/// Takes apps Kiwi no longer builds out of the Kiwi Builds source. Installed copies keep
+/// working until they expire, as after removing an app.
+pub fn retire(kiwi: &Kiwi) -> ApiResult<()> {
+    let Some(old) = kiwi.catalog.source(SOURCE_ID) else {
+        return Ok(());
+    };
+    let retired = old
+        .source
+        .catalog
+        .apps
+        .iter()
+        .any(|a| !recipes().iter().any(|r| r.bundle_id == a.bundle_id));
+    if retired { publish(kiwi, None) } else { Ok(()) }
 }
 
 /// Saves and shows the Kiwi Builds source with `update` applied.

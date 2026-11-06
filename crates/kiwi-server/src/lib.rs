@@ -323,6 +323,9 @@ impl Kiwi {
             kick: Notify::new(),
             config,
         });
+        if let Err(e) = automation::retire(&kiwi) {
+            tracing::warn!("could not update the Kiwi Builds source: {e}");
+        }
         owner::refresh(&kiwi, true).await;
         let info = kiwi.rescan_signing().await;
         match info.error(Utc::now()) {

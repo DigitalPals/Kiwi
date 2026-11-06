@@ -28,22 +28,22 @@ fn fake_runner(k: &TestKiwi, pause: bool) {
 import sys,json,pathlib,zipfile,plistlib,hashlib,time
 command=sys.argv[1]
 recipe=sys.argv[sys.argv.index('--recipe')+1]
-bundle=dict(youtube='com.google.ios.youtube',twitch='tv.twitch',x='com.atebits.Tweetie2',reddit='com.reddit.Reddit',rambler='com.kiwi.ramblerpoc',gboard='com.google.keyboard')[recipe]
-version='0.1.0' if recipe=='rambler' else ('2.3.19' if recipe=='gboard' else ('2026.43.0' if recipe=='reddit' else '21.44.1'))
+bundle=dict(youtube='com.google.ios.youtube',twitch='tv.twitch',x='com.atebits.Tweetie2',reddit='com.reddit.Reddit')[recipe]
+version='2026.43.0' if recipe=='reddit' else '21.44.1'
 root=pathlib.Path(sys.argv[sys.argv.index('--data-dir')+1])/'automation'
 request=json.loads(pathlib.Path(sys.argv[sys.argv.index('--request')+1]).read_text())
 def emit(kind,**data):print(json.dumps(dict(event=kind,**data)),flush=True)
 if command=='plan':
- emit('health',checks=[dict(name='Native iOS build tools' if recipe=='rambler' else 'Fixture',ready=True)],ready=True)
+ emit('health',checks=[dict(name='Fixture',ready=True)],ready=True)
  {pause}
  key='a'*64
  if sorted(request['tweaks'])!=sorted(['youpip','ryd','ytabconfig','youquality']):
   key=hashlib.sha256(json.dumps(sorted(request['tweaks'])).encode()).hexdigest()
  if recipe!='youtube':
   key=hashlib.sha256(json.dumps([recipe,request['tweaks'],request.get('name')]).encode()).hexdigest()
- emit('plan',plan=dict(key=key,version=version,external_id='native-'+key[:16] if recipe=='rambler' else '1234',tweaks=request['tweaks'],name=request.get('name')))
+ emit('plan',plan=dict(key=key,version=version,external_id='1234',tweaks=request['tweaks'],name=request.get('name')))
 else:
- number='1' if recipe=='rambler' else ('2.3.19.444584732' if recipe=='gboard' else version)
+ number=version
  p=root/'candidate.ipa'
  info=dict(CFBundleIdentifier=bundle,CFBundleShortVersionString=version,CFBundleVersion=number,KiwiBuildRevision=request['sequence'],MinimumOSVersion='17.0',CFBundleSupportedPlatforms=['iPhoneOS'],UIDeviceFamily=[1])
  with zipfile.ZipFile(p,'w') as z:
@@ -448,18 +448,7 @@ async fn apps_are_added_queued_behind_each_other_published_together_and_removed(
         .iter()
         .map(|a| a["id"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        ids,
-        [
-            "youtube",
-            "youtube-music",
-            "twitch",
-            "x",
-            "reddit",
-            "rambler",
-            "gboard"
-        ]
-    );
+    assert_eq!(ids, ["youtube", "youtube-music", "twitch", "x", "reddit"]);
     assert_eq!(overview["apps"][0]["added"], true);
     assert_eq!(overview["apps"][2]["added"], false);
     assert_eq!(overview["apps"][3]["experimental"], true);
@@ -607,128 +596,6 @@ async fn reddit_is_supported_and_publishes_signed_updates_with_its_original_bund
 }
 
 #[tokio::test]
-async fn native_rambler_publishes_through_normal_signing_without_overwriting_app_store_checks() {
-    let k = TestKiwi::start_building().await;
-    fake_runner(&k, false);
-    let phone = k.phone();
-    let manifest = k
-        .kiwi
-        .config
-        .data_dir
-        .join("automation/native/rambler.json");
-    let files: Value = serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
-    for name in [
-        "build.sh",
-        "make-sample.sh",
-        "extract-caller.py",
-        "Sources/App.swift",
-        "Sources/CLI.swift",
-        "Sources/RamblerCore.swift",
-        "Sources/OggOpus.swift",
-        "Tests/ProtocolTests.swift",
-    ] {
-        assert!(
-            files[name].as_str().is_some_and(|s| !s.is_empty()),
-            "missing {name}"
-        );
-    }
-    assert!(files["caller.json"].is_null());
-
-    phone.post("/api/automation/youtube/check", json!({})).await;
-    assert_eq!(finished(&k).await["jobs"][0]["status"], "ready");
-    let shared = phone.ok("/api/automation").await["checks"].clone();
-    assert!(!shared.as_array().unwrap().is_empty());
-    let initial = phone.ok("/api/automation/rambler").await;
-    assert_eq!(initial["experimental"], true);
-    assert_eq!(initial["added"], false);
-    assert_eq!(initial["checks"], json!([]));
-    assert_eq!(initial["included"], json!([]));
-    assert_eq!(initial["available_tweaks"], json!([]));
-    assert_eq!(initial["preferences"]["tweaks"], json!([]));
-    let added = phone
-        .post(
-            "/api/automation/rambler/add",
-            initial["preferences"].clone(),
-        )
-        .await;
-    assert_eq!(added.status, StatusCode::ACCEPTED, "{}", added.body);
-    let ready = finished_app(&k, "rambler").await;
-    assert_eq!(ready["jobs"][0]["status"], "ready", "{ready}");
-    assert_eq!(ready["published"]["version"], "0.1.0");
-    assert_eq!(ready["published"]["build"], "1");
-    assert_eq!(ready["published"]["revision"], 1);
-    assert!(
-        ready["jobs"][0]["external_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("native-")
-    );
-    assert_eq!(
-        ready["checks"],
-        json!([{"name":"Native iOS build tools","ready":true}])
-    );
-    assert_eq!(phone.ok("/api/automation").await["checks"], shared);
-    assert_eq!(phone.ok("/api/automation/youtube").await["checks"], shared);
-
-    let path = "/api/apps/kiwi-youtube/com.kiwi.ramblerpoc";
-    let app = phone.ok(path).await;
-    assert_eq!(app["name"], "Rambler PoC");
-    assert!(app["state"]["install_url"].is_string());
-    let prepared = phone.post(&format!("{path}/prepare"), json!({})).await;
-    assert_eq!(prepared.status, StatusCode::ACCEPTED, "{}", prepared.body);
-    assert_eq!(prepared.body["id"], ready["jobs"][0]["signed_build_id"]);
-    assert_eq!(k.signer.signed.load(Ordering::SeqCst), 2);
-    phone.post("/api/automation/rambler/check", json!({})).await;
-    assert_eq!(
-        finished_app(&k, "rambler").await["jobs"][0]["status"],
-        "unchanged"
-    );
-    assert_eq!(k.signer.signed.load(Ordering::SeqCst), 2);
-}
-
-#[tokio::test]
-async fn gboard_integration_sources_are_shipped_and_publish_as_an_experimental_build() {
-    let k = TestKiwi::start_building().await;
-    fake_runner(&k, false);
-    let phone = k.phone();
-    let manifest = k
-        .kiwi
-        .config
-        .data_dir
-        .join("automation/native/gboard-rambler.json");
-    let files: Value = serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
-    for name in [
-        "build-gboard.sh",
-        "inject-gboard.py",
-        "Gboard/Bridge.h",
-        "Gboard/Hooks.m",
-        "Gboard/Session.swift",
-        "Sources/RamblerCore.swift",
-    ] {
-        assert!(
-            files[name].as_str().is_some_and(|s| !s.is_empty()),
-            "missing {name}"
-        );
-    }
-    assert!(files["caller.json"].is_null());
-    let initial = phone.ok("/api/automation/gboard").await;
-    assert_eq!(initial["experimental"], true);
-    assert_eq!(initial["app_version"], "2.3.19");
-    assert_eq!(initial["preferences"]["tweaks"], json!([]));
-    let added = phone
-        .post("/api/automation/gboard/add", initial["preferences"].clone())
-        .await;
-    assert_eq!(added.status, StatusCode::ACCEPTED, "{}", added.body);
-    let ready = finished_app(&k, "gboard").await;
-    assert_eq!(ready["jobs"][0]["status"], "ready", "{ready}");
-    assert_eq!(ready["published"]["version"], "2.3.19");
-    assert_eq!(ready["published"]["build"], "2.3.19.444584732");
-    let app = phone.ok("/api/apps/kiwi-youtube/com.google.keyboard").await;
-    assert_eq!(app["name"], "Gboard Rambler");
-    assert!(app["state"]["install_url"].is_string());
-}
-
-#[tokio::test]
 async fn queued_jobs_cancel_without_running_and_names_are_part_of_the_build() {
     let k = TestKiwi::start_building().await;
     fake_runner(&k, false);
@@ -781,4 +648,65 @@ async fn queued_jobs_cancel_without_running_and_names_are_part_of_the_build() {
             .await["name"],
         "Twitter"
     );
+}
+
+#[tokio::test]
+async fn upgrading_drops_apps_kiwi_no_longer_builds() {
+    let k = TestKiwi::start_building().await;
+    fake_runner(&k, false);
+    let phone = k.phone();
+    phone.post("/api/automation/youtube/check", json!({})).await;
+    assert_eq!(finished(&k).await["jobs"][0]["status"], "ready");
+
+    // A Kiwi that built Gboard Rambler before its recipe was removed.
+    let mut row = (*k.kiwi.catalog.source("kiwi-youtube").unwrap()).clone();
+    let mut gboard = serde_json::to_value(&row.source.catalog.apps[0]).unwrap();
+    gboard["bundle_id"] = json!("com.google.keyboard");
+    gboard["name"] = json!("Gboard Rambler");
+    row.source
+        .catalog
+        .apps
+        .push(serde_json::from_value(gboard).unwrap());
+    k.kiwi.db.save_source(&row).unwrap();
+    let mut state: Value =
+        serde_json::from_str(&k.kiwi.db.meta("automation_v2").unwrap().unwrap()).unwrap();
+    state["apps"]["gboard"] = state["apps"]["youtube"].clone();
+    let mut job = state["jobs"][0].clone();
+    job["app"] = json!("gboard");
+    state["jobs"].as_array_mut().unwrap().push(job);
+    k.kiwi
+        .db
+        .set_meta("automation_v2", &state.to_string())
+        .unwrap();
+    let native = k.kiwi.config.data_dir.join("automation/native");
+    std::fs::create_dir_all(&native).unwrap();
+    std::fs::write(native.join("gboard-rambler.json"), "{}").unwrap();
+
+    let k = TestKiwi::start_in(k.stop().await, FakeDevices::with_phone(), false).await;
+    let phone = k.phone();
+    let built = phone.ok("/api/apps?source=kiwi-youtube").await;
+    let bundles: Vec<&str> = built
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["bundle_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(bundles, ["com.google.ios.youtube"], "{built}");
+    assert!(
+        phone
+            .ok("/api/apps/kiwi-youtube/com.google.ios.youtube")
+            .await["state"]["install_url"]
+            .is_string()
+    );
+    let state: Value =
+        serde_json::from_str(&k.kiwi.db.meta("automation_v2").unwrap().unwrap()).unwrap();
+    assert!(state["apps"].get("gboard").is_none());
+    assert!(
+        state["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|j| j["app"] != "gboard")
+    );
+    assert!(!native.exists());
 }

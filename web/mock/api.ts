@@ -36,7 +36,7 @@ import {
   type MockSource,
   type MockStoreApp,
 } from "./fixtures.ts";
-import { buildStages, catalogOf, createBuilds, integrationOf, nativeBuildOf } from "./builds.ts";
+import { buildStages, catalogOf, createBuilds } from "./builds.ts";
 
 export interface MockRequest {
   method: string;
@@ -488,7 +488,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
   let workerFreeAt = 0;
 
   /** The App Store version a build uses: the one its tweak supports, or the storefront's newest. */
-  const buildVersion = (app: AutomationState) => nativeBuildOf(app.id)?.version ?? app.app_version ?? findStore(app.bundle_id)?.version ?? "1.0";
+  const buildVersion = (app: AutomationState) => app.app_version ?? findStore(app.bundle_id)?.version ?? "1.0";
 
   const recipeKey = (app: AutomationState, version: string, p: AutomationPreferences) =>
     createHash("sha256").update(JSON.stringify([app.id, version, [...p.tweaks].sort(), p.name ?? null])).digest("hex");
@@ -521,15 +521,14 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       jobStarts.set(job.id, start);
       const stages = buildStages(app);
       const step = Math.floor((now - start) / BUILD_STAGE_MS);
-      if (step >= 1 && !nativeBuildOf(app.id) && setupChecks.length === 0) {
+      if (step >= 1 && setupChecks.length === 0) {
         setupChecks = SETUP_CHECKS.map((name) => ({ name, ready: true }));
-        for (const b of builds) if (!nativeBuildOf(b.id)) b.checks = structuredClone(setupChecks);
+        for (const b of builds) b.checks = structuredClone(setupChecks);
       }
-      if (step >= 1 && nativeBuildOf(app.id)) app.checks = [{ name: "Native iOS build tools", ready: true }];
       if (step >= 2 && job.recipe_key === null) {
         const version = buildVersion(app);
         const key = recipeKey(app, version, job.preferences ?? app.preferences);
-        Object.assign(job, { version, external_id: nativeBuildOf(app.id) ? `native-${key.slice(0, 16)}` : String(880_000_000 + (Number.parseInt(key.slice(0, 6), 16) % 9_000_000)), recipe_key: key });
+        Object.assign(job, { version, external_id: String(880_000_000 + (Number.parseInt(key.slice(0, 6), 16) % 9_000_000)), recipe_key: key });
       }
       if (step >= 2 && !forcedJobs.has(job.id) && job.recipe_key === app.last_success_key) {
         finishJob(app, job, start + 2 * BUILD_STAGE_MS, "unchanged");
@@ -562,7 +561,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     }
   }
 
-  const BUILD_SIZES: Record<string, number> = { youtube: 152.6, "youtube-music": 98.4, twitch: 121.7, x: 164.2, reddit: 139.5, rambler: 0.3 };
+  const BUILD_SIZES: Record<string, number> = { youtube: 152.6, "youtube-music": 98.4, twitch: 121.7, x: 164.2, reddit: 139.5 };
 
   /** Signs a finished build and lists it in the Kiwi Builds source, like the Mac does. */
   function publishBuild(app: AutomationState, job: AutomationJob, at: number) {
@@ -594,30 +593,22 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       name: catalog.name, developer: catalog.developer, subtitle: catalog.subtitle, tint_color: catalog.tint_color,
       category: catalog.category, description: catalog.description,
     });
-    const native = nativeBuildOf(app.id);
-    const integration = integrationOf(app.id);
-    if (native) {
-      entry.permissions = { entitlements: ["application-identifier", "keychain-access-groups"], privacy: [] };
-      entry.dropped_entitlements = [];
-    }
     const size = Math.round((BUILD_SIZES[app.id] ?? 100) * 1e6);
-    const buildNumber = native?.build ?? integration?.build ?? version;
-    const notes = (native ? `${app.name} ${version} · Native iOS client\nBuilt from Kiwi's bundled Swift sources. Synthetic Rambler speech correction verified.\n`
-      : `${app.name} ${version} · Apple build ${job.external_id}\n${app.tweak.split(" ")[0]} and tweaks compiled from pinned sources.\n`)
+    const notes = `${app.name} ${version} · Apple build ${job.external_id}\n${app.tweak.split(" ")[0]} and tweaks compiled from pinned sources.\n`
       + `Recipe ${(job.recipe_key ?? "").slice(0, 12)}. Not yet tested on a physical device.`;
     entry.releases = [
-      { version, build: buildNumber, revision: job.sequence, date: iso(at), notes, size, min_os: native || integration ? "16.0" : "15.0", max_os: null },
+      { version, build: version, revision: job.sequence, date: iso(at), notes, size, min_os: "15.0", max_os: null },
       ...entry.releases,
     ].slice(0, catalog.retain);
     const signed: MockBuild = {
-      id: `b-${randomBytes(6).toString("hex")}`, app_key: appKey(entry), version, build: buildNumber, revision: job.sequence,
+      id: `b-${randomBytes(6).toString("hex")}`, app_key: appKey(entry), version, build: version, revision: job.sequence,
       started: at - 2000, duration: 2000, error: null, size, dropped: entry.dropped_entitlements,
       token: `t-${randomBytes(9).toString("base64url")}`,
     };
     db.builds.push(signed);
     job.signed_build_id = signed.id;
     Object.assign(app, {
-      published: { version, build: buildNumber, revision: job.sequence, date: iso(at), tweaks: [...preferences.tweaks], name: preferences.name ?? null },
+      published: { version, build: version, revision: job.sequence, date: iso(at), tweaks: [...preferences.tweaks], name: preferences.name ?? null },
       last_success_key: job.recipe_key,
       last_success_tweaks: [...preferences.tweaks],
       last_success_name: preferences.name ?? null,

@@ -7,23 +7,30 @@ on:
 permissions:
   contents: read
 
+# Linux x64 jobs of trusted events run on ephemeral Beast VMs (DigitalPals/ci-platform
+# github-runners): push, workflow_dispatch, schedule and same-repository pull requests.
+# Fork pull requests, and everything while the BEAST_RUNNERS variable is "off", use
+# GitHub-hosted runners. The Beast runners' job hook rejects any other event as well.
 jobs:
   rust:
     name: Rust
-    runs-on: ubuntu-latest
+    # The Rust job always uses the same warm Beast slot (persistent cargo target dir).
+    runs-on: ${{ vars.BEAST_RUNNERS != 'off' && (contains(fromJSON('["push","workflow_dispatch","schedule"]'), github.event_name) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","beast-kiwi-rust"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      # Beast VMs keep cargo, rustup and sccache on their persistent cache volume.
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
   web:
     name: Web app
-    runs-on: ubuntu-latest
+    runs-on: &linux-x64 ${{ vars.BEAST_RUNNERS != 'off' && (contains(fromJSON('["push","workflow_dispatch","schedule"]'), github.event_name) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","beast-kiwi"]') || 'ubuntu-latest' }}
     defaults:
       run:
         working-directory: web
@@ -32,7 +39,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: npm
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm run typecheck
@@ -41,7 +48,7 @@ jobs:
 
   python:
     name: Kiwi Builds runner
-    runs-on: ubuntu-latest
+    runs-on: *linux-x64
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -52,7 +59,7 @@ jobs:
 
   shell:
     name: Scripts
-    runs-on: ubuntu-latest
+    runs-on: *linux-x64
     steps:
       - uses: actions/checkout@v5
       - run: shellcheck install.sh uninstall.sh deploy/deploy.sh

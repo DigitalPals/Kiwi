@@ -14,7 +14,8 @@ permissions:
 jobs:
   rust:
     name: Rust
-    runs-on: &linux-x64 ${{ vars.BEAST_RUNNERS != 'off' && (contains(fromJSON('["push","workflow_dispatch","schedule"]'), github.event_name) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","beast-kiwi"]') || 'ubuntu-latest' }}
+    # The Rust job always uses the same warm Beast slot (persistent cargo target dir).
+    runs-on: ${{ vars.BEAST_RUNNERS != 'off' && (contains(fromJSON('["push","workflow_dispatch","schedule"]'), github.event_name) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","beast-kiwi-rust"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -29,7 +30,7 @@ jobs:
 
   web:
     name: Web app
-    runs-on: *linux-x64
+    runs-on: &linux-x64 ${{ vars.BEAST_RUNNERS != 'off' && (contains(fromJSON('["push","workflow_dispatch","schedule"]'), github.event_name) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","linux","x64","beast-kiwi"]') || 'ubuntu-latest' }}
     defaults:
       run:
         working-directory: web

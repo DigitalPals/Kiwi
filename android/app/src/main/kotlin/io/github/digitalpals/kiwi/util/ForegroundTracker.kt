@@ -3,6 +3,8 @@ package io.github.digitalpals.kiwi.util
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Whether one of the app's activities is started. Android only lets an app open its install
@@ -11,8 +13,12 @@ import android.os.Bundle
 object ForegroundTracker : Application.ActivityLifecycleCallbacks {
     @Volatile
     private var started = 0
+    private val _foreground = MutableStateFlow(false)
 
     val isForeground: Boolean get() = started > 0
+
+    /** [isForeground] as a flow. */
+    val foreground: StateFlow<Boolean> = _foreground
 
     fun register(application: Application) {
         application.registerActivityLifecycleCallbacks(this)
@@ -20,10 +26,12 @@ object ForegroundTracker : Application.ActivityLifecycleCallbacks {
 
     override fun onActivityStarted(activity: Activity) {
         started++
+        _foreground.value = true
     }
 
     override fun onActivityStopped(activity: Activity) {
         started = (started - 1).coerceAtLeast(0)
+        _foreground.value = started > 0
     }
 
     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit

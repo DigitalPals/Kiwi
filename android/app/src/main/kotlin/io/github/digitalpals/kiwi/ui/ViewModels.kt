@@ -10,6 +10,7 @@ import io.github.digitalpals.kiwi.api.AppDetail
 import io.github.digitalpals.kiwi.api.AppSummary
 import io.github.digitalpals.kiwi.api.AutomationPreferences
 import io.github.digitalpals.kiwi.api.AutomationState
+import io.github.digitalpals.kiwi.api.InstalledPackage
 import io.github.digitalpals.kiwi.api.KiwiApi
 import io.github.digitalpals.kiwi.api.KiwiException
 import io.github.digitalpals.kiwi.api.Me
@@ -17,6 +18,7 @@ import io.github.digitalpals.kiwi.api.Platforms
 import io.github.digitalpals.kiwi.api.ServerUrl
 import io.github.digitalpals.kiwi.api.title
 import io.github.digitalpals.kiwi.api.userMessage
+import io.github.digitalpals.kiwi.install.InstallJob
 import io.github.digitalpals.kiwi.install.InstallManager
 import io.github.digitalpals.kiwi.work.UpdateWorker
 import kotlinx.coroutines.CancellationException
@@ -71,6 +73,9 @@ class LocalPackages(context: Context, private val container: AppContainer) {
     }
 
     fun resolved(app: AppSummary): AppSummary = app.copy(iconUrl = app.iconUrl?.let(::icon))
+
+    /** The phone's copy of [packageName] with its signers, or null. */
+    fun installedPackage(packageName: String): InstalledPackage? = container.packageScanner.find(packageName)
 
     fun icon(url: String): String = container.resolveUrl(url) ?: url
 }
@@ -274,8 +279,9 @@ class SessionViewModel(container: AppContainer) : LoadingViewModel<Me>(container
 }
 
 /**
- * Kiwi Builds' Android apps (`/api/automation`): adding, removing, patches and schedules, builds.
- * While Kiwi Builds is off, [Content.off] is true and nothing else is loaded.
+ * Kiwi Builds' Android apps (`/api/automation`): every app Kiwi can build, with one-tap "Build
+ * and install", their patches and schedules, builds. While Kiwi Builds is off, [Content.off] is
+ * true and the apps are the app's own list ([KiwiBuilds.OFF_APPS]).
  */
 class BuildsViewModel(container: AppContainer, private val local: LocalPackages) :
     LoadingViewModel<BuildsViewModel.Content>(container) {
@@ -285,9 +291,14 @@ class BuildsViewModel(container: AppContainer, private val local: LocalPackages)
         val apps: List<AutomationState>,
         /** The apps' colours (`tint_color` of their catalogue entries) by bundle id. */
         val tints: Map<String, String> = emptyMap(),
+        /** The published builds in Kiwi's catalogue (`/api/apps`), by bundle id. */
+        val published: Map<String, AppSummary> = emptyMap(),
+        /** The phone's copy of each app's package, by bundle id. */
+        val local: Map<String, LocalPackage> = emptyMap(),
+        /** What must happen before an app's build can be installed here, by app id ([KiwiBuilds.blocker]). */
+        val blockers: Map<String, String> = emptyMap(),
     ) {
         val added: List<AutomationState> get() = apps.filter { it.added }
-        val available: List<AutomationState> get() = apps.filter { !it.added }
         val active: Boolean get() = apps.any { KiwiBuilds.activeJob(it) != null }
     }
 
@@ -303,56 +314,131 @@ class BuildsViewModel(container: AppContainer, private val local: LocalPackages)
 
     val notifyBuilds: Flow<Boolean> = container.settings.notifyBuilds
 
+    /** Apps (by id) to install once their build is ready. */
+    val pending: Flow<Set<String>> = container.settings.pendingInstalls
+
+    /** This app's installs, by app key. */
+    val installs: StateFlow<Map<String, InstallJob>> = container.installs.jobs
+
     init {
         reload()
     }
 
-    /** Tints looked up once from Browse's apps; the automation API has none. */
-    private var tints: Map<String, String> = emptyMap()
-    private var looked: Set<String> = emptySet()
+    /** The certificate Kiwi signs Android apps with, once Kiwi said ([signerAsked]: it was asked). */
+    private var signer: String? = null
+    private var signerAsked = false
 
     override suspend fun fetch(kiwi: KiwiApi): Content = try {
         val apps = KiwiBuilds.androidApps(kiwi.automation().apps).map { it.copy(iconUrl = it.iconUrl?.let(local::icon)) }
-        val added = apps.filter { it.added }.map { it.bundleId }.toSet()
-        if (!looked.containsAll(added)) {
-            tints = appTints(kiwi)
-            looked = looked + added
-        }
-        Content(off = false, apps = apps, tints = tints)
+        val published = if (apps.any { it.published != null }) catalogue(kiwi) else emptyMap()
+        val phone = withContext(Dispatchers.IO) { apps.associate { it.bundleId to local.of(it.bundleId) } }
+        Content(
+            off = false,
+            apps = apps,
+            tints = published.mapNotNull { (id, app) -> app.tintColor?.let { id to it } }.toMap(),
+            published = published,
+            local = phone,
+            blockers = blockers(kiwi, apps, published, phone),
+        )
     } catch (error: KiwiException.Http) {
         if (!error.isBuildsOff) throw error
-        Content(off = true, apps = emptyList())
+        Content(off = true, apps = KiwiBuilds.OFF_APPS)
     }
 
-    private suspend fun appTints(kiwi: KiwiApi): Map<String, String> = try {
-        kiwi.apps().filter { it.sourceId == KiwiBuilds.SOURCE_ID }
-            .mapNotNull { app -> app.tintColor?.let { app.bundleId to it } }.toMap()
+    /** Kiwi Builds' Android apps in Kiwi's catalogue (also those hidden from Browse), by bundle id. */
+    private suspend fun catalogue(kiwi: KiwiApi): Map<String, AppSummary> = try {
+        kiwi.apps(hidden = true)
+            .filter { it.sourceId == KiwiBuilds.SOURCE_ID && it.platform == Platforms.ANDROID }
+            .associate { it.bundleId to local.resolved(it) }
     } catch (_: KiwiException) {
-        tints
+        (state.value as? Load.Ready)?.value?.published.orEmpty()
     }
 
-    fun add(app: AutomationState, preferences: AutomationPreferences, onAdded: () -> Unit = {}) =
-        act(app.id, "Added ${app.name}. Its first build is on its way.", watch = true) {
-            it.addAutomation(app.id, preferences)
-            onAdded()
+    /** Copies of the apps' packages on the phone that a Kiwi build couldn't replace. */
+    private suspend fun blockers(
+        kiwi: KiwiApi,
+        apps: List<AutomationState>,
+        published: Map<String, AppSummary>,
+        phone: Map<String, LocalPackage>,
+    ): Map<String, String> {
+        val installed = apps.filter { phone[it.bundleId]?.installed == true }
+        if (installed.isEmpty()) return emptyMap()
+        if (!signerAsked) {
+            try {
+                signer = kiwi.me().host?.androidSignerSha256?.takeIf { it.isNotBlank() }
+                signerAsked = true
+            } catch (_: KiwiException) {
+                // Asked again at the next refresh.
+            }
         }
+        return withContext(Dispatchers.IO) {
+            installed.mapNotNull { app ->
+                val foreign = published[app.bundleId]?.state?.foreignInstall == true
+                KiwiBuilds.blocker(app.name, local.installedPackage(app.bundleId), signer, foreign)?.let { app.id to it }
+            }.toMap()
+        }
+    }
+
+    /**
+     * "Build and install": adds the app (or builds it again) with [preferences] and installs it
+     * once its build is ready. The wish is saved first, so it survives the app being closed; it
+     * is forgotten again when the request fails. A build already on its way is joined.
+     */
+    fun buildAndInstall(app: AutomationState, preferences: AutomationPreferences, onStarted: () -> Unit = {}) =
+        act(app.id, "Building ${app.name}. It takes a few minutes; Kiwi installs it when it's ready.", watch = true) { kiwi ->
+            container.settings.addPendingInstall(app.id)
+            try {
+                when {
+                    !app.added -> kiwi.addAutomation(app.id, preferences)
+                    KiwiBuilds.activeJob(app) != null -> Unit
+                    else -> {
+                        if (!KiwiBuilds.samePreferences(preferences, app.preferences)) kiwi.updateAutomation(app.id, preferences)
+                        kiwi.checkAutomation(app.id)
+                    }
+                }
+            } catch (error: KiwiException.Http) {
+                // A build of the app is already on its way (with other choices): it is installed
+                // when ready, and the message says why nothing new was started.
+                if (!error.isConflict) container.settings.removePendingInstall(app.id)
+                throw error
+            } catch (error: KiwiException) {
+                container.settings.removePendingInstall(app.id)
+                throw error
+            }
+            onStarted()
+        }
+
+    /** A failed first build: builds it again with its saved choices and installs it when ready. */
+    fun retry(app: AutomationState) = buildAndInstall(app, app.preferences)
 
     fun save(app: AutomationState, preferences: AutomationPreferences) =
         act(app.id, "Saved. The next build of ${app.name} uses these settings.") { it.updateAutomation(app.id, preferences) }
 
-    fun remove(app: AutomationState) = act(app.id, "Removed ${app.name} from Kiwi Builds.") { it.removeAutomation(app.id) }
+    fun remove(app: AutomationState) = act(app.id, "Removed ${app.name} from Kiwi Builds.") {
+        container.settings.removePendingInstall(app.id)
+        it.removeAutomation(app.id)
+    }
 
     fun check(app: AutomationState, force: Boolean = false) = act(app.id, null, watch = true) { it.checkAutomation(app.id, force) }
 
-    fun cancel(app: AutomationState) = act(app.id, null) { it.cancelAutomation(app.id) }
+    fun cancel(app: AutomationState) = act(app.id, null) {
+        container.settings.removePendingInstall(app.id)
+        it.cancelAutomation(app.id)
+    }
 
     /** "Build now": checks every added app that has no job yet. */
     fun checkAll(apps: List<AutomationState>) = act(ALL, null, watch = true) { kiwi ->
         apps.filter { it.added && KiwiBuilds.activeJob(it) == null }.forEach { kiwi.checkAutomation(it.id) }
     }
 
-    /** Turns on Kiwi Builds (`PATCH /api/settings`), after the user confirmed what it does. */
-    fun turnOn() = act(ALL, null) { it.patchSettings(buildJsonObject { put("kiwi_builds", JsonPrimitive(true)) }) }
+    /**
+     * Turns on Kiwi Builds (`PATCH /api/settings`), after the user confirmed what it does;
+     * [onDone] runs once it is on and the apps are loaded again.
+     */
+    fun turnOn(onDone: () -> Unit = {}) = act(ALL, null) {
+        it.patchSettings(buildJsonObject { put("kiwi_builds", JsonPrimitive(true)) })
+        onDone()
+    }
 
     fun setNotifyBuilds(enabled: Boolean) = viewModelScope.launch { container.settings.setNotifyBuilds(enabled) }
 

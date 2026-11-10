@@ -892,9 +892,13 @@ cannot do, it adds:
   an unmetered network with a battery that isn't low. It also
   notifies Kiwi Builds jobs that finished or failed (`GET /api/automation`), and looks again
   a few minutes later while a build runs.
-- **Kiwi Builds.** A Builds tab adds and removes Kiwi Builds' Android apps, changes their
-  patches and schedules, and starts, rebuilds and cancels builds through `/api/automation`;
-  while Kiwi Builds is off (`409 builds_off`) it offers to turn it on (`PATCH /api/settings`).
+- **Kiwi Builds.** A Builds tab lists every Android recipe with one-tap Install: it adds the
+  app (`POST .../add`, idempotent), saves the wish to install it on the phone and installs the
+  build once it is ready (in the foreground at once; from the background through a "ready —
+  tap to install" notification). It shows a queued job's place (`ahead`), changes patches and
+  schedules, and rebuilds, cancels and removes through `/api/automation`; while Kiwi Builds is
+  off (`409 builds_off`) it still lists the apps and offers to turn it on (`PATCH
+  /api/settings`).
 - **Itself.** When `Me.android_app` is newer than the running app, it offers that APK.
 
 Connecting checks `/api/health` and `/api/me` before saving the address; a

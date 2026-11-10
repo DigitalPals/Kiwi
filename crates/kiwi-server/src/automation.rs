@@ -249,6 +249,10 @@ pub struct Job {
     /// Rebuild even when the recipe already succeeded.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub force: bool,
+    /// Someone asked for it (add, check) rather than the schedule: it starts before scheduled
+    /// jobs that are waiting. Absent in state saved by older versions, which is `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interactive: bool,
 }
 fn legacy_app() -> String {
     "youtube".into()
@@ -258,6 +262,18 @@ impl Job {
     fn active(&self) -> bool {
         self.finished_at.is_none()
     }
+    fn queued(&self) -> bool {
+        self.active() && self.status == "queued"
+    }
+}
+
+/// The queued jobs of `jobs` (newest first, as [`State::jobs`]) in the order the worker starts
+/// them: jobs someone asked for, oldest first, then scheduled jobs, oldest first.
+pub(crate) fn start_order(jobs: &[Job]) -> Vec<&Job> {
+    let mut queued: Vec<&Job> = jobs.iter().rev().filter(|j| j.queued()).collect();
+    // A stable sort keeps the age order within each group.
+    queued.sort_by_key(|j| !j.interactive);
+    queued
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -413,6 +429,16 @@ impl Automation {
     pub fn snapshot(&self) -> State {
         self.state.lock().unwrap().clone()
     }
+    /// How many builds run before each queued job starts, by job id: the running job (or
+    /// signing of Kiwi's own app) and the queued jobs [`start_order`] puts first.
+    pub fn ahead(&self, state: &State) -> BTreeMap<String, usize> {
+        let busy = usize::from(self.running.lock().unwrap().is_some());
+        start_order(&state.jobs)
+            .into_iter()
+            .enumerate()
+            .map(|(index, job)| (job.id.clone(), busy + index))
+            .collect()
+    }
     /// Whether this Kiwi can build the recipe's app (iOS apps only on a Mac).
     pub fn can_build(&self, recipe: &Recipe) -> bool {
         recipe.android() || self.builds_ios.load(Ordering::Relaxed)
@@ -489,17 +515,45 @@ impl Automation {
 /// The name of the setup check that is never ready where iOS apps cannot be built.
 pub const NEEDS_MAC_CHECK: &str = "macOS";
 
-/// Adds an app to Kiwi Builds with these preferences and queues its first build.
+/// Adds an app to Kiwi Builds with these preferences and queues its first build, ahead of
+/// scheduled builds.
+///
+/// Adding is idempotent for one-tap installs: when the app already has a queued or running
+/// job with these preferences, nothing changes, except that a scheduled job still waiting
+/// now counts as asked for (it moves ahead of scheduled jobs, keeping its age). A job with other preferences is a `409 conflict`: cancel it or
+/// wait for it first.
 pub fn add(kiwi: &Arc<Kiwi>, id: &str, mut preferences: Preferences) -> ApiResult<()> {
     let recipe = recipe(id)?;
     kiwi.automation.require_buildable(recipe)?;
     preferences.validate(recipe)?;
+    let joined = kiwi.automation.change(&kiwi.db, |s| {
+        let Some(job) = s.jobs.iter_mut().find(|j| j.app == id && j.active()) else {
+            return Ok(false);
+        };
+        if job.preferences.as_ref() != Some(&preferences) {
+            return Err(ApiError::conflict(format!(
+                "A {} build with other choices is already on its way. Cancel it or wait for it first.",
+                recipe.name
+            )));
+        }
+        job.interactive = true;
+        let app = s
+            .apps
+            .get_mut(id)
+            .ok_or_else(|| ApiError::not_found("Kiwi doesn't build that app."))?;
+        app.added = true;
+        app.preferences = preferences.clone();
+        Ok(true)
+    })?;
+    if joined {
+        return Ok(());
+    }
     kiwi.automation.app(&kiwi.db, id, |a| {
         a.added = true;
         a.preferences = preferences;
         Ok(())
     })?;
-    queue(kiwi, id, false)
+    queue(kiwi, id, false, true)
 }
 
 /// Removes an app from Kiwi Builds: stops its builds and takes it out of the source.
@@ -545,8 +599,9 @@ pub fn cancel(kiwi: &Kiwi, id: &str) {
     }
 }
 
-/// Queues a check (and build, when anything changed) of an added app.
-pub fn queue(kiwi: &Arc<Kiwi>, id: &str, force: bool) -> ApiResult<()> {
+/// Queues a check (and build, when anything changed) of an added app. An `interactive` job
+/// (someone asked for it) starts before scheduled ones.
+pub fn queue(kiwi: &Arc<Kiwi>, id: &str, force: bool, interactive: bool) -> ApiResult<()> {
     let recipe = recipe(id)?;
     kiwi.automation.require_buildable(recipe)?;
     let mut bytes = [0u8; 12];
@@ -595,6 +650,7 @@ pub fn queue(kiwi: &Arc<Kiwi>, id: &str, force: bool) -> ApiResult<()> {
             finished_at: None,
             preferences: Some(app.preferences.clone()),
             force,
+            interactive,
         };
         s.jobs.insert(0, job);
         let mut kept = BTreeMap::<String, usize>::new();
@@ -609,8 +665,8 @@ pub fn queue(kiwi: &Arc<Kiwi>, id: &str, force: bool) -> ApiResult<()> {
     Ok(())
 }
 
-/// Starts the oldest queued job unless one is running. Signing Kiwi's own Android app,
-/// when it is due, goes first: it takes seconds.
+/// Starts the next queued job ([`start_order`]) unless one is running. Signing Kiwi's own
+/// Android app, when it is due, goes first: it takes seconds.
 pub(crate) fn start_next(kiwi: &Arc<Kiwi>) {
     let mut running = kiwi.automation.running.lock().unwrap();
     if running.is_some() {
@@ -625,12 +681,10 @@ pub(crate) fn start_next(kiwi: &Arc<Kiwi>) {
         return;
     }
     let next = kiwi.automation.change(&kiwi.db, |s| {
-        let Some(job) = s
-            .jobs
-            .iter_mut()
-            .rev()
-            .find(|j| j.active() && j.status == "queued")
-        else {
+        let Some(id) = start_order(&s.jobs).first().map(|j| j.id.clone()) else {
+            return Ok(None);
+        };
+        let Some(job) = s.jobs.iter_mut().find(|j| j.id == id) else {
             return Ok(None);
         };
         job.status = "running".into();
@@ -698,7 +752,7 @@ pub fn tick(kiwi: &Arc<Kiwi>) {
             && due
             && !state.jobs.iter().any(|j| &j.app == id && j.active())
             && recipe(id).is_ok_and(|r| kiwi.automation.can_build(r))
-            && let Err(e) = queue(kiwi, id, false)
+            && let Err(e) = queue(kiwi, id, false, false)
         {
             tracing::warn!(app = %id, "could not queue a build: {e}");
         }
@@ -1485,6 +1539,86 @@ mod tests {
         assert!(recipe("instagram").is_err());
     }
 
+    fn queued(id: &str, app: &str, interactive: bool) -> Job {
+        Job {
+            id: id.into(),
+            app: app.into(),
+            sequence: 1,
+            status: "queued".into(),
+            stage: String::new(),
+            version: None,
+            external_id: None,
+            recipe_key: None,
+            signed_build_id: None,
+            error: None,
+            created_at: Utc::now(),
+            finished_at: None,
+            preferences: None,
+            force: false,
+            interactive,
+        }
+    }
+
+    #[test]
+    fn jobs_someone_asked_for_start_before_scheduled_ones() {
+        // Newest first, as State keeps them.
+        let mut running = queued("run", "android-reddit", false);
+        running.status = "running".into();
+        let mut done = queued("old", "android-reddit", true);
+        done.status = "ready".into();
+        done.finished_at = Some(Utc::now());
+        let jobs = vec![
+            queued("tapped-2", "android-youtube-music", true),
+            queued("scheduled-2", "youtube", false),
+            queued("tapped-1", "android-youtube", true),
+            running,
+            queued("scheduled-1", "twitch", false),
+            done,
+        ];
+        let order: Vec<&str> = start_order(&jobs).iter().map(|j| j.id.as_str()).collect();
+        assert_eq!(
+            order,
+            ["tapped-1", "tapped-2", "scheduled-1", "scheduled-2"]
+        );
+        assert!(start_order(&[]).is_empty());
+    }
+
+    #[test]
+    fn jobs_saved_before_the_interactive_flag_load_as_scheduled() {
+        let old = json!({"id": "d".repeat(24), "app": "android-youtube", "sequence": 2,
+            "status": "queued", "stage": "Waiting", "version": null, "external_id": null,
+            "recipe_key": null, "signed_build_id": null, "error": null,
+            "created_at": "2026-11-09T10:00:00Z", "finished_at": null});
+        let job: Job = serde_json::from_value(old).unwrap();
+        assert!(!job.interactive);
+        // Scheduled jobs are saved as before, so an older Kiwi reads the state unchanged.
+        assert!(
+            serde_json::to_value(&job)
+                .unwrap()
+                .get("interactive")
+                .is_none()
+        );
+        let asked = queued("e", "android-youtube", true);
+        assert_eq!(serde_json::to_value(&asked).unwrap()["interactive"], true);
+    }
+
+    #[test]
+    fn the_android_app_lists_every_android_recipe_while_kiwi_builds_is_off() {
+        // KiwiBuilds.OFF_APPS: the rows the Android app shows before the API answers.
+        let kotlin = include_str!(
+            "../../../android/app/src/main/kotlin/io/github/digitalpals/kiwi/ui/KiwiBuilds.kt"
+        );
+        for recipe in recipes().iter().filter(|r| r.android()) {
+            let row = format!(
+                "offApp({:?}, {:?}, {:?}, {:?})",
+                recipe.id, recipe.name, recipe.bundle_id, recipe.summary
+            );
+            assert!(kotlin.contains(&row), "KiwiBuilds.OFF_APPS lacks {row}");
+        }
+        let rows = kotlin.matches("offApp(\"").count();
+        assert_eq!(rows, recipes().iter().filter(|r| r.android()).count());
+    }
+
     #[test]
     fn interrupted_jobs_are_durable_and_never_reappear_as_active() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1505,6 +1639,7 @@ mod tests {
             finished_at: None,
             preferences: None,
             force: false,
+            interactive: false,
         };
         automation
             .change(&db, |s| {

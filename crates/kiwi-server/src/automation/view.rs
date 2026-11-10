@@ -6,7 +6,7 @@ use chrono::{Duration, Utc};
 use kiwi_source::Url;
 use serde::Serialize;
 use serde_json::Value;
-use std::io::Read;
+use std::{collections::BTreeMap, io::Read};
 
 #[derive(Serialize)]
 pub struct Feature {
@@ -23,6 +23,26 @@ pub struct Published {
     date: Option<String>,
     tweaks: Option<Vec<String>>,
     name: Option<String>,
+}
+
+/// A job as the API shows it.
+#[derive(Serialize)]
+pub struct JobView {
+    #[serde(flatten)]
+    job: Job,
+    /// Only on a queued job: how many builds run before it starts, the running one included
+    /// (0 when it starts next and the worker is free).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ahead: Option<usize>,
+}
+
+fn job_views(jobs: Vec<Job>, ahead: &BTreeMap<String, usize>) -> Vec<JobView> {
+    jobs.into_iter()
+        .map(|job| JobView {
+            ahead: ahead.get(&job.id).copied(),
+            job,
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -45,7 +65,7 @@ pub struct AppView {
     #[serde(flatten)]
     state: AppState,
     /// Newest first.
-    jobs: Vec<Job>,
+    jobs: Vec<JobView>,
     checks: Vec<Value>,
     published: Option<Published>,
     source_enabled: Option<bool>,
@@ -109,7 +129,7 @@ fn build_view(
     kiwi: &Kiwi,
     recipe: &Recipe,
     state: AppState,
-    jobs: Vec<Job>,
+    jobs: Vec<JobView>,
     checks: Vec<Value>,
 ) -> AppView {
     let source = kiwi.catalog.source(SOURCE_ID);
@@ -151,7 +171,7 @@ fn build_view(
     });
     let next_check_at = (state.added
         && state.preferences.enabled
-        && !jobs.iter().any(Job::active)
+        && !jobs.iter().any(|j| j.job.active())
         && kiwi.automation.can_build(recipe))
     .then(|| {
         state.last_checked_at.map_or_else(Utc::now, |last| {
@@ -190,15 +210,23 @@ pub fn app_view(kiwi: &Kiwi, id: &str) -> ApiResult<AppView> {
     let recipe = recipe(id)?;
     let mut state = kiwi.automation.snapshot();
     let checks = kiwi.automation.checks(&state);
+    let ahead = kiwi.automation.ahead(&state);
     let app = state.apps.remove(id).unwrap_or_default();
     let jobs = state.jobs.into_iter().filter(|j| j.app == id).collect();
-    Ok(build_view(kiwi, recipe, app, jobs, checks))
+    Ok(build_view(
+        kiwi,
+        recipe,
+        app,
+        job_views(jobs, &ahead),
+        checks,
+    ))
 }
 
 /// Every app Kiwi can build, with its latest jobs, and the shared Mac setup checks.
 pub fn overview(kiwi: &Kiwi) -> Overview {
     let mut state = kiwi.automation.snapshot();
     let checks = kiwi.automation.checks(&state);
+    let ahead = kiwi.automation.ahead(&state);
     let apps = recipes()
         .iter()
         .map(|recipe| {
@@ -210,7 +238,7 @@ pub fn overview(kiwi: &Kiwi) -> Overview {
                 .take(3)
                 .cloned()
                 .collect();
-            build_view(kiwi, recipe, app, jobs, Vec::new())
+            build_view(kiwi, recipe, app, job_views(jobs, &ahead), Vec::new())
         })
         .collect();
     Overview { apps, checks }

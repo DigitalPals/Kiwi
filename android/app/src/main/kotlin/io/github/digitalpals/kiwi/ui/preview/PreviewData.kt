@@ -20,6 +20,7 @@ import io.github.digitalpals.kiwi.api.ServerInfo
 import io.github.digitalpals.kiwi.install.InstallJob
 import io.github.digitalpals.kiwi.ui.AppItem
 import io.github.digitalpals.kiwi.ui.AppPage
+import io.github.digitalpals.kiwi.ui.BuildsViewModel
 import io.github.digitalpals.kiwi.ui.KiwiBuilds
 import io.github.digitalpals.kiwi.ui.LocalPackage
 import io.github.digitalpals.kiwi.ui.MyAppsViewModel
@@ -201,16 +202,70 @@ object PreviewData {
 
     val builds: List<AutomationState> = listOf(youTubeRecipe, musicRecipe, redditRecipe)
 
-    /** Reddit not added yet, for the Add sheet. */
-    val buildsToAdd: List<AutomationState> = listOf(
-        redditRecipe.copy(added = false, jobs = emptyList(), published = null, nextCheckAt = null),
-    )
-
     val tints: Map<String, String> = mapOf(
         youTube.bundleId to "#FF0000",
         youTubeMusic.bundleId to "#FF0000",
         reddit.bundleId to "#FF4500",
     )
+
+    /** Reddit not added yet, for the sheet before its first build. */
+    val redditToInstall: AutomationState =
+        redditRecipe.copy(added = false, jobs = emptyList(), published = null, nextCheckAt = null)
+
+    /** What blocks Reddit: the Google Play app is installed with Google's signature. */
+    val redditBlocker: String =
+        "Reddit is already installed on this phone from somewhere else (with another signature). Android can't " +
+            "replace it with Kiwi's build: uninstall it first. Its data on this phone is lost."
+
+    /** Builds with the published apps on the phone: YouTube to install, Music to update, Reddit to open. */
+    val buildsContent = BuildsViewModel.Content(
+        off = false,
+        apps = builds,
+        tints = tints,
+        published = mapOf(youTube.bundleId to youTube, youTubeMusic.bundleId to youTubeMusic, reddit.bundleId to reddit),
+        local = mapOf(youTube.bundleId to absent, youTubeMusic.bundleId to installedSilently, reddit.bundleId to installedSilently),
+    )
+
+    /** Nothing built yet: every app offers Install. */
+    val buildsFirstRun = BuildsViewModel.Content(
+        off = false,
+        apps = builds.map { it.copy(added = false, jobs = emptyList(), published = null, nextCheckAt = null) },
+        tints = tints,
+    )
+
+    /**
+     * First builds on their way, all asked for with Install: YouTube building, YouTube Music
+     * waiting behind it, Reddit failed.
+     */
+    val buildsInProgress = BuildsViewModel.Content(
+        off = false,
+        apps = listOf(
+            youTubeRecipe.copy(
+                jobs = listOf(AutomationJob("j1", "android-youtube", 1, "running", "Patching", "21.30.216", interactive = true)),
+                published = null,
+                nextCheckAt = null,
+            ),
+            musicRecipe.copy(
+                jobs = listOf(AutomationJob("j2", "android-youtube-music", 1, "queued", "Waiting for YouTube", interactive = true, ahead = 1)),
+                published = null,
+            ),
+            redditRecipe.copy(
+                jobs = listOf(
+                    AutomationJob(
+                        "j3", "android-reddit", 1, "failed", "Needs attention", "2026.40.0",
+                        error = "Google Play didn't offer Reddit 2026.40.0 to the build's device. Try again later.",
+                        finishedAt = daysAgo(0),
+                    ),
+                ),
+                published = null,
+                nextCheckAt = null,
+            ),
+        ),
+        tints = tints,
+    )
+
+    /** The apps waiting to be installed in [buildsInProgress]. */
+    val pendingInstalls: Set<String> = setOf("android-youtube", "android-youtube-music", "android-reddit")
 
     val youTubePage = AppPage(
         detail = AppDetail(

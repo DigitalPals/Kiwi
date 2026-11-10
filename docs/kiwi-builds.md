@@ -113,7 +113,16 @@ development profile cannot grant their entitlements, and injection removes exten
 ## Android apps
 
 Kiwi Builds makes patched Android apps on the same Mac and serves them to your Android
-phones and tablets as APK downloads. Add them under **Kiwi Builds › Add an Android App**.
+phones and tablets as APK downloads. Add them under **Kiwi Builds › Add an Android App**, or
+in [Kiwi's Android app](android-app.md): its **Builds** tab lists every app below with an
+**Install** button. One tap adds the app with the default patches (or **Customise patches**
+first), builds it on demand and installs it once it is ready. The first build takes about 3
+to 8 minutes; you can leave the app, and Kiwi notifies you when the build is ready (tap the
+notification to install it; Android doesn't let Kiwi open the installer while it is in the
+background). Builds started this way go before scheduled checks, and the row shows how many
+builds are ahead. Before building, the sheet warns when a copy of the app from elsewhere is
+installed: Android can't replace it with Kiwi's build, so uninstall it first (its data on
+the phone is lost).
 
 | App | Patches (pinned) | Installs as | Notes |
 |---|---|---|---|

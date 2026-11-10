@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -49,6 +50,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
@@ -57,13 +59,22 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import io.github.digitalpals.kiwi.api.AppSummary
 import io.github.digitalpals.kiwi.api.AutomationPreferences
 import io.github.digitalpals.kiwi.api.AutomationState
+import io.github.digitalpals.kiwi.install.InstallJob
+import io.github.digitalpals.kiwi.ui.AppActions
+import io.github.digitalpals.kiwi.ui.BuildRowAction
+import io.github.digitalpals.kiwi.ui.BuildRowView
 import io.github.digitalpals.kiwi.ui.BuildsViewModel
 import io.github.digitalpals.kiwi.ui.Format
 import io.github.digitalpals.kiwi.ui.KiwiBuilds
 import io.github.digitalpals.kiwi.ui.Load
+import io.github.digitalpals.kiwi.ui.SystemActions
+import io.github.digitalpals.kiwi.ui.components.ActionButton
 import io.github.digitalpals.kiwi.ui.components.AppIcon
+import io.github.digitalpals.kiwi.ui.components.ButtonActions
+import io.github.digitalpals.kiwi.ui.components.FilledAction
 import io.github.digitalpals.kiwi.ui.components.GroupRow
 import io.github.digitalpals.kiwi.ui.components.IconCircle
 import io.github.digitalpals.kiwi.ui.components.KiwiSwitch
@@ -71,22 +82,28 @@ import io.github.digitalpals.kiwi.ui.components.KiwiTopBar
 import io.github.digitalpals.kiwi.ui.components.ListGroup
 import io.github.digitalpals.kiwi.ui.components.Loading
 import io.github.digitalpals.kiwi.ui.components.LocalSnackbars
-import io.github.digitalpals.kiwi.ui.components.MessagePane
 import io.github.digitalpals.kiwi.ui.components.SectionLabel
 import io.github.digitalpals.kiwi.ui.components.TitleSummary
 import io.github.digitalpals.kiwi.ui.components.TonalAction
 import io.github.digitalpals.kiwi.ui.components.WarningCard
+import io.github.digitalpals.kiwi.ui.components.caption
 import io.github.digitalpals.kiwi.ui.preview.PreviewData
 import io.github.digitalpals.kiwi.ui.theme.KiwiIcons
 import io.github.digitalpals.kiwi.ui.theme.KiwiTheme
 import io.github.digitalpals.kiwi.ui.theme.kiwi
+import io.github.digitalpals.kiwi.work.Notifications
 import kotlinx.coroutines.delay
 import java.time.Instant
 
 /** What the Builds screen can do; previews use the defaults (nothing). */
 class BuildsActions(
     val refresh: () -> Unit = {},
-    val add: () -> Unit = {},
+    /** "Install" on an app not built yet: the sheet about its first build, or turning Kiwi Builds on first. */
+    val install: (AutomationState) -> Unit = {},
+    /** "Retry" on a failed first build: builds it again and installs it when ready. */
+    val retry: (AutomationState) -> Unit = {},
+    /** The buttons of a published build (install, update, open; SystemActions.appActions). */
+    val buttons: (AppSummary) -> ButtonActions = { ButtonActions.None },
     val edit: (AutomationState) -> Unit = {},
     val check: (AutomationState, Boolean) -> Unit = { _, _ -> },
     val cancel: (AutomationState) -> Unit = {},
@@ -97,23 +114,28 @@ class BuildsActions(
 )
 
 /**
- * Builds: Kiwi Builds' Android apps (`/api/automation`). Polls every 3 seconds while a job runs
- * and every 30 seconds otherwise, while the screen is visible. [editRequest] opens an app's
- * patches and schedule (from its app page).
+ * Builds: every Android app Kiwi Builds can build (`/api/automation`), with one-tap Install.
+ * Polls every 3 seconds while a job runs and every 30 seconds otherwise, while the screen is
+ * visible. [editRequest] opens an app's patches and schedule (from its app page).
  */
 @Composable
-fun BuildsScreen(model: BuildsViewModel, editRequest: String?, onEditHandled: () -> Unit) {
+fun BuildsScreen(model: BuildsViewModel, appActions: AppActions, editRequest: String?, onEditHandled: () -> Unit) {
     val state by model.state.collectAsStateWithLifecycle()
     val busy by model.busy.collectAsStateWithLifecycle()
     val notifyBuilds by model.notifyBuilds.collectAsStateWithLifecycle(initialValue = true)
+    val pending by model.pending.collectAsStateWithLifecycle(initialValue = emptySet())
+    val installs by model.installs.collectAsStateWithLifecycle()
     val snackbars = LocalSnackbars.current
+    val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val content = (state as? Load.Ready)?.value
     val active = content?.active == true
-    var adding by rememberSaveable { mutableStateOf(false) }
+    var installing by rememberSaveable { mutableStateOf<String?>(null) }
     var editing by rememberSaveable { mutableStateOf<String?>(null) }
     var removing by rememberSaveable { mutableStateOf<String?>(null) }
-    var turningOn by rememberSaveable { mutableStateOf(false) }
+
+    /** Turning Kiwi Builds on: the app whose Install asked for it, or [BuildsViewModel.ALL]. */
+    var turningOn by rememberSaveable { mutableStateOf<String?>(null) }
 
     LaunchedEffect(active, lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -138,24 +160,37 @@ fun BuildsScreen(model: BuildsViewModel, editRequest: String?, onEditHandled: ()
         busy = busy,
         notifyBuilds = notifyBuilds,
         now = Instant.now(),
+        pending = pending,
+        installs = installs,
         actions = BuildsActions(
             refresh = { model.reload() },
-            add = { adding = true },
+            install = { app -> if (content?.off == true) turningOn = app.id else installing = app.id },
+            retry = model::retry,
+            buttons = { appActions.buttons(it) },
             edit = { editing = it.id },
             check = { app, force -> model.check(app, force) },
             cancel = model::cancel,
             remove = { removing = it.id },
             checkAll = { content?.let { model.checkAll(it.added) } },
             notifyBuilds = model::setNotifyBuilds,
-            turnOn = { turningOn = true },
+            turnOn = { turningOn = BuildsViewModel.ALL },
         ),
     )
 
-    if (adding && content != null) {
-        BuildSheet(onDismiss = { adding = false }) {
-            AddBuildSheetContent(content.available, content.tints, busy) { app, preferences ->
-                model.add(app, preferences) { adding = false }
-            }
+    // The sheet waits for Kiwi's own state of the app (after turning Kiwi Builds on).
+    val toInstall = content?.takeIf { !it.off }?.apps?.firstOrNull { it.id == installing }
+    if (toInstall != null) {
+        BuildSheet(onDismiss = { installing = null }) {
+            InstallBuildSheetContent(
+                app = toInstall,
+                tint = content.tints[toInstall.bundleId],
+                blocker = content.blockers[toInstall.id],
+                notificationsAllowed = remember(toInstall.id) { Notifications.allowed(context) },
+                busy = toInstall.id in busy,
+                onBuild = { preferences -> model.buildAndInstall(toInstall, preferences) { installing = null } },
+                onUninstall = { SystemActions.uninstall(context, toInstall.bundleId) },
+                onNotificationSettings = { SystemActions.notificationSettings(context) },
+            )
         }
     }
     val edited = content?.apps?.firstOrNull { it.id == editing && it.added }
@@ -176,7 +211,7 @@ fun BuildsScreen(model: BuildsViewModel, editRequest: String?, onEditHandled: ()
         AlertDialog(
             onDismissRequest = { removing = null },
             title = { Text("Remove ${app.name} from Kiwi Builds?") },
-            text = { Text("Installed copies keep working, but won't get updates. You can add it again later.") },
+            text = { Text("Installed copies keep working, but won't get updates. You can install it again later.") },
             confirmButton = {
                 TextButton(onClick = {
                     removing = null
@@ -187,23 +222,27 @@ fun BuildsScreen(model: BuildsViewModel, editRequest: String?, onEditHandled: ()
             dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } },
         )
     }
-    if (turningOn) {
+    turningOn?.let { asked ->
         AlertDialog(
-            onDismissRequest = { turningOn = false },
+            onDismissRequest = { turningOn = null },
             title = { Text("Turn on Kiwi Builds?") },
             text = { Text(KiwiBuilds.TURN_ON_NOTICE) },
             confirmButton = {
                 TextButton(onClick = {
-                    turningOn = false
-                    model.turnOn()
+                    turningOn = null
+                    // Install continues with the app's sheet once Kiwi lists it.
+                    model.turnOn { if (asked != BuildsViewModel.ALL) installing = asked }
                 }) { Text("Turn on") }
             },
-            dismissButton = { TextButton(onClick = { turningOn = false }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { turningOn = null }) { Text("Cancel") } },
         )
     }
 }
 
-/** C6: your apps with their versions, schedules and running builds; the schedule; +. */
+/**
+ * C6: the Kiwi Builds section (every app Kiwi can build, each with its button), then the
+ * schedule of added apps. Sections are separate list items, so more can follow below.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BuildsContent(
@@ -212,19 +251,12 @@ fun BuildsContent(
     notifyBuilds: Boolean,
     now: Instant,
     actions: BuildsActions,
+    pending: Set<String> = emptySet(),
+    installs: Map<String, InstallJob> = emptyMap(),
 ) {
     val scroll = TopAppBarDefaults.pinnedScrollBehavior()
-    val content = (load as? Load.Ready)?.value
     Scaffold(
-        topBar = {
-            KiwiTopBar("Builds", scroll) {
-                if (content != null && !content.off) {
-                    IconButton(onClick = actions.add, enabled = content.available.isNotEmpty()) {
-                        Icon(KiwiIcons.Plus, contentDescription = "Add an app")
-                    }
-                }
-            }
-        },
+        topBar = { KiwiTopBar("Builds", scroll) },
         contentWindowInsets = WindowInsets(0),
         containerColor = MaterialTheme.colorScheme.background,
     ) { padding ->
@@ -237,15 +269,6 @@ fun BuildsContent(
                 modifier = Modifier.padding(padding),
             ) {
                 val value = load.value
-                if (value.off) {
-                    MessagePane(
-                        "Kiwi Builds is off on your Kiwi",
-                        "Turn it on to patch Android apps like YouTube with open-source patches and sign them with your Kiwi's own key.",
-                        icon = KiwiIcons.Builds,
-                        primary = "Turn on Kiwi Builds" to actions.turnOn,
-                    )
-                    return@PullToRefreshBox
-                }
                 LazyColumn(
                     Modifier
                         .fillMaxSize()
@@ -253,59 +276,31 @@ fun BuildsContent(
                     contentPadding = PaddingValues(bottom = 16.dp),
                 ) {
                     item(key = "summary") { TitleSummary("Patched and signed by your Kiwi") }
-                    val added = value.added
-                    if (added.isEmpty()) {
-                        item(key = "empty") {
-                            MessagePane(
-                                "No apps yet",
-                                "Add YouTube, YouTube Music or Reddit: Kiwi downloads them from Google Play, patches them and signs them with its own key.",
-                                Modifier.height(420.dp),
-                                icon = KiwiIcons.Builds,
-                                primary = if (value.available.isNotEmpty()) "Add an app" to actions.add else null,
-                            )
-                        }
-                        return@LazyColumn
-                    }
-                    item(key = "apps-label") { SectionLabel("Your apps") }
-                    item(key = "apps") {
-                        ListGroup {
-                            added.forEach { app -> row { BuildRow(app, value.tints[app.bundleId], app.id in busy, actions) } }
-                        }
-                    }
-                    item(key = "schedule-label") { SectionLabel("Schedule") }
-                    item(key = "schedule") {
-                        val idle = added.any { KiwiBuilds.activeJob(it) == null }
-                        val next = KiwiBuilds.nextCheck(added)
-                        ListGroup {
-                            row {
-                                GroupRow(
-                                    "Check for new versions",
-                                    subtitle = AnnotatedString(
-                                        when {
-                                            !idle -> "Building now"
-                                            next != null -> Format.nextCheck(next, now)
-                                            else -> "Automatic checks are off"
-                                        },
-                                    ),
-                                    leading = { IconCircle(KiwiIcons.Clock, Color(0xFF1E8E9E)) },
-                                    trailing = {
-                                        TonalAction("Build now", actions.checkAll, enabled = idle && BuildsViewModel.ALL !in busy)
-                                    },
-                                )
-                            }
-                            row {
-                                GroupRow(
-                                    "Notify when a build finishes",
-                                    leading = { IconCircle(KiwiIcons.Bell, Color(0xFFE5483C)) },
-                                    trailing = { KiwiSwitch(notifyBuilds, actions.notifyBuilds) },
-                                    onClick = { actions.notifyBuilds(!notifyBuilds) },
-                                )
+                    if (value.off) {
+                        item(key = "off") {
+                            ListGroup(Modifier.padding(top = 8.dp)) {
+                                row {
+                                    GroupRow(
+                                        "Kiwi Builds is off on your Kiwi",
+                                        subtitle = AnnotatedString("Turn it on to build these apps. Install asks first."),
+                                        leading = { IconCircle(KiwiIcons.Builds, MaterialTheme.colorScheme.primary) },
+                                        trailing = { TonalAction("Turn on", actions.turnOn, enabled = BuildsViewModel.ALL !in busy) },
+                                    )
+                                }
                             }
                         }
+                    }
+                    kiwiBuildsSection(value, busy, pending, installs, actions)
+                    val added = if (value.off) emptyList() else value.added
+                    if (added.isNotEmpty()) {
+                        item(key = "schedule-label") { SectionLabel("Schedule") }
+                        item(key = "schedule") { ScheduleGroup(added, busy, notifyBuilds, now, actions) }
                     }
                     item(key = "footer") {
                         Text(
-                            "One build runs at a time. Kiwi keeps building while this app is closed; if a build fails, the previous version stays available.",
+                            "First builds take ${KiwiBuilds.BUILD_TIME}, one at a time; apps you install go before " +
+                                "scheduled checks. Kiwi keeps building while this app is closed; if a build fails, the " +
+                                "previous version stays available.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 28.dp, vertical = 12.dp),
@@ -317,60 +312,142 @@ fun BuildsContent(
     }
 }
 
-/** An added app: version and schedule, or its running build with a progress bar; ⋮ for more. */
+/** The "Kiwi Builds" section: every app Kiwi can build, added or not. */
+private fun LazyListScope.kiwiBuildsSection(
+    value: BuildsViewModel.Content,
+    busy: Set<String>,
+    pending: Set<String>,
+    installs: Map<String, InstallJob>,
+    actions: BuildsActions,
+) {
+    item(key = "kiwi-builds-label") { SectionLabel("Kiwi Builds") }
+    item(key = "kiwi-builds") {
+        ListGroup {
+            value.apps.forEach { app ->
+                val summary = value.published[app.bundleId]
+                val view = KiwiBuilds.row(
+                    app = app,
+                    summary = summary,
+                    local = value.local[app.bundleId],
+                    job = summary?.let { installs[it.key] },
+                    pending = app.id in pending,
+                    off = value.off,
+                )
+                row { BuildRow(app, view, value.tints[app.bundleId], app.id in busy, menu = app.added && !value.off, actions) }
+            }
+        }
+    }
+}
+
 @Composable
-private fun BuildRow(app: AutomationState, tint: String?, busy: Boolean, actions: BuildsActions) {
-    val job = KiwiBuilds.activeJob(app)
-    val attention = KiwiBuilds.needsAttention(app) && job == null
-    var menu by remember { mutableStateOf(false) }
+private fun ScheduleGroup(added: List<AutomationState>, busy: Set<String>, notifyBuilds: Boolean, now: Instant, actions: BuildsActions) {
+    val idle = added.any { KiwiBuilds.activeJob(it) == null }
+    val next = KiwiBuilds.nextCheck(added)
+    ListGroup {
+        row {
+            GroupRow(
+                "Check for new versions",
+                subtitle = AnnotatedString(
+                    when {
+                        !idle -> "Building now"
+                        next != null -> Format.nextCheck(next, now)
+                        else -> "Automatic checks are off"
+                    },
+                ),
+                leading = { IconCircle(KiwiIcons.Clock, Color(0xFF1E8E9E)) },
+                trailing = {
+                    TonalAction("Build now", actions.checkAll, enabled = idle && BuildsViewModel.ALL !in busy)
+                },
+            )
+        }
+        row {
+            GroupRow(
+                "Notify when a build finishes",
+                leading = { IconCircle(KiwiIcons.Bell, Color(0xFFE5483C)) },
+                trailing = { KiwiSwitch(notifyBuilds, actions.notifyBuilds) },
+                onClick = { actions.notifyBuilds(!notifyBuilds) },
+            )
+        }
+    }
+}
+
+/**
+ * An app of Kiwi Builds: what it is or how its build is going, and one button (Install, Retry,
+ * or the published build's Update or Open); ⋮ for more once it is added.
+ */
+@Composable
+private fun BuildRow(app: AutomationState, view: BuildRowView, tint: String?, busy: Boolean, menu: Boolean, actions: BuildsActions) {
+    val action = view.action
+    val caption = (action as? BuildRowAction.App)?.view?.caption()
     GroupRow(
         app.name,
-        subtitle = AnnotatedString(KiwiBuilds.statusLine(app)),
-        subtitleColor = if (attention) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        subtitle = AnnotatedString(view.subtitle),
+        subtitleColor = if (view.error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
         leading = { AppIcon(app.name, app.iconUrl, tint, size = 44.dp) },
         trailing = {
-            Box {
-                IconButton(onClick = { menu = true }, enabled = !busy) {
-                    Icon(KiwiIcons.More, contentDescription = "More for ${app.name}", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                when (action) {
+                    BuildRowAction.Install -> FilledAction(if (busy) "Starting…" else "Install", { actions.install(app) }, enabled = !busy)
+                    BuildRowAction.Retry -> FilledAction(if (busy) "Starting…" else "Retry", { actions.retry(app) }, enabled = !busy)
+                    is BuildRowAction.App -> ActionButton(action.view, actions.buttons(action.summary))
+                    BuildRowAction.None -> {}
                 }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    fun pick(action: () -> Unit) {
-                        menu = false
-                        action()
-                    }
-                    if (job != null) {
-                        DropdownMenuItem(text = { Text("Cancel build") }, onClick = { pick { actions.cancel(app) } })
-                    } else {
-                        DropdownMenuItem(text = { Text(KiwiBuilds.buildLabel(app)) }, onClick = { pick { actions.check(app, false) } })
-                        if (app.published != null) {
-                            DropdownMenuItem(text = { Text("Rebuild") }, onClick = { pick { actions.check(app, true) } })
-                        }
-                    }
-                    DropdownMenuItem(text = { Text("Patches and schedule") }, onClick = { pick { actions.edit(app) } })
-                    DropdownMenuItem(
-                        text = { Text("Remove") },
-                        enabled = job == null,
-                        onClick = { pick { actions.remove(app) } },
-                    )
-                }
+                if (menu) BuildMenu(app, busy, actions)
             }
         },
-        onClick = { actions.edit(app) },
+        onClick = { if (menu) actions.edit(app) else if (action == BuildRowAction.Install) actions.install(app) },
         below = {
-            if (job?.status == "running") {
+            if (view.building) {
                 LinearProgressIndicator(
                     Modifier
                         .fillMaxWidth()
                         .padding(top = 8.dp, bottom = 2.dp),
                 )
             }
-            if (attention) {
-                KiwiBuilds.attentionDetail(app)?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3)
-                }
+            val detail = caption?.first ?: view.detail
+            if (detail != null) {
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (caption?.second == true) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 3,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
             }
         },
     )
+}
+
+/** ⋮ of an added app: build or cancel, rebuild, patches and schedule, remove. */
+@Composable
+private fun BuildMenu(app: AutomationState, busy: Boolean, actions: BuildsActions) {
+    val job = KiwiBuilds.activeJob(app)
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }, enabled = !busy) {
+            Icon(KiwiIcons.More, contentDescription = "More for ${app.name}", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            fun pick(action: () -> Unit) {
+                open = false
+                action()
+            }
+            if (job != null) {
+                DropdownMenuItem(text = { Text("Cancel build") }, onClick = { pick { actions.cancel(app) } })
+            } else {
+                DropdownMenuItem(text = { Text(KiwiBuilds.buildLabel(app)) }, onClick = { pick { actions.check(app, false) } })
+                if (app.published != null) {
+                    DropdownMenuItem(text = { Text("Rebuild") }, onClick = { pick { actions.check(app, true) } })
+                }
+            }
+            DropdownMenuItem(text = { Text("Patches and schedule") }, onClick = { pick { actions.edit(app) } })
+            DropdownMenuItem(
+                text = { Text("Remove") },
+                enabled = job == null,
+                onClick = { pick { actions.remove(app) } },
+            )
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -391,43 +468,48 @@ private fun BuildSheet(onDismiss: () -> Unit, content: @Composable ColumnScope.(
     }
 }
 
-/** The + sheet: Android apps not added yet, then the chosen one's patches and schedule. */
+/**
+ * Before the first build of an app: what Kiwi does and how long it takes, what to know, and
+ * what is in the way on this phone ([blocker]), then "Build and install". "Customise patches"
+ * shows the patches and schedule to choose before building.
+ */
 @Composable
-fun AddBuildSheetContent(
-    available: List<AutomationState>,
-    tints: Map<String, String>,
-    busy: Set<String>,
-    onAdd: (AutomationState, AutomationPreferences) -> Unit,
+fun InstallBuildSheetContent(
+    app: AutomationState,
+    tint: String?,
+    blocker: String?,
+    notificationsAllowed: Boolean,
+    busy: Boolean,
+    onBuild: (AutomationPreferences) -> Unit,
+    onUninstall: () -> Unit,
+    onNotificationSettings: () -> Unit,
 ) {
-    var chosen by rememberSaveable { mutableStateOf(available.singleOrNull()?.id) }
-    val app = available.firstOrNull { it.id == chosen }
-    if (app == null) {
-        SheetTitle("Add an app", "Kiwi downloads it from Google Play, patches it with open-source patches and signs it with its own key.")
-        if (available.isEmpty()) {
-            Text(
-                "Every Android app Kiwi can build is added.",
-                style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(24.dp),
+    var preferences by remember(app.id) { mutableStateOf(app.preferences) }
+    var customising by rememberSaveable(app.id) { mutableStateOf(false) }
+    SheetHeader(app, tint, app.summary.ifBlank { app.tweak })
+    ListGroup(Modifier.padding(top = 8.dp)) {
+        row {
+            GroupRow(
+                "First build: ${KiwiBuilds.BUILD_TIME}",
+                subtitle = AnnotatedString(KiwiBuilds.firstBuildNotice(app.name)),
+                leading = { IconCircle(KiwiIcons.Clock, Color(0xFF1E8E9E)) },
             )
         }
-        ListGroup {
-            available.forEach { recipe ->
-                row {
-                    GroupRow(
-                        recipe.name,
-                        subtitle = AnnotatedString(recipe.summary),
-                        leading = { AppIcon(recipe.name, recipe.iconUrl, tints[recipe.bundleId], size = 44.dp) },
-                        trailing = { Icon(KiwiIcons.Chevron, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
-                        onClick = { chosen = recipe.id },
-                    )
-                }
+        if (!notificationsAllowed) {
+            row {
+                GroupRow(
+                    "Notifications are off",
+                    subtitle = AnnotatedString("Kiwi can't tell you when ${app.name} is ready. Open Kiwi again in a few minutes to install it."),
+                    leading = { IconCircle(KiwiIcons.Bell, Color(0xFFE5483C)) },
+                    trailing = { TonalAction("Turn on", onNotificationSettings) },
+                )
             }
         }
-        return
     }
-    var preferences by remember(app.id) { mutableStateOf(app.preferences) }
-    SheetHeader(app, tints[app.bundleId], app.tweak)
-    app.warning?.let { WarningCard("Before you add ${app.name}", it, Modifier.padding(bottom = 8.dp)) }
+    if (blocker != null) {
+        WarningCard("Uninstall the other ${app.name} first", blocker, Modifier.padding(top = 12.dp), action = "Uninstall", onAction = onUninstall)
+    }
+    app.warning?.let { WarningCard("Before you install ${app.name}", it, Modifier.padding(top = 12.dp)) }
     if (app.limitations.isNotEmpty()) {
         SectionLabel("What to know")
         ListGroup {
@@ -436,23 +518,30 @@ fun AddBuildSheetContent(
             }
         }
     }
-    BuildOptions(app, preferences, enabled = app.id !in busy) { preferences = it }
+    if (customising) BuildOptions(app, preferences, enabled = !busy) { preferences = it }
     Column(Modifier.padding(horizontal = 24.dp, vertical = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        TonalAction(
-            if (app.id in busy) "Adding…" else "Add ${app.name}",
-            { onAdd(app, preferences) },
+        FilledAction(
+            if (busy) "Starting…" else "Build and install",
+            { onBuild(preferences) },
             Modifier.fillMaxWidth(),
             small = false,
-            enabled = app.id !in busy,
+            enabled = !busy,
         )
+        if (!customising && (app.availableTweaks.isNotEmpty() || app.names.isNotEmpty())) {
+            TextButton(onClick = { customising = true }, enabled = !busy) { Text("Customise patches") }
+        }
         Text(
-            "Downloads ${app.name} from Google Play, patches it and signs it with your Kiwi's own key. You can change these choices later.",
+            if (preferences.enabled) {
+                "Kiwi then checks for new versions ${KiwiBuilds.intervalLabel(preferences.intervalMinutes, lower = true)} " +
+                    "and builds them for you. You can change this later."
+            } else {
+                "Kiwi won't build new versions on its own. You can change this later."
+            },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 10.dp),
+            modifier = Modifier.padding(top = 6.dp),
         )
-        if (available.size > 1) TextButton(onClick = { chosen = null }) { Text("Choose another app") }
     }
 }
 
@@ -520,14 +609,6 @@ fun EditBuildSheetContent(
     }
     TextButton(onClick = onRemove, enabled = job == null && !busy, modifier = Modifier.padding(horizontal = 12.dp)) {
         Text("Remove from Kiwi Builds", color = MaterialTheme.colorScheme.error)
-    }
-}
-
-@Composable
-private fun SheetTitle(title: String, detail: String) {
-    Column(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 12.dp)) {
-        Text(title, style = MaterialTheme.typography.headlineSmall)
-        Text(detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
     }
 }
 
@@ -659,13 +740,7 @@ fun SheetPreviewFrame(content: @Composable ColumnScope.() -> Unit) {
 @Composable
 private fun BuildsPreview() {
     KiwiTheme(darkTheme = false) {
-        BuildsContent(
-            Load.Ready(BuildsViewModel.Content(off = false, apps = PreviewData.builds, tints = PreviewData.tints)),
-            emptySet(),
-            notifyBuilds = true,
-            now = PreviewData.NOW,
-            actions = BuildsActions(),
-        )
+        BuildsContent(Load.Ready(PreviewData.buildsContent), emptySet(), notifyBuilds = true, now = PreviewData.NOW, actions = BuildsActions())
     }
 }
 
@@ -673,12 +748,29 @@ private fun BuildsPreview() {
 @Composable
 private fun BuildsDarkPreview() {
     KiwiTheme(darkTheme = true) {
+        BuildsContent(Load.Ready(PreviewData.buildsContent), emptySet(), notifyBuilds = true, now = PreviewData.NOW, actions = BuildsActions())
+    }
+}
+
+@Preview(name = "C6 Builds, first run")
+@Composable
+private fun BuildsFirstRunPreview() {
+    KiwiTheme {
+        BuildsContent(Load.Ready(PreviewData.buildsFirstRun), emptySet(), true, PreviewData.NOW, BuildsActions())
+    }
+}
+
+@Preview(name = "C6 Builds, first builds on their way")
+@Composable
+private fun BuildsInProgressPreview() {
+    KiwiTheme {
         BuildsContent(
-            Load.Ready(BuildsViewModel.Content(off = false, apps = PreviewData.builds, tints = PreviewData.tints)),
+            Load.Ready(PreviewData.buildsInProgress),
             emptySet(),
-            notifyBuilds = true,
-            now = PreviewData.NOW,
-            actions = BuildsActions(),
+            true,
+            PreviewData.NOW,
+            BuildsActions(),
+            pending = PreviewData.pendingInstalls,
         )
     }
 }
@@ -687,15 +779,17 @@ private fun BuildsDarkPreview() {
 @Composable
 private fun BuildsOffPreview() {
     KiwiTheme {
-        BuildsContent(Load.Ready(BuildsViewModel.Content(off = true, apps = emptyList())), emptySet(), true, PreviewData.NOW, BuildsActions())
+        BuildsContent(Load.Ready(BuildsViewModel.Content(off = true, apps = KiwiBuilds.OFF_APPS)), emptySet(), true, PreviewData.NOW, BuildsActions())
     }
 }
 
-@Preview(name = "C6 Add sheet")
+@Preview(name = "C6 Install sheet")
 @Composable
-private fun AddSheetPreview() {
+private fun InstallSheetPreview() {
     KiwiTheme {
-        SheetPreviewFrame { AddBuildSheetContent(PreviewData.buildsToAdd, PreviewData.tints, emptySet()) { _, _ -> } }
+        SheetPreviewFrame {
+            InstallBuildSheetContent(PreviewData.redditToInstall, "#FF4500", PreviewData.redditBlocker, false, false, {}, {}, {})
+        }
     }
 }
 

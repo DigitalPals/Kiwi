@@ -235,7 +235,7 @@ private fun Tabs(
                 composable<BuildsRoute> { backStack ->
                     val model: BuildsViewModel = viewModel { BuildsViewModel(container, local) }
                     var edit by rememberSaveable { mutableStateOf(backStack.toRoute<BuildsRoute>().edit) }
-                    BuildsScreen(model, editRequest = edit, onEditHandled = { edit = null })
+                    BuildsScreen(model, actions, editRequest = edit, onEditHandled = { edit = null })
                 }
                 composable<SettingsRoute> {
                     SettingsScreen(container, session, me, serverUrl, onShowSetup)

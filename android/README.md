@@ -184,19 +184,40 @@ app/src/main/kotlin/io/github/digitalpals/kiwi/
   (Tailscale off) waits for the next period.
 - **Opening apps.** Kiwi's API has no `open_url` for Android; the app opens installed apps
   with their launcher intent.
-- **Kiwi Builds.** The Builds tab manages Kiwi Builds' Android apps through `/api/automation`
-  (docs/api.md, "Kiwi Builds (automation)"): the added apps with their version, schedule and
-  running job (polled every 3 seconds while a job runs, else every 30 seconds, while the tab is
-  open), the + sheet to add one of the Android recipes not added yet (its patches and schedule
-  first), and for each app Build now / Check now, Rebuild, Cancel, its patches and schedule,
-  and Remove. "Build now" in Schedule checks every added app that has no job. iOS recipes are
-  not shown. While Kiwi Builds is off (`409 builds_off`), the tab says so and offers to turn it
-  on (`PATCH /api/settings {"kiwi_builds": true}`) after a confirmation of what it does, as the
-  web app's Settings does. An app's page shows its patches when it comes from Kiwi Builds.
+- **Kiwi Builds.** The Builds tab lists every Android recipe of `/api/automation` in a "Kiwi
+  Builds" section (docs/api.md, "Kiwi Builds (automation)"), added or not, polled every 3
+  seconds while a job runs, else every 30 seconds, while the tab is open. Each row has one
+  button: **Install** before the first build; "Waiting — N ahead" (the job's `ahead`) or the
+  running stage with a progress bar while it builds; **Retry** with the reason when the first
+  build failed; and the published build's usual Install, Update or Open (and its install's
+  progress) once there is one. Install first shows a sheet: what Kiwi does and that the first
+  build takes about 3–8 minutes, the recipe's limitations, a copy of the package on the phone
+  that a Kiwi build couldn't replace (another signature than `Me.host.android_signer_sha256`,
+  or `foreign_install`; it offers to uninstall it, before minutes are spent building), and
+  "Customise patches" (the patches and schedule). **Build and install** saves the wish to
+  install on the phone (DataStore, `pending_build_installs`), then adds the app (`POST
+  .../add`, idempotent on the server) or checks it again, so a second tap never queues a
+  second build. An app that already has a published build just installs it. While Kiwi is in
+  the foreground, `install/BuildInstalls.kt` looks every 5 seconds and starts the install of
+  a ready build (Android's confirmation); in the background the update worker notifies
+  "<App> is ready — tap to install" (it opens Builds, which installs it), since Android
+  doesn't let an app open the installer from there; with notifications denied the install
+  starts the next time Kiwi is opened. The wish ends when the install starts, the build fails
+  (its reason in the row and a notification), is cancelled, the app is removed or Kiwi
+  Builds is turned off. Added apps keep the ⋮ menu (Build now / Check now, Rebuild, Cancel,
+  Patches and schedule, Remove) and the Schedule section ("Build now" checks every added app
+  that has no job). iOS recipes are not shown. While Kiwi Builds is off (`409 builds_off`),
+  the rows come from the app's own copy of the Android recipes (`KiwiBuilds.OFF_APPS`, checked
+  against `automation/android.json` by a server test); Install, or the card above them, asks
+  to turn it on (`PATCH /api/settings {"kiwi_builds": true}`) after a confirmation of what it
+  does, as the web app's Settings does, and then continues with the app's sheet. An app's page
+  shows its patches when it comes from Kiwi Builds. More sections (such as community patches)
+  can follow the Kiwi Builds section as further list items.
 - **Build notifications.** With "Notify when a build finishes" (on by default) each update
   check also reads `/api/automation` and notifies builds that finished or failed since the
   last look (the first look only remembers what it saw); a ready build opens the app's page,
-  a failed one the Builds tab. A ready build of an app that is installed is left to the
+  a failed one the Builds tab. Builds of apps waiting to be installed are notified even with
+  the switch off, as "<App> is ready — tap to install". A ready build of an app that is installed is left to the
   update notification (or the silent update). While a build runs,
   the app checks again 5 minutes later, so a build is notified (and installed, where Android
   needs no confirmation) soon after it finishes.
@@ -233,6 +254,8 @@ report, a first install (confirmation), update ownership on Android 14+, a silen
 app Kiwi installed, the signature-conflict path, the self-update (silent on Android 12+ when
 Kiwi was first installed from the browser), background checks and notifications (updates and
 builds), background installs waiting for Wi-Fi under Tailscale's VPN, Cancel during a stalled
-download and during the copy into a session, connecting while the screen rotates, the Builds tab against a real Kiwi (adding, patches,
-schedule, Build now, cancel, remove, turning Kiwi Builds on), the carousel and pull to refresh
+download and during the copy into a session, connecting while the screen rotates, the Builds tab against a real Kiwi (Install and its sheet, the wait
+for a first build in the foreground and in the background, its notification, the conflict
+warning before a build, Retry, patches, schedule, Build now, cancel, remove, turning Kiwi
+Builds on from Install), the carousel and pull to refresh
 by touch, the bottom sheets and menus, and the themed launcher icon.

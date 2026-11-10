@@ -35,13 +35,13 @@ import com.github.takahirom.roborazzi.size
 import com.github.takahirom.roborazzi.uiMode
 import io.github.digitalpals.kiwi.R
 import io.github.digitalpals.kiwi.ui.preview.PreviewData
-import io.github.digitalpals.kiwi.ui.screens.AddBuildSheetContent
 import io.github.digitalpals.kiwi.ui.screens.AppPageContent
 import io.github.digitalpals.kiwi.ui.screens.BrowseContent
 import io.github.digitalpals.kiwi.ui.screens.BuildsActions
 import io.github.digitalpals.kiwi.ui.screens.BuildsContent
 import io.github.digitalpals.kiwi.ui.screens.ConnectContent
 import io.github.digitalpals.kiwi.ui.screens.EditBuildSheetContent
+import io.github.digitalpals.kiwi.ui.screens.InstallBuildSheetContent
 import io.github.digitalpals.kiwi.ui.screens.MyAppsContent
 import io.github.digitalpals.kiwi.ui.screens.PhoneState
 import io.github.digitalpals.kiwi.ui.screens.SettingsActions
@@ -166,7 +166,7 @@ class ScreenshotTest {
     fun c6Builds() = both("c6-builds") { _ ->
         Phone(KiwiTab.Builds) {
             BuildsContent(
-                Load.Ready(BuildsViewModel.Content(off = false, apps = PreviewData.builds, tints = PreviewData.tints)),
+                Load.Ready(PreviewData.buildsContent),
                 emptySet(),
                 notifyBuilds = true,
                 now = PreviewData.NOW,
@@ -176,14 +176,37 @@ class ScreenshotTest {
     }
 
     @Test
+    fun c6BuildsFirstRunAndInProgress() {
+        both("c6-builds-first-run") {
+            Phone(KiwiTab.Builds) {
+                BuildsContent(Load.Ready(PreviewData.buildsFirstRun), emptySet(), true, PreviewData.NOW, BuildsActions())
+            }
+        }
+        both("c6-builds-in-progress") {
+            Phone(KiwiTab.Builds) {
+                BuildsContent(
+                    Load.Ready(PreviewData.buildsInProgress),
+                    emptySet(),
+                    true,
+                    PreviewData.NOW,
+                    BuildsActions(),
+                    pending = PreviewData.pendingInstalls,
+                )
+            }
+        }
+    }
+
+    @Test
     fun c6BuildsOffAndSheets() {
         both("c6-builds-off") {
             Phone(KiwiTab.Builds) {
-                BuildsContent(Load.Ready(BuildsViewModel.Content(off = true, apps = emptyList())), emptySet(), true, PreviewData.NOW, BuildsActions())
+                BuildsContent(Load.Ready(BuildsViewModel.Content(off = true, apps = KiwiBuilds.OFF_APPS)), emptySet(), true, PreviewData.NOW, BuildsActions())
             }
         }
-        both("c6-add-sheet") {
-            SheetPreviewFrame { AddBuildSheetContent(PreviewData.buildsToAdd, PreviewData.tints, emptySet()) { _, _ -> } }
+        both("c6-install-sheet") {
+            SheetPreviewFrame {
+                InstallBuildSheetContent(PreviewData.redditToInstall, "#FF4500", PreviewData.redditBlocker, false, false, {}, {}, {})
+            }
         }
         both("c6-app-sheet") {
             SheetPreviewFrame { EditBuildSheetContent(PreviewData.youTubeRecipe, "#FF0000", false, {}, {}, {}, {}) }

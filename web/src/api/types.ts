@@ -425,6 +425,10 @@ export interface AutomationJob {
   created_at: string;
   finished_at: string | null;
   preferences?: AutomationPreferences;
+  /** Asked for (add, check) rather than scheduled: starts before scheduled jobs. Absent when false. */
+  interactive?: boolean;
+  /** Only on a queued job: how many builds run before it starts, the running one included. */
+  ahead?: number;
 }
 
 export interface BuildFeature {

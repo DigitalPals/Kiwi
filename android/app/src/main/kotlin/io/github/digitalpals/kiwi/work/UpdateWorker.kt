@@ -19,6 +19,9 @@ import io.github.digitalpals.kiwi.api.KiwiApi
 import io.github.digitalpals.kiwi.api.KiwiException
 import io.github.digitalpals.kiwi.api.Platforms
 import io.github.digitalpals.kiwi.install.InstallOutcome
+import io.github.digitalpals.kiwi.ui.KiwiBuilds
+import io.github.digitalpals.kiwi.ui.PendingOutcome
+import io.github.digitalpals.kiwi.util.ForegroundTracker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import java.util.concurrent.TimeUnit
@@ -28,7 +31,8 @@ import java.util.concurrent.TimeUnit
  * reports Kiwi's packages, notifies new updates, and (with "Install updates automatically")
  * installs those Android lets this app install without asking, on an unmetered network with a
  * battery that isn't low ([BackgroundConditions]); otherwise they are notified like the others.
- * With "Notify when a build finishes" it also notifies finished Kiwi Builds jobs.
+ * With "Notify when a build finishes" it also notifies finished Kiwi Builds jobs, and it always
+ * notifies the builds of apps the user asked to install when ready ("Build and install").
  */
 class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     private val container get() = (applicationContext as KiwiApplication).container
@@ -104,19 +108,37 @@ class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker
 
     /**
      * Notifies Kiwi Builds jobs that finished since the last look ("Notify when a build
-     * finishes"), and looks again soon while a build is still running.
+     * finishes"), and looks again soon while a build is still running. Apps waiting to be
+     * installed when ready (SettingsStore.pendingInstalls) are notified either way: a ready
+     * build as "<App> is ready — tap to install" (BuildInstalls installs it once Kiwi is open;
+     * Android doesn't let it open the installer from the background), a failed one with its
+     * reason, which also ends the wait.
      */
     private suspend fun checkBuilds(kiwi: KiwiApi, updated: Set<String>) {
-        if (!container.settings.notifyBuilds.first() || !Notifications.allowed(applicationContext)) return
+        val pending = container.settings.pendingInstalls.first()
+        val allowed = Notifications.allowed(applicationContext)
+        val notifyAll = allowed && container.settings.notifyBuilds.first()
+        if (!notifyAll && pending.isEmpty()) return
         val apps = try {
             kiwi.automation().apps
         } catch (error: KiwiException.Http) {
-            if (error.isBuildsOff) return
-            throw error
+            if (!error.isBuildsOff) throw error
+            // Turning Kiwi Builds off cancelled the builds.
+            pending.forEach { container.settings.removePendingInstall(it) }
+            return
         }
-        val (notices, seen) = BuildNotices.fresh(apps, container.settings.notifiedBuilds(), updated)
-        Notifications.showBuilds(applicationContext, notices)
+        val (notices, seen) = BuildNotices.fresh(apps, container.settings.notifiedBuilds(), updated, pending)
+        val shown = notices.filter { notifyAll || (allowed && it.app in pending) }
+            // In the foreground, BuildInstalls installs a ready build at once.
+            .filterNot { it.install && ForegroundTracker.isForeground }
+        Notifications.showBuilds(applicationContext, shown)
         container.settings.setNotifiedBuilds(seen)
+        for (app in apps.filter { it.id in pending }) {
+            val outcome = KiwiBuilds.pendingOutcome(app, installable = app.published != null)
+            if (outcome is PendingOutcome.Failed || outcome == PendingOutcome.Dropped) {
+                container.settings.removePendingInstall(app.id)
+            }
+        }
         if (apps.any { app -> app.added && app.jobs.any { it.isActive } }) {
             // A follow-up run chains itself after this one; other callers keep a pending one.
             watchBuilds(applicationContext, chain = inputData.getBoolean(WATCH, false))

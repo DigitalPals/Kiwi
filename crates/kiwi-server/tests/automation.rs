@@ -1504,3 +1504,111 @@ async fn real_kiwi_app_runner_signs_and_serves_an_unsigned_apk() {
         println!("signed app kept at {keep}");
     }
 }
+
+#[tokio::test]
+async fn builds_someone_asked_for_go_first_show_their_place_and_adding_twice_joins() {
+    let k = TestKiwi::start_building().await;
+    fake_runner(&k, false);
+    fake_android_runner(&k, "app.morphe.android.youtube");
+    let phone = k.phone();
+
+    // YouTube holds the worker in signing.
+    k.signer.hold.store(true, Ordering::SeqCst);
+    phone.post("/api/automation/youtube/check", json!({})).await;
+    wait_until(|| !k.kiwi.db.builds().unwrap().is_empty()).await;
+
+    // Twitch is added (and its job cancelled), then queued by the schedule.
+    let twitch = json!({"enabled":true,"interval_minutes":360,"tweaks":[]});
+    phone
+        .post("/api/automation/twitch/add", twitch.clone())
+        .await;
+    phone.post("/api/automation/twitch/cancel", json!({})).await;
+    kiwi_server::automation::queue(&k.kiwi, "twitch", false, false).unwrap();
+    let scheduled = phone.ok("/api/automation/twitch").await;
+    assert_eq!(scheduled["jobs"][0]["status"], "queued");
+    assert_eq!(scheduled["jobs"][0]["ahead"], 1, "{scheduled}");
+    assert!(scheduled["jobs"][0].get("interactive").is_none());
+
+    // A tap on Install comes later but goes before the scheduled build.
+    let preferences = phone.ok("/api/automation/android-youtube").await["preferences"].clone();
+    let added = phone
+        .post("/api/automation/android-youtube/add", preferences.clone())
+        .await;
+    assert_eq!(added.status, StatusCode::ACCEPTED, "{}", added.body);
+    assert_eq!(added.body["jobs"][0]["status"], "queued");
+    assert_eq!(added.body["jobs"][0]["ahead"], 1, "{}", added.body);
+    assert_eq!(added.body["jobs"][0]["interactive"], true);
+    let job = added.body["jobs"][0]["id"].clone();
+    let overview = phone.ok("/api/automation").await;
+    let twitch_row = overview["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "twitch")
+        .unwrap();
+    assert_eq!(twitch_row["jobs"][0]["ahead"], 2, "{twitch_row}");
+
+    // A second tap joins the job instead of failing or queueing another.
+    let again = phone
+        .post("/api/automation/android-youtube/add", preferences.clone())
+        .await;
+    assert_eq!(again.status, StatusCode::ACCEPTED, "{}", again.body);
+    assert_eq!(again.body["jobs"][0]["id"], job);
+    assert_eq!(again.body["jobs"].as_array().unwrap().len(), 1);
+    // Other choices while it waits are a conflict.
+    let mut other = preferences.clone();
+    other["interval_minutes"] = json!(1440);
+    let conflict = phone
+        .post("/api/automation/android-youtube/add", other)
+        .await;
+    assert_eq!(conflict.status, StatusCode::CONFLICT, "{}", conflict.body);
+
+    // The scheduled Twitch job moves ahead when someone asks for it too; it was queued first.
+    let joined = phone.post("/api/automation/twitch/add", twitch).await;
+    assert_eq!(joined.status, StatusCode::ACCEPTED, "{}", joined.body);
+    assert_eq!(joined.body["jobs"][0]["interactive"], true);
+    assert_eq!(joined.body["jobs"][0]["ahead"], 1, "{}", joined.body);
+    assert_eq!(
+        phone.ok("/api/automation/android-youtube").await["jobs"][0]["ahead"],
+        2
+    );
+
+    k.signer.hold.store(false, Ordering::SeqCst);
+    let android = finished_app(&k, "android-youtube").await;
+    let twitch = finished_app(&k, "twitch").await;
+    assert_eq!(android["jobs"][0]["status"], "ready", "{android}");
+    assert_eq!(twitch["jobs"][0]["status"], "ready", "{twitch}");
+    assert!(android["jobs"][0].get("ahead").is_none());
+    let finished = |v: &Value| {
+        chrono::DateTime::parse_from_rfc3339(v["jobs"][0]["finished_at"].as_str().unwrap()).unwrap()
+    };
+    assert!(finished(&twitch) <= finished(&android));
+}
+
+#[tokio::test]
+async fn scheduled_jobs_wait_behind_jobs_someone_asked_for() {
+    let k = TestKiwi::start_building().await;
+    fake_runner(&k, false);
+    let phone = k.phone();
+    k.signer.hold.store(true, Ordering::SeqCst);
+    phone.post("/api/automation/youtube/check", json!({})).await;
+    wait_until(|| !k.kiwi.db.builds().unwrap().is_empty()).await;
+    let prefs = json!({"enabled":true,"interval_minutes":360,"tweaks":[]});
+    // Reddit is queued by the schedule first, X by a tap afterwards.
+    phone
+        .post("/api/automation/reddit/add", prefs.clone())
+        .await;
+    phone.post("/api/automation/reddit/cancel", json!({})).await;
+    kiwi_server::automation::queue(&k.kiwi, "reddit", false, false).unwrap();
+    phone.post("/api/automation/x/add", prefs).await;
+    k.signer.hold.store(false, Ordering::SeqCst);
+    let x = finished_app(&k, "x").await;
+    let reddit = finished_app(&k, "reddit").await;
+    assert_eq!(x["jobs"][0]["status"], "ready", "{x}");
+    assert_eq!(reddit["jobs"][0]["status"], "ready", "{reddit}");
+    // Builds run one at a time, so the order they finished in is the order they started in.
+    let finished = |v: &Value| {
+        chrono::DateTime::parse_from_rfc3339(v["jobs"][0]["finished_at"].as_str().unwrap()).unwrap()
+    };
+    assert!(finished(&x) <= finished(&reddit), "x {x} reddit {reddit}");
+}

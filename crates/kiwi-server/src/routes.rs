@@ -1269,7 +1269,7 @@ async fn automation_check(
     JsonBody(body): JsonBody<AutomationCheck>,
 ) -> ApiResult<Response> {
     crate::automation::require_on(&kiwi)?;
-    crate::automation::queue(&kiwi, &app, body.force)?;
+    crate::automation::queue(&kiwi, &app, body.force, true)?;
     Ok((
         StatusCode::ACCEPTED,
         Json(crate::automation::app_view(&kiwi, &app)?),

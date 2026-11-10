@@ -104,6 +104,12 @@ describe("mock api", () => {
     expect(youtube().jobs[0]).toMatchObject({ status: "running", stage: "Checking build setup" });
     request("POST", "/api/automation/youtube-music/add", music.preferences);
     expect((request("GET", "/api/automation/youtube-music").json as AutomationState).jobs[0]?.stage).toBe("Waiting for YouTube");
+    expect((request("GET", "/api/automation/youtube-music").json as AutomationState).jobs[0]).toMatchObject({ ahead: 1, interactive: true });
+    // Adding again joins the queued build; other choices while it waits are a conflict.
+    const again = request("POST", "/api/automation/youtube-music/add", music.preferences);
+    expect(again.status).toBe(202);
+    expect((again.json as AutomationState).jobs.filter((j) => !j.finished_at)).toHaveLength(1);
+    expect(request("POST", "/api/automation/youtube-music/add", { ...music.preferences, interval_minutes: 1440 }).status).toBe(409);
     expect(request("POST", "/api/automation/youtube/check", {}).status).toBe(409);
     now += 5 * 2600;
     expect(youtube().jobs[0]).toMatchObject({ status: "running", stage: "Injecting tweaks", version: "21.44.0" });

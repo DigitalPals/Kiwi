@@ -9,16 +9,26 @@ pub enum UaSource {
     Installer,
     /// An Android browser: the platform, and the OS version when the browser reports it.
     Android,
+    /// Kiwi's own Android app: the platform and the exact Android release.
+    #[serde(rename = "android_app")]
+    AndroidApp,
 }
 
 impl UaSource {
-    /// Matches the `os_version_source` names of the API ("safari", "installer", "android").
+    /// Matches the `os_version_source` names of the API ("safari", "installer", "android",
+    /// "android_app").
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Safari => "safari",
             Self::Installer => "installer",
             Self::Android => "android",
+            Self::AndroidApp => "android_app",
         }
+    }
+
+    /// Whether the client runs on Android (a browser or Kiwi's app).
+    pub fn android(self) -> bool {
+        matches!(self, Self::Android | Self::AndroidApp)
     }
 }
 
@@ -36,16 +46,68 @@ pub struct UaInfo {
 /// The model recorded for Android devices.
 pub const ANDROID_MODEL: &str = "Android";
 
+/// The product token of Kiwi's Android app.
+const NATIVE_ANDROID: &str = "Kiwi-Android/";
+
 /// Extracts the iOS version/model from an iOS Safari or OTA installer User-Agent, or the
-/// platform from an Android browser's. Returns `None` for other clients or when nothing
-/// useful is present.
+/// platform from an Android browser's or Kiwi's Android app's. Returns `None` for other
+/// clients or when nothing useful is present.
 pub fn parse_user_agent(ua: &str) -> Option<UaInfo> {
     let ua = ua.trim();
     if ua.starts_with("Mozilla/") {
         safari(ua).or_else(|| android(ua))
+    } else if ua.starts_with(NATIVE_ANDROID) {
+        native_android(ua)
     } else {
         installer(ua)
     }
+}
+
+/// Whether the request comes from Kiwi's Android app rather than a browser.
+pub fn is_native_android(ua: &str) -> bool {
+    ua.trim().starts_with(NATIVE_ANDROID)
+}
+
+/// The platform a User-Agent comes from: `"ios"` for iOS Safari, other iOS browsers and the
+/// OTA installer (also when they tell no version), `"android"` for Android browsers and
+/// Kiwi's Android app; `None` for desktop browsers and other clients.
+pub fn user_agent_platform(ua: &str) -> Option<&'static str> {
+    let ua = ua.trim();
+    if let Some(info) = parse_user_agent(ua) {
+        return Some(if info.source.android() {
+            "android"
+        } else {
+            "ios"
+        });
+    }
+    let ios = ua.starts_with("Mozilla/")
+        && ["(iPhone;", "(iPad;", "(iPod;", "(iPod touch;"]
+            .iter()
+            .any(|d| ua.contains(d));
+    ios.then_some("ios")
+}
+
+/// `Kiwi-Android/1.2.0 (12; Android 15; SDK 35; Google Pixel 9a)`: Kiwi's Android app with
+/// its version name and code, the Android release, the SDK level and the hardware. The
+/// release is the OS version; the hardware is not kept (see [`ANDROID_MODEL`]).
+fn native_android(ua: &str) -> Option<UaInfo> {
+    let rest = ua.strip_prefix(NATIVE_ANDROID)?;
+    let comment = rest
+        .split_once('(')
+        .and_then(|(_, c)| c.split_once(')'))
+        .map_or("", |(c, _)| c);
+    let version = comment
+        .split(';')
+        .map(str::trim)
+        .find_map(|p| p.strip_prefix("Android "))
+        .map(str::trim)
+        .filter(|v| is_version(v));
+    Some(UaInfo {
+        os_version: version.map(str::to_owned),
+        model: Some(ANDROID_MODEL.to_owned()),
+        build: None,
+        source: UaSource::AndroidApp,
+    })
 }
 
 /// `Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 ... Chrome/141.0.0.0 Mobile Safari/537.36`

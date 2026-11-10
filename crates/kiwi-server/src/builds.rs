@@ -149,17 +149,14 @@ pub async fn prepare(
                     && revision.is_none_or(|n| r.revision == Some(n))
             })
             .ok_or_else(|| ApiError::not_found(format!("{} has no release {version}.", a.name)))?,
-        None => a.newest_eligible(profile.as_ref()).ok_or_else(|| {
+        None => a.newest_eligible(Some(&profile)).ok_or_else(|| {
             ApiError::bad_request(format!(
                 "No release of {} is compatible with this device.",
                 a.name
             ))
         })?,
     };
-    if let Some(reason) = profile
-        .as_ref()
-        .and_then(|p| a.releases[index].incompatibility(p))
-    {
+    if let Some(reason) = a.releases[index].incompatibility(&profile) {
         return Err(ApiError::bad_request(reason));
     }
     prepare_release(kiwi, &app, index).await

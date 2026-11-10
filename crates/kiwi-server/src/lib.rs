@@ -2,6 +2,7 @@
 //! the web app. See docs/architecture.md and docs/api.md.
 
 pub mod actions;
+pub mod android;
 pub mod automation;
 pub mod builds;
 pub mod catalog;
@@ -41,6 +42,7 @@ pub use config::{Args, Config};
 pub use routes::router;
 
 use crate::{
+    android::AndroidAppCache,
     builds::Jobs,
     catalog::Catalog,
     config::{AllowedHosts, valid_forwarded_host},
@@ -62,6 +64,8 @@ pub struct Paths {
     pub work: PathBuf,
     pub icons: PathBuf,
     pub vapid: PathBuf,
+    /// Kiwi's Android app (`kiwi.apk`, `kiwi.json`), put there by whatever provides it.
+    pub android_app: PathBuf,
 }
 
 impl Paths {
@@ -73,6 +77,7 @@ impl Paths {
             work: data.join("work"),
             icons: data.join("icons"),
             vapid: data.join("vapid.json"),
+            android_app: data.join("android-app"),
         }
     }
 }
@@ -142,6 +147,8 @@ pub struct Kiwi {
     pub owner: owner::Owner,
     /// IPA byte ranges served per install token (completion of ranged downloads).
     pub served: ServedRanges,
+    /// Kiwi's Android app, checked when its files change.
+    pub android_app: AndroidAppCache,
     /// Cancelled on shutdown.
     pub cancel: CancellationToken,
     /// Wakes the scheduler (a build finished, a source changed, ...).
@@ -319,6 +326,7 @@ impl Kiwi {
             automation,
             owner,
             served: ServedRanges::default(),
+            android_app: AndroidAppCache::default(),
             cancel: CancellationToken::new(),
             kick: Notify::new(),
             config,

@@ -89,6 +89,7 @@ pub struct Release {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceProfile {
+    /// Empty when unknown: the release's OS range is then not checked, only its platform.
     pub os_version: String,
     pub platform: String,
     /// UIDeviceFamily: 1 = iPhone/iPod, 2 = iPad, 3 = TV, 4 = Watch.
@@ -572,6 +573,9 @@ impl Release {
                 "Requires platform {required} (selected: {})",
                 device.platform
             ));
+        }
+        if device.os_version.is_empty() {
+            return None;
         }
         if let Some(min) = &self.min_os {
             match compare_numeric(&device.os_version, min) {

@@ -95,6 +95,9 @@ pub struct AppStateJson {
     pub install_url: Option<String>,
     pub open_url: Option<String>,
     pub replaces: Option<ReplacesJson>,
+    /// The app's package is installed with another signature than Kiwi's (Android): it has
+    /// to be removed before Kiwi's build can be installed.
+    pub foreign_install: bool,
 }
 
 /// How this app's version compares with the App Store's.
@@ -296,13 +299,15 @@ pub fn build_json(
 pub struct View<'a> {
     kiwi: &'a Kiwi,
     pub device: DeviceRow,
-    pub profile: Option<DeviceProfile>,
+    pub profile: DeviceProfile,
     public_url: String,
     builds: HashMap<(String, String), Vec<BuildRow>>,
     pub installs: Vec<InstallRow>,
     installs_by_signed_id: HashMap<String, usize>,
     /// Apps (source id, bundle id) with an install in progress on the device.
     installing: HashSet<(String, String)>,
+    /// Packages the device has installed with another signature (`PUT /api/me/packages`).
+    foreign: HashSet<String>,
     pub signing: SigningInfo,
     pub team: Option<String>,
     /// Choices per app (source id, bundle id).
@@ -344,6 +349,7 @@ impl<'a> View<'a> {
             installs,
             installs_by_signed_id,
             installing,
+            foreign: kiwi.db.foreign_packages(&device.id)?.into_iter().collect(),
             signing: kiwi.signing_info(),
             team: kiwi.team_id(),
             prefs: kiwi.db.app_prefs()?,
@@ -368,12 +374,9 @@ impl<'a> View<'a> {
     }
 
     /// Whether the app has a release for this device's platform: an iPhone's Browse leaves
-    /// out Android apps, and an Android phone's leaves out iOS apps. A device Kiwi knows
-    /// nothing about sees everything.
+    /// out Android apps, and an Android phone's leaves out iOS apps.
     pub fn on_platform(&self, app: &CatalogApp) -> bool {
-        self.profile
-            .as_ref()
-            .is_none_or(|p| app.app().supports_platform(&p.platform))
+        app.app().supports_platform(&self.profile.platform)
     }
 
     /// The App Store app this app is based on, and how it was found.
@@ -481,7 +484,7 @@ impl<'a> View<'a> {
         let signed = self.signed_id(a);
         actions::decide(&Inputs {
             app: a,
-            device: self.profile.as_ref(),
+            device: Some(&self.profile),
             installed,
             builds: self.app_builds(&app.source.id, &a.bundle_id),
             installing: self
@@ -530,7 +533,7 @@ impl<'a> View<'a> {
             d.target.is_none().then(|| {
                 a.releases
                     .first()
-                    .and_then(|r| self.profile.as_ref().and_then(|p| r.incompatibility(p)))
+                    .and_then(|r| r.incompatibility(&self.profile))
                     .unwrap_or_else(|| "No compatible release.".into())
             })
         });
@@ -565,11 +568,12 @@ impl<'a> View<'a> {
                 installed: installed.map(installed_json),
                 target: d
                     .target
-                    .map(|t| release_json(&a.releases[t], self.profile.as_ref())),
+                    .map(|t| release_json(&a.releases[t], Some(&self.profile))),
                 build,
                 install_url,
                 open_url: d.open_url,
                 replaces,
+                foreign_install: self.foreign.contains(&self.signed_id(a)),
             },
         })
     }
@@ -590,7 +594,7 @@ impl<'a> View<'a> {
             releases: a
                 .releases
                 .iter()
-                .map(|r| release_json(r, self.profile.as_ref()))
+                .map(|r| release_json(r, Some(&self.profile)))
                 .collect(),
             permissions: PermissionsJson {
                 entitlements: a.permissions.entitlements.clone(),
@@ -685,6 +689,7 @@ impl<'a> View<'a> {
                     .filter(|_| install.origin == "kiwi")
                     .map(|s| format!("{s}://")),
                 replaces: None,
+                foreign_install: false,
             },
         }
     }

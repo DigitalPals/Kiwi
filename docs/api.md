@@ -216,7 +216,8 @@ type Feature =
   | "home_screen_app"   // the web app on an iOS device: Add to Home Screen and Web Push
   | "web_push"          // the web app (it can use Web Push: the iOS Home Screen app, Android
                         // and desktop browsers); not Kiwi's Android app
-  | "android_app_offer" // the web app on an Android device, while android_app is not null
+  | "android_app_offer" // the web app on a device detected as Android (not a desktop
+                        // browser whose owner chose Android), while android_app is not null
   | "devicectl";        // an iOS device on a macOS host: linking it to a paired CoreDevice
 
 interface AndroidApp {
@@ -593,7 +594,8 @@ the previous one; at most 5000 packages (2 MiB).
 Kiwi offers its Android app (`Me.android_app`) when `<data>/android-app/` holds
 `kiwi.apk` and `kiwi.json` (`{package, version_name, version_code, sha256, size}`, other
 fields are ignored) describing it. A description that doesn't match the file (size or
-SHA-256) is ignored. The web app offers it on Android devices (`android_app_offer`);
+SHA-256) is ignored. The web app offers it on devices detected as Android
+(`android_app_offer`; a desktop browser can't install it, even when its owner chose Android);
 `install_url` downloads it from `/android/kiwi.apk`. While Kiwi Builds is on and Kiwi has an
 Android device or Android build, Kiwi writes both itself: it signs the unsigned release
 pinned in `automation/kiwi-app.json` (or an unsigned APK the owner placed in

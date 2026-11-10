@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AutomationJob, AutomationState } from "../api/types";
 import {
-  appsForDevice, automationSummary, buildsNotice, heroLine, intervalLabel, overviewSummary, samePreferences, selectedFeatures, statusLine,
+  appsForDevice, automationSummary, buildsIos, buildsNotice, heroLine, intervalLabel, overviewSummary, samePreferences, selectedFeatures, statusLine,
 } from "./automation";
 
 const job = (over: Partial<AutomationJob> = {}): AutomationJob => ({
@@ -83,10 +83,31 @@ describe("appsForDevice", () => {
 });
 
 describe("buildsNotice", () => {
+  const mac = { os: "macos" } as const;
+  const linux = { os: "linux" } as const;
+
   it("names where the apps come from", () => {
-    expect(buildsNotice(false)).toContain("Apple account");
-    expect(buildsNotice(false)).toContain("one-time setup");
-    expect(buildsNotice(true)).toContain("Google Play");
-    expect(buildsNotice(true)).not.toContain("Mac");
+    expect(buildsNotice(false, mac)).toContain("Apple account");
+    expect(buildsNotice(false, mac)).toContain("one-time setup");
+    expect(buildsNotice(true, mac)).toContain("Google Play");
+    expect(buildsNotice(true, mac)).not.toContain("Mac");
+    expect(buildsNotice(true, linux)).toBe(buildsNotice(true, mac));
+  });
+
+  it("tells an iPhone plainly that a Kiwi on Linux builds Android apps only", () => {
+    const notice = buildsNotice(false, linux);
+    expect(notice).toContain("Google Play");
+    expect(notice).toContain("iPhone apps can only be built on a Mac");
+    expect(notice).not.toContain("this Mac");
+    expect(notice).not.toContain("Apple account");
+    expect(buildsNotice(false, { os: "other" })).toBe(notice);
+  });
+});
+
+describe("buildsIos", () => {
+  it("builds iOS apps on a Mac only", () => {
+    expect(buildsIos({ os: "macos" })).toBe(true);
+    expect(buildsIos({ os: "linux" })).toBe(false);
+    expect(buildsIos({ os: "other" })).toBe(false);
   });
 });

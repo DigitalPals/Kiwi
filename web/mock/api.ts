@@ -72,8 +72,11 @@ export interface MockOptions {
   client?: Client;
   /** The computer Kiwi runs on: a Mac (default) or Linux. */
   host?: "macos" | "linux";
-  /** Whether Kiwi serves its Android app (default true). */
-  androidApp?: boolean;
+  /**
+   * Whether Kiwi serves its Android app (default true). "failed": signing it failed, so Kiwi
+   * serves none and warns Android devices (`android_app`) as the server does.
+   */
+  androidApp?: boolean | "failed";
   /** Android packages installed with another signature than Kiwi's, e.g. "app.morphe.android.youtube". */
   foreign?: string[];
   /**
@@ -93,8 +96,8 @@ const MOCK_ANDROID_APP = {
   size: 9_400_000,
 };
 
-/** Mirrors kiwi-server's `routes::features`. */
-export function featuresOf(platform: Platform, client: Client, host: Host, androidApp: boolean): Feature[] {
+/** Mirrors kiwi-server's `routes::features`: the Kiwi app is offered only to devices detected as Android. */
+export function featuresOf(platform: Platform, detected: Platform | null, client: Client, host: Host, androidApp: boolean): Feature[] {
   const web = client === "web";
   const ios = platform === "ios";
   const features: [boolean, Feature][] = [
@@ -102,7 +105,7 @@ export function featuresOf(platform: Platform, client: Client, host: Host, andro
     [!ios, "android_apps"],
     [web && ios, "home_screen_app"],
     [web, "web_push"],
-    [web && !ios && androidApp, "android_app_offer"],
+    [web && !ios && detected === "android" && androidApp, "android_app_offer"],
     [ios && host.os === "macos", "devicectl"],
   ];
   return features.filter(([on]) => on).map(([, feature]) => feature);
@@ -124,6 +127,12 @@ const BUILD_SOURCE = "kiwi-youtube";
 /** How long each stage of a simulated Kiwi Build takes; the web app polls every 2 seconds. */
 const BUILD_STAGE_MS = 2600;
 const SETUP_CHECKS = ["Mac build tools", "Tweak toolchain", "App Store sign-in", "Private decryption enrollment"];
+/** kiwi-server's setup checks where iOS apps can't be built (`automation::NEEDS_MAC_CHECK`). */
+const NEEDS_MAC_CHECKS: SetupCheck[] = [{ name: "macOS", ready: false }];
+/** The message of kiwi-server's `409 needs_mac`. */
+const NEEDS_MAC = "iOS apps can only be built on a Mac. This Kiwi doesn't run on macOS, so Kiwi Builds builds Android apps here.";
+/** Why the mock's Kiwi couldn't sign its Android app (`KIWI_MOCK_ANDROID_APP=failed`). */
+const ANDROID_APP_FAILURE = "The Android builder failed: apksigner was not found in the pinned Android build-tools.";
 
 class HttpError extends Error {
   constructor(
@@ -200,7 +209,10 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       : { os: "macos", ios_signing: "keychain", devicectl: true }),
     android_signer_sha256: MOCK_ANDROID_SIGNER,
   };
-  const servesAndroidApp = options.androidApp ?? true;
+  const servesAndroidApp = (options.androidApp ?? true) === true;
+  const androidAppFailed = options.androidApp === "failed";
+  /** iOS apps are built only on a Mac (`409 needs_mac` elsewhere). */
+  const buildsIos = host.os === "macos";
   const vapid = vapidPublicKey();
   const builds = createBuilds(iso(clock()));
   const simulated = options.builds === "simulated";
@@ -558,6 +570,15 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         });
       }
     }
+    // Signing Kiwi's own Android app failed: the server tells Android devices only.
+    if (androidAppFailed && db.device.platform === "android") {
+      warnings.push({
+        level: "warning",
+        code: "android_app",
+        link: "/settings",
+        message: `Kiwi couldn't prepare its Android app: ${ANDROID_APP_FAILURE}`,
+      });
+    }
     const offer = androidApp(origin);
     return {
       device: deviceJson(now),
@@ -569,7 +590,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         devicectl_available: host.devicectl,
       },
       host,
-      features: featuresOf(db.device.platform, client, host, offer !== null),
+      features: featuresOf(db.device.platform, db.detected_platform, client, host, offer !== null),
       android_app: offer,
       push: { vapid_public_key: vapid, subscribed: db.subscriptions.size > 0 },
       counts: {
@@ -649,8 +670,13 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     // The server shows the App Store icon.
     const store = simulated ? findStore(iconBundleId(app.id)) : undefined;
     if (store) view.icon_url = `/__mock/icon/${store.slug}.svg`;
+    // Where iOS apps can't be built, only the missing Mac is checked and nothing is scheduled.
+    if (app.platform !== "android" && !buildsIos) Object.assign(view, { checks: currentChecks(), next_check_at: null });
     return view;
   }
+
+  /** The shared setup checks: the App Store's, or only the missing Mac where iOS apps can't be built. */
+  const currentChecks = (): SetupCheck[] => structuredClone(buildsIos ? setupChecks : NEEDS_MAC_CHECKS);
 
   /** Simulated builds: the Mac's one worker takes the oldest job through its stages, then publishes it. */
   function advanceBuilds(now: number) {
@@ -894,7 +920,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     if (resource === "automation" && !db.settings.kiwi_builds) {
       throw new HttpError(409, "builds_off", "Kiwi Builds is off. Turn it on in Settings.");
     }
-    if (is("GET", "automation")) return ok({ apps: builds.map(automationView), checks: structuredClone(setupChecks) });
+    if (is("GET", "automation")) return ok({ apps: builds.map(automationView), checks: currentChecks() });
     if (parts[1] === "automation" && parts[2] !== undefined) {
       const build = builds.find((b) => b.id === parts[2]);
       if (!build) throw new HttpError(404, "not_found", "Kiwi doesn't build that app.");
@@ -911,12 +937,17 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         const chosen = typeof name === "string" ? name : build.names[0];
         return { enabled, interval_minutes, tweaks: [...new Set(tweaks as string[])].sort(), ...(chosen ? { name: chosen } : {}) };
       };
+      // Like the server: an iOS app can't be added or checked where it can't be built.
+      const requireBuildable = () => {
+        if (build.platform !== "android" && !buildsIos) throw new HttpError(409, "needs_mac", NEEDS_MAC);
+      };
       const schedule = () => {
         build.next_check_at = build.added && build.preferences.enabled
           ? iso(now + build.preferences.interval_minutes * 60_000) : null;
       };
       // Without simulated builds the mock cannot run the Mac pipeline: every check ends blocked.
       const check = (force = false) => {
+        requireBuildable();
         if (!build.added) throw new HttpError(400, "bad_request", `Add ${build.name} to Kiwi Builds first.`);
         if (build.jobs.some((j) => !j.finished_at)) throw new HttpError(409, "conflict", `A ${build.name} build job is already running.`);
         build.sequence++;
@@ -952,6 +983,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         return ok(automationView(build));
       }
       if (is("POST", "automation", undefined, "add")) {
+        requireBuildable();
         build.preferences = preferences();
         build.added = true;
         check();

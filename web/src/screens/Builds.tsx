@@ -4,9 +4,10 @@ import type { AutomationState, SetupCheck } from "../api/types";
 import { AppIcon } from "../components/AppIcon";
 import { Icon } from "../components/Icon";
 import { BackBar, Cell, Empty, ErrorState, LinkCell, Loading, Page, Section, Spinner } from "../components/ui";
-import { activeJob, appsForDevice, BUILD_SOURCE_ID, buildsNotice, statusLine } from "../lib/automation";
+import { activeJob, appsForDevice, BUILD_SOURCE_ID, buildsIos, buildsNotice, statusLine } from "../lib/automation";
 import { useFeatures } from "../lib/features";
 import { useOnForeground, useResource, useTask } from "../lib/hooks";
+import { useMe } from "../lib/me";
 import { buildPath, sourcePath } from "../lib/routes";
 
 export const SETUP_HELP: Record<string, string> = {
@@ -63,6 +64,9 @@ export function SetupCells({ checks }: { checks: SetupCheck[] }) {
  */
 export function Builds() {
   const android = useFeatures().has("android_apps");
+  // An iPhone on a Kiwi that doesn't run on macOS: its apps can't be built here.
+  const host = useMe().me?.host;
+  const noMac = !android && !!host && !buildsIos(host);
   const overview = useResource("automation", api.automationOverview);
   const sources = useResource("sources", api.sources);
   const source = sources.data?.find((s) => s.id === BUILD_SOURCE_ID);
@@ -90,14 +94,20 @@ export function Builds() {
           type="button"
           class="button"
           disabled={turnOn.pending}
-          onClick={() => window.confirm(buildsNotice(true)) && void turnOn.run()}
+          onClick={() => window.confirm(buildsNotice(true, host ?? { os: "other" })) && void turnOn.run()}
         >
           {turnOn.pending ? <Spinner /> : "Turn On Kiwi Builds"}
         </button>
         {turnOn.error && <p class="form-error">{turnOn.error}</p>}
       </Empty>
     ) : (
-      <Empty icon="wrench" title="Kiwi Builds Is Off" message="Turn it on in Settings to patch App Store apps on this Mac.">
+      <Empty
+        icon="wrench"
+        title="Kiwi Builds Is Off"
+        message={noMac
+          ? "iPhone apps can only be built on a Mac. Turn it on in Settings to patch Android apps on this Kiwi."
+          : "Turn it on in Settings to patch App Store apps on this Mac."}
+      >
         <a class="button" href="/settings">
           Open Settings
         </a>
@@ -162,7 +172,7 @@ export function Builds() {
       <header class="page-header">
         <h1 class="large-title">Kiwi Builds</h1>
       </header>
-      <p class="page-summary">Patched and signed on your Mac</p>
+      <p class="page-summary">{noMac ? "iPhone apps can only be built on a Mac" : "Patched and signed on your Mac"}</p>
       {content}
     </main>
   );

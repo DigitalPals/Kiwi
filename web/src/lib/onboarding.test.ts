@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Device, Warning } from "../api/types";
-import { initialChoice, setupPage, signingRow } from "./onboarding";
+import { initialChoice, offersKiwiApp, setupPage, signingRow } from "./onboarding";
 
 type Detection = Pick<Device, "platform" | "platform_source" | "detected_platform">;
 
@@ -41,14 +41,24 @@ describe("setupPage", () => {
     expect(setupPage("android", me(android, false))).toBeNull();
   });
 
-  it("follows the choice, not the detection", () => {
-    expect(setupPage("android", me(iphone))).toBe("android");
+  it("follows the choice, but offers the Kiwi app only where it installs", () => {
     expect(setupPage("ios", me(android))).toBe("iphone");
+    // An iPhone can't install an APK.
+    expect(setupPage("android", me(iphone))).toBeNull();
   });
 
   it("ends with the choice on a desktop browser", () => {
     expect(setupPage("ios", me(desktop))).toBeNull();
     expect(setupPage("android", me(desktop))).toBeNull();
+  });
+});
+
+describe("offersKiwiApp", () => {
+  it("offers the Kiwi app to a device detected as Android while Kiwi serves it", () => {
+    expect(offersKiwiApp(me(android))).toBe(true);
+    expect(offersKiwiApp(me(android, false))).toBe(false);
+    expect(offersKiwiApp(me(desktop))).toBe(false);
+    expect(offersKiwiApp(me(iphone))).toBe(false);
   });
 });
 

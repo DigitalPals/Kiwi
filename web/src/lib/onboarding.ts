@@ -18,13 +18,18 @@ export type SetupPage = "iphone" | "android";
 /**
  * The page that sets up a platform, or null when there is nothing to set up and the setup
  * ends with the choice: a desktop browser can't become a Home Screen app or install the
- * Kiwi app, and an Android device has nothing to set up while Kiwi serves no Android app.
+ * Kiwi app, and Android has nothing to set up while Kiwi serves no Android app. Like the
+ * server's `android_app_offer`, the Kiwi app is offered only on a device detected as
+ * Android: no other device can install it.
  */
 export function setupPage(platform: Platform, me: Pick<Me, "device" | "android_app">): SetupPage | null {
   if (isUndetected(me.device)) return null;
   if (platform === "ios") return "iphone";
-  return me.android_app ? "android" : null;
+  return me.android_app && me.device.detected_platform === "android" ? "android" : null;
 }
+
+/** Whether choosing Android in the setup offers this device the Kiwi app (see `setupPage`). */
+export const offersKiwiApp = (me: Pick<Me, "device" | "android_app">): boolean => setupPage("android", me) !== null;
 
 export interface SigningRow {
   tone: "ok" | "warn" | "off";

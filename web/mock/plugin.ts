@@ -56,10 +56,12 @@ export function mockApi(): Plugin {
       const device = ({ android: "android", desktop: "desktop" } as const)[process.env.KIWI_MOCK_DEVICE ?? ""] ?? "ios";
       // KIWI_MOCK_ONBOARDED=0: the device has not been through the first-run setup yet.
       const onboarded = process.env.KIWI_MOCK_ONBOARDED !== "0";
-      // KIWI_MOCK_HOST=linux: Kiwi runs on Linux (iOS signing with uploaded files, no devicectl).
+      // KIWI_MOCK_HOST=linux: Kiwi runs on Linux (iOS signing with uploaded files, no devicectl,
+      // Kiwi Builds builds Android apps only).
       const host = process.env.KIWI_MOCK_HOST === "linux" ? "linux" : "macos";
-      // KIWI_MOCK_ANDROID_APP=0: Kiwi serves no Android app.
-      const androidApp = process.env.KIWI_MOCK_ANDROID_APP !== "0";
+      // KIWI_MOCK_ANDROID_APP=0: Kiwi serves no Android app; =failed: signing it failed, and
+      // Android devices are warned about it.
+      const androidApp = ({ "0": false, failed: "failed" } as const)[process.env.KIWI_MOCK_ANDROID_APP ?? ""] ?? true;
       // KIWI_MOCK_SIGNING=files: signing with uploaded files, as on Linux (the default for
       // KIWI_MOCK_HOST=linux); =keychain: the Mac's keychain.
       const signing = ({ files: "files", keychain: "keychain" } as const)[process.env.KIWI_MOCK_SIGNING ?? ""];
@@ -74,6 +76,7 @@ export function mockApi(): Plugin {
         host === "linux" && "Linux host",
         signing === "files" && host !== "linux" && "signing with uploaded files",
         !androidApp && "no Android app",
+        androidApp === "failed" && "Android app failed",
         foreign.length > 0 && `foreign ${foreign.join(", ")}`,
       ].filter(Boolean);
       server.config.logger.info(`  Kiwi mock API enabled (VITE_MOCK=1${notes.map((n) => `, ${n}`).join("")})`);

@@ -3,6 +3,8 @@ import { interceptedPath, matchRoute, routeTab, type Route, type Tab } from "./r
 
 interface HistoryEntry {
   idx: number;
+  /** A step within the page at the same address, such as the setup's second page. */
+  step?: string;
 }
 
 const listeners = new Set<() => void>();
@@ -36,6 +38,33 @@ export function navigate(path: string, options: { replace?: boolean } = {}) {
   }
   pendingScroll = 0;
   notify();
+}
+
+/**
+ * Adds a history entry for a step within the current page, at the same address, so the
+ * system Back returns to the step before (a `popstate` with no `currentStep()`).
+ */
+export function pushStep(step: string) {
+  scrollPositions.set(currentIdx(), window.scrollY);
+  history.pushState({ idx: currentIdx() + 1, step } satisfies HistoryEntry, "");
+}
+
+/** The current history entry's step, or null on a page itself. */
+export function currentStep(): string | null {
+  const state = history.state as HistoryEntry | null;
+  return typeof state?.step === "string" ? state.step : null;
+}
+
+/** Leaves the current entry's step for the entry before it; true when there was one. */
+export function leaveStep(): boolean {
+  if (currentStep() === null) return false;
+  history.back();
+  return true;
+}
+
+/** Makes a step left in the current entry (e.g. by a reload) part of the page again. */
+export function forgetStep() {
+  if (currentStep() !== null) history.replaceState({ idx: currentIdx() } satisfies HistoryEntry, "");
 }
 
 /** Goes back within the app, or to `fallback` when the page was opened directly. */

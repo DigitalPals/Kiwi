@@ -1,4 +1,4 @@
-import type { AutomationJob, AutomationOverview, AutomationPreferences, AutomationState } from "../api/types";
+import type { AutomationJob, AutomationOverview, AutomationPreferences, AutomationState, Host } from "../api/types";
 import type { IconName } from "../components/Icon";
 import { formatVersion, plural } from "./format";
 import { appPath } from "./routes";
@@ -89,15 +89,26 @@ export function selectedFeatures(state: AutomationState, tweaks: string[], name?
   ].join(" · ");
 }
 
+/** Whether this Kiwi builds iOS apps: only on a Mac (elsewhere the server answers `409 needs_mac`). */
+export const buildsIos = (host: Pick<Host, "os">): boolean => host.os === "macos";
+
+const GOOGLE_PLAY =
+  "Kiwi will download apps from Google Play, patch them with open-source patches and sign them with this Kiwi's own key.";
+
 /**
  * What turning Kiwi Builds on means, for its confirmation: on an iPhone the App Store apps it
- * downloads with the owner's Apple account, on Android the Google Play apps.
+ * downloads with the owner's Apple account, on Android the Google Play apps. A Kiwi that
+ * doesn't run on macOS builds Android apps only, which an iPhone is told plainly.
  */
-export function buildsNotice(android: boolean): string {
-  const what = android
-    ? "Kiwi will download apps from Google Play, patch them with open-source patches and sign them with this Kiwi's own key."
-    : "Kiwi will download App Store apps with your Apple account, decrypt them on this Mac and patch them with open-source tweaks.";
-  const setup = android ? "" : "\n\nThe Mac needs a one-time setup first (see Kiwi's documentation).";
+export function buildsNotice(android: boolean, host: Pick<Host, "os">): string {
+  let what = GOOGLE_PLAY;
+  let setup = "";
+  if (!android && buildsIos(host)) {
+    what = "Kiwi will download App Store apps with your Apple account, decrypt them on this Mac and patch them with open-source tweaks.";
+    setup = "\n\nThe Mac needs a one-time setup first (see Kiwi's documentation).";
+  } else if (!android) {
+    setup = "\n\niPhone apps can only be built on a Mac. This Kiwi doesn't run on macOS, so it builds Android apps only.";
+  }
   return (
     `Turn on Kiwi Builds?\n\n${what} Patched apps may break the app's terms of service. ` +
     `Use it only for apps you may use, on your own devices, at your own risk.${setup}`

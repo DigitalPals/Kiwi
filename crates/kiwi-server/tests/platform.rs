@@ -32,6 +32,26 @@ async fn patch_me(api: &Api, body: Value) -> Reply {
     api.send(Method::PATCH, "/api/me", Some(body)).await
 }
 
+/// A desktop browser, which tells nothing about the device, with the cookie that identifies
+/// it, and its first `/api/me`.
+async fn desktop_browser(k: &TestKiwi) -> (Api, Value) {
+    let mut desktop = k.browser();
+    desktop.user_agent = Some(
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36".into(),
+    );
+    let r = desktop.get("/api/me").await;
+    desktop.cookie = Some(
+        r.headers[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned(),
+    );
+    (desktop, r.body)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn devices_have_a_platform_and_a_first_run_setup() {
     let k = TestKiwi::start().await;
@@ -70,21 +90,8 @@ async fn devices_have_a_platform_and_a_first_run_setup() {
     assert_eq!(features(&me), ["android_apps", "web_push"]);
 
     // A desktop browser tells nothing: iOS is assumed, and either platform can be chosen.
-    let mut desktop = k.browser();
-    desktop.user_agent = Some(
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36".into(),
-    );
-    let r = desktop.get("/api/me").await;
-    desktop.cookie = Some(
-        r.headers[header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned(),
-    );
-    let device = &r.body["device"];
+    let (desktop, me) = desktop_browser(&k).await;
+    let device = &me["device"];
     assert_eq!(device["platform"], "ios");
     assert_eq!(device["platform_source"], "assumed");
     assert!(device["detected_platform"].is_null());
@@ -346,6 +353,12 @@ async fn kiwis_android_app_is_served_to_the_owners_devices() {
         ..k.android(ANDROID_IP)
     };
     assert!(!features(&native.ok("/api/me").await).contains(&"android_app_offer"));
+    // A desktop browser whose owner chose Android can't install an APK: no offer there.
+    let (desktop, _) = desktop_browser(&k).await;
+    let me = patch_me(&desktop, json!({ "platform": "android" })).await;
+    assert_eq!(me.status, StatusCode::OK, "{}", me.body);
+    assert!(me.body["android_app"].is_object());
+    assert_eq!(features(&me.body), ["android_apps", "web_push"]);
 
     let response = android
         .request(Method::GET, "/android/kiwi.apk")

@@ -343,20 +343,28 @@ const HOST_OS: &str = if cfg!(target_os = "macos") {
 /// What to show on a device (`Me.features` in api.md): its platform's apps, the web app's
 /// Home Screen and Web Push features in a browser, the offer of Kiwi's Android app in an
 /// Android browser, and devicectl linking for an iOS device on a Mac.
+///
+/// The Kiwi app is offered only where it can be installed: in a browser on a device detected
+/// as Android, not in a desktop browser whose owner chose Android.
 pub fn features(
     platform: Platform,
+    detected: Option<Platform>,
     client: Client,
     macos_host: bool,
     android_app: bool,
 ) -> Vec<&'static str> {
     let web = client == Client::Web;
     let ios = platform == Platform::Ios;
+    let android_device = detected == Some(Platform::Android);
     [
         (ios, "ios_apps"),
         (!ios, "android_apps"),
         (web && ios, "home_screen_app"),
         (web, "web_push"),
-        (web && !ios && android_app, "android_app_offer"),
+        (
+            web && !ios && android_device && android_app,
+            "android_app_offer",
+        ),
         (ios && macos_host, "devicectl"),
     ]
     .into_iter()
@@ -474,7 +482,13 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
             "devicectl": devicectl,
             "android_signer_sha256": android_signer,
         },
-        "features": features(platform, ctx.client, HOST_OS == "macos", android_app.is_some()),
+        "features": features(
+            platform,
+            ctx.device.detected_platform,
+            ctx.client,
+            HOST_OS == "macos",
+            android_app.is_some(),
+        ),
         "android_app": android_app.map(|app| app.json(&ctx.public_url)),
         "push": {
             "vapid_public_key": kiwi.vapid_public_key,

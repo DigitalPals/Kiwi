@@ -110,7 +110,7 @@ Kiwi is built from source on the Mac:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh    # Rust
-brew install node                                                 # Node.js 20 or later
+brew install node                                                 # Node.js 20.19, or 22.12 or later
 ```
 
 [Homebrew](https://brew.sh) is the easiest way to get Node.js; the installer from
@@ -196,7 +196,7 @@ source and installs it as a system service, much as on a Mac.
   (see [Tailscale](#3-tailscale)).
 - **Tools**: `jq`, `sqlite3`, `curl`, `git` and a C compiler. On Debian and Ubuntu:
   `sudo apt install jq sqlite3 curl git build-essential`.
-- **Rust** from [rustup.rs](https://rustup.rs) and **Node.js** 20 or later.
+- **Rust** from [rustup.rs](https://rustup.rs) and **Node.js** 20.19, or 22.12 or later.
 - **Python** 3.12 or newer, only for building Android apps with Kiwi Builds. Kiwi's service
   can't see home directories, so it must be a Python installed for the whole system: Debian
   13 and Ubuntu 24.04 have it as `/usr/bin/python3`, which the installer finds by itself.

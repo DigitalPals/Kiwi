@@ -79,19 +79,22 @@ be at most 64 KB, a profile 1 MB.
 
 ### With curl
 
-You can also upload the files on the Kiwi host itself (requests from the host need no
-Tailscale identity; `8742` is Kiwi's default port). The script reads the password from the
-terminal, so it does not end up in your shell history:
+You can also upload the files with curl from another computer that's signed in to Tailscale
+as Kiwi's owner. Not from the Kiwi host itself: on Linux and in Docker, Kiwi doesn't take
+requests made on its own computer for the owner's (they get `403 not_owner`). Set `KIWI` to
+Kiwi's address. The script reads the password from the terminal, so it does not end up in
+your shell history:
 
 ```sh
-python3 - kiwi-development.p12 <<'EOF' | curl -sS http://127.0.0.1:8742/api/signing/identity \
+KIWI=https://kiwi-host.example.ts.net
+python3 - kiwi-development.p12 <<'EOF' | curl -sS "$KIWI/api/signing/identity" \
     -H 'X-Kiwi: 1' -H 'Content-Type: application/json' --data-binary @-
 import base64, getpass, json, sys
 p12 = base64.b64encode(open(sys.argv[1], "rb").read()).decode()
 print(json.dumps({"p12": p12, "password": getpass.getpass("Password of the .p12: ")}))
 EOF
 
-python3 - Kiwi_Wildcard.mobileprovision <<'EOF' | curl -sS http://127.0.0.1:8742/api/signing/profiles \
+python3 - Kiwi_Wildcard.mobileprovision <<'EOF' | curl -sS "$KIWI/api/signing/profiles" \
     -H 'X-Kiwi: 1' -H 'Content-Type: application/json' --data-binary @-
 import base64, json, sys
 print(json.dumps({"profile": base64.b64encode(open(sys.argv[1], "rb").read()).decode()}))

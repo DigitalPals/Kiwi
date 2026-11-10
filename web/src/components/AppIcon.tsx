@@ -1,4 +1,4 @@
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { appColor } from "../lib/tint";
 
 interface Props {
@@ -16,6 +16,8 @@ export function KiwiAppIcon({ size = 60 }: { size?: number }) {
 /** The icon glows in the app's colour; without artwork, its initial on that colour. */
 export function AppIcon({ url, name, tint, size = 60 }: Props) {
   const [failed, setFailed] = useState(false);
+  // A new URL (e.g. after Kiwi restarts) gets its own try.
+  useEffect(() => setFailed(false), [url]);
   const style = { width: `${size}px`, height: `${size}px`, "--icon-tint": appColor(name, tint) };
   if (url && !failed) {
     return (

@@ -144,11 +144,17 @@ find_tailscale() {
 }
 
 # Major version of `node --version` ("v22.12.0" -> 22).
-node_major() {
-	local v
+# Whether node can run the locked Vite (20.19 or newer in 20.x, else 22.12 or newer).
+node_supported() {
+	local v major minor
 	v=$(node --version 2>/dev/null) || return 1
 	v=${v#v}
-	printf '%s\n' "${v%%.*}"
+	major=${v%%.*}
+	minor=${v#*.}
+	minor=${minor%%.*}
+	case "$major$minor" in "" | *[!0-9]*) return 1 ;; esac
+	[ "$major" -gt 22 ] || { [ "$major" = 22 ] && [ "$minor" -ge 12 ]; } ||
+		{ [ "$major" = 20 ] && [ "$minor" -ge 19 ]; }
 }
 
 check_system() {
@@ -199,11 +205,10 @@ check_system() {
 		else
 			problem "Rust is missing: install it from https://rustup.rs"
 		fi
-		local major
-		if major=$(node_major) && [ "$major" -ge 20 ]; then
+		if node_supported; then
 			good "Node.js $(node --version)"
 		else
-			problem "Node.js 20 or newer is missing (brew install node)"
+			problem "Node.js 20.19 or 22.12 (or newer) is missing (brew install node)"
 		fi
 	fi
 }
@@ -355,10 +360,10 @@ check_linux() {
 		else
 			problem "Rust is missing: install it from https://rustup.rs"
 		fi
-		if major=$(node_major) && [ "$major" -ge 20 ]; then
+		if node_supported; then
 			good "Node.js $(node --version)"
 		else
-			problem "Node.js 20 or newer is missing (https://nodejs.org, or your package manager)"
+			problem "Node.js 20.19 or 22.12 (or newer) is missing (https://nodejs.org, or your package manager)"
 		fi
 	fi
 }

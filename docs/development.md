@@ -10,8 +10,8 @@ devicectl and Kiwi Builds' iOS apps need a Mac.
 
 ## Requirements
 
-- Rust stable (see `rust-toolchain.toml`; rustup installs it with `clippy` and `rustfmt`)
-- Node.js 20 or newer with npm (CI uses Node 24)
+- Rust 1.99.1, pinned in `rust-toolchain.toml` (rustup installs it with `clippy` and `rustfmt`)
+- Node.js 22.12 or newer with npm (Vitest needs it; building alone works with 20.19; CI uses Node 24)
 - Python 3.13 with pytest, for the build runner's tests
 - shellcheck, for the scripts
 

@@ -15,12 +15,21 @@ could do with it. You'll get an answer within a week.
   HTTPS. The installer refuses to run when Tailscale Funnel would put it on the internet.
 - Tailscale identifies every device and its user. Only the Tailscale user who owns the Mac
   (or the one given with `--owner`) may use Kiwi; everyone else gets `403 not_owner`.
+- On a Mac, Kiwi takes every program and user account on the Mac for its owner (that's
+  how the browser on the Mac uses it). Run it on a Mac only you use; on Linux and in Docker
+  only tailscaled may speak for a device.
 - Requests must be addressed to Kiwi's own host name (DNS rebinding is refused with
   `421`), and every change needs `X-Kiwi: 1` with a JSON body, which blocks cross-site
-  requests.
+  requests. A Content Security Policy and `X-Frame-Options: DENY` keep other sites from
+  framing Kiwi, and install links stop working after 24 hours.
+- The phone loads nothing from other sites: Kiwi fetches the artwork of the apps in your
+  sources itself.
 - Source and download URLs must be HTTPS and may not point at private or loopback
   addresses. IPAs and plists from sources are size- and depth-checked before they're read.
-- Kiwi never asks for an Apple ID password. Signing uses your keychain through `codesign`.
+- Kiwi never asks for an Apple ID password. On a Mac, signing uses your keychain through
+  `codesign`. On Linux, the uploaded `.p12` is kept with its password beside it (mode 0600,
+  in a 0700 directory), so Kiwi can sign unattended: the files' permissions, not the
+  `.p12` password, protect the key there.
 - Kiwi Builds keeps its App Store sign-in in ipatool's own keyring on the Mac; Kiwi's API
   and database never see it.
 

@@ -14,14 +14,23 @@ Thanks for helping. Kiwi is a small project, so a short conversation first saves
 
 1. Set up a checkout as described in [docs/development.md](docs/development.md).
 2. Keep each pull request to one change, with tests for new behaviour.
-3. Make sure everything passes before you push:
+3. Make sure everything passes before you push. These are the checks CI runs
+   (`.github/workflows/ci.yml`), apart from the Docker image, the macOS job and the
+   Android app:
 
    ```sh
-   cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
-   (cd web && npm run typecheck && npm test)
-   python3 -m pytest automation/test_runner.py
-   shellcheck install.sh uninstall.sh deploy/deploy.sh
+   cargo fmt --all --check
+   cargo clippy --workspace --all-targets --locked -- -D warnings
+   cargo test --workspace --locked
+   cargo audit                      # cargo install cargo-audit; exceptions: .cargo/audit.toml
+   (cd web && npm ci && npm run typecheck && npm test && npm run build)
+   python3 -m pytest automation/test_runner.py automation/test_android.py
+   shellcheck install.sh uninstall.sh deploy/deploy.sh android/scripts/build-in-docker.sh
+   (cd android && ./gradlew test assembleRelease)   # when you change the Android app
    ```
+
+   Rust's version is pinned in `rust-toolchain.toml`; update it together with the
+   toolchain in `ci.yml` and the Dockerfile's `rust` image.
 
 4. When you change the HTTP API, update [docs/api.md](docs/api.md), `web/src/api/types.ts`
    and the mock API in `web/mock/` together.

@@ -78,7 +78,7 @@ impl From<&StoreApp> for StoreAppJson {
             developer: a.developer.clone(),
             version: a.version.clone(),
             released_at: a.released_at,
-            icon_url: a.icon_url.clone(),
+            icon_url: a.icon_url.as_deref().map(crate::art::client_url),
             store_url: a.store_url.clone(),
         }
     }

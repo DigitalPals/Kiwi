@@ -202,12 +202,23 @@ pub enum Origin {
     Unknown,
 }
 
+/// Under [`LocalTrust::Anyone`]: only a loopback connection is on the computer itself. A
+/// connection from elsewhere (Kiwi listening on a LAN address, against advice) is nobody's,
+/// never the owner's. Without connection info (in-process tests) the request is local.
+fn trusted_origin(peer: Option<SocketAddr>, forwarded: Option<IpAddr>) -> Origin {
+    match (peer, forwarded) {
+        (_, Some(ip)) => Origin::Tailnet(ip),
+        (Some(peer), None) if !peer.ip().to_canonical().is_loopback() => Origin::Unknown,
+        _ => Origin::Local,
+    }
+}
+
 /// The origin of a request on `conn` with `forwarded_for` (`X-Forwarded-For`), under
 /// [`LocalTrust`]. Without a way to tell who made a forwarded request, it is not trusted.
 pub async fn origin(kiwi: &Kiwi, conn: Option<&Connection>, forwarded_for: Option<&str>) -> Origin {
     let forwarded = forwarded_client(conn.map(|c| c.remote), forwarded_for);
     match kiwi.config.local {
-        LocalTrust::Anyone => forwarded.map_or(Origin::Local, Origin::Tailnet),
+        LocalTrust::Anyone => trusted_origin(conn.map(|c| c.remote), forwarded),
         LocalTrust::ProxyUid(proxy) => {
             let (Some(conn), Some(ip)) = (conn, forwarded) else {
                 return Origin::Unknown;
@@ -264,6 +275,40 @@ mod tests {
 
     fn addr(text: &str) -> SocketAddr {
         text.parse().unwrap()
+    }
+
+    #[test]
+    fn only_loopback_is_the_computer_itself() {
+        let tailnet: IpAddr = "100.64.0.7".parse().unwrap();
+        assert_eq!(
+            trusted_origin(Some(addr("127.0.0.1:50000")), None),
+            Origin::Local
+        );
+        assert_eq!(
+            trusted_origin(Some(addr("[::1]:50000")), None),
+            Origin::Local
+        );
+        assert_eq!(
+            trusted_origin(Some(addr("[::ffff:127.0.0.1]:50000")), None),
+            Origin::Local
+        );
+        assert_eq!(
+            trusted_origin(Some(addr("127.0.0.1:50000")), Some(tailnet)),
+            Origin::Tailnet(tailnet)
+        );
+        // A LAN peer is never the owner, and can't forward an address either.
+        assert_eq!(
+            trusted_origin(Some(addr("192.168.1.20:50000")), None),
+            Origin::Unknown
+        );
+        assert_eq!(
+            trusted_origin(
+                Some(addr("192.168.1.20:50000")),
+                forwarded_client(Some(addr("192.168.1.20:50000")), Some("100.64.0.7"))
+            ),
+            Origin::Unknown
+        );
+        assert_eq!(trusted_origin(None, None), Origin::Local);
     }
 
     #[test]

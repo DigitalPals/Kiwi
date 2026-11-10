@@ -143,7 +143,7 @@ fn validate<R: Read + io::Seek>(zip: &mut ZipArchive<R>) -> Result<(String, Vec<
     let mut total = 0u64;
     for index in 0..zip.len() {
         let mut file = zip.by_index(index).map_err(zip_error)?;
-        let name = file.name().to_owned();
+        let name = file.name().map_err(zip_error)?.into_owned();
         let parts = components(&name)
             .ok_or_else(|| invalid(format!("The IPA contains an unsafe path: {name}")))?;
         total = total.saturating_add(file.size());

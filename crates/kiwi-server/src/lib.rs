@@ -3,6 +3,7 @@
 
 pub mod actions;
 pub mod android;
+pub mod art;
 pub mod automation;
 pub mod builds;
 pub mod catalog;
@@ -66,6 +67,9 @@ pub struct Paths {
     pub builds: PathBuf,
     pub work: PathBuf,
     pub icons: PathBuf,
+    /// Source artwork the web app shows ([`art`]), and the key its URLs are signed with.
+    pub art: PathBuf,
+    pub art_key: PathBuf,
     pub vapid: PathBuf,
     /// Kiwi's Android app (`kiwi.apk`, `kiwi.json`), put there by whatever provides it.
     pub android_app: PathBuf,
@@ -81,6 +85,8 @@ impl Paths {
             builds: data.join("builds"),
             work: data.join("work"),
             icons: data.join("icons"),
+            art: data.join("art"),
+            art_key: data.join("art.key"),
             vapid: data.join("vapid.json"),
             android_app: data.join("android-app"),
             signing: signing_dir(data),
@@ -168,10 +174,14 @@ pub struct Kiwi {
     pub owner: owner::Owner,
     /// IPA byte ranges served per install token (completion of ranged downloads).
     pub served: ServedRanges,
+    /// Install tokens replaced recently, which still lead to their build.
+    pub retired: ota::RetiredTokens,
     /// Kiwi's Android app, checked when its files change.
     pub android_app: AndroidAppCache,
     /// The last package report of each Android device.
     pub package_reports: PackageReports,
+    /// One refresh per source at a time ([`sources::refresh`]).
+    pub refreshes: sources::RefreshLocks,
     /// Cancelled on shutdown.
     pub cancel: CancellationToken,
     /// Wakes the scheduler (a build finished, a source changed, ...).
@@ -245,7 +255,13 @@ fn load_vapid(path: &Path, db: &Db) -> Result<kiwi_push::Vapid, String> {
 }
 
 fn prepare_dirs(paths: &Paths, data: &Path) -> std::io::Result<()> {
-    for dir in [data, &paths.downloads, &paths.builds, &paths.icons] {
+    for dir in [
+        data,
+        &paths.downloads,
+        &paths.builds,
+        &paths.icons,
+        &paths.art,
+    ] {
         std::fs::create_dir_all(dir)?;
     }
     // Temporary files of interrupted signing and downloads.
@@ -294,6 +310,9 @@ impl Kiwi {
             defaults.app_store_country = country.clone();
         }
         let mut settings = Settings::from_pairs(defaults, stored);
+        if let Err(e) = art::load_key(&paths.art_key) {
+            tracing::warn!("artwork URLs change at every start: {e}");
+        }
         let vapid = load_vapid(&paths.vapid, &db)?;
         let vapid_public_key = vapid.public_key();
         let push = match opts.push {
@@ -351,8 +370,10 @@ impl Kiwi {
             automation,
             owner,
             served: ServedRanges::default(),
+            retired: ota::RetiredTokens::default(),
             android_app: AndroidAppCache::default(),
             package_reports: PackageReports::default(),
+            refreshes: sources::RefreshLocks::default(),
             cancel: CancellationToken::new(),
             kick: Notify::new(),
             config,
@@ -543,7 +564,8 @@ pub fn app(kiwi: Arc<Kiwi>) -> IntoMakeServiceWithConnectInfo<Router, Connection
 pub async fn run(args: Args) -> Result<(), String> {
     if !args.listen.ip().is_loopback() {
         tracing::warn!(
-            "listening on {}: Kiwi should listen on loopback only (tailscale serve exposes it)",
+            "listening on {}: Kiwi should listen on loopback only (tailscale serve exposes it); \
+             requests from other computers are never the owner's",
             args.listen
         );
     }

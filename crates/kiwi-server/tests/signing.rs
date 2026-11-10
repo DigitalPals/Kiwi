@@ -160,7 +160,13 @@ async fn validates_uploads() {
         json!({ "p12": B64.encode(b"not a p12"), "password": "hunter2" }),
     )
     .await;
-    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    // A Mac signs with its keychain and refuses an uploaded identity before reading it.
+    let refused = if cfg!(target_os = "macos") {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    assert_eq!(r.status, refused, "{}", r.body);
     assert!(!r.body.to_string().contains("hunter2"));
 
     let r = api

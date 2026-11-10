@@ -267,7 +267,8 @@ interface Source {
 // An ipa source has one app, read from the IPA (name, version, icon). On refresh Kiwi looks
 // for a new IPA link on its download page and asks the IPA's server (HEAD: ETag,
 // Last-Modified, Content-Length) whether the file changed; only then is it downloaded again.
-// Icons taken from IPAs have `icon_url` `/api/icons/<sha256>.png`.
+// Icons taken from IPAs have `icon_url` `/api/icons/<sha256>.png`; every other icon and
+// screenshot URL Kiwi returns (sources, apps, App Store originals) is an `/api/art/...` URL.
 // The built-in local_build source cannot be deleted. Its enabled switch controls source
 // visibility; automation scheduling is managed separately through the automation API.
 
@@ -457,6 +458,7 @@ interface Settings {
 | GET | `/api/sources` | | `Source[]` (by position) |
 | POST | `/api/sources` | `{ url }` | `201 Source` (fetched and parsed before saving; `409 conflict` if present). `url` may be an AltStore source, a web page (the AltStore source an `altstore://` or `sidestore://source?url=` button links, else the page's first `.ipa` link) or an IPA, which is downloaded before the answer. `http://` and scheme-less URLs are fetched over HTTPS |
 | GET | `/api/icons/:file` | | `image/png`, an icon Kiwi took from an IPA (cacheable) |
+| GET | `/api/art/:tag?url=` | | A source's or the App Store's artwork, fetched by Kiwi (PNG, JPEG, GIF or WebP; cacheable). Only URLs Kiwi returned work: `tag` is an HMAC of `url` with Kiwi's key (`art.key` in the data directory); `404` otherwise and when the image can't be fetched (not tried again for 15 minutes) |
 | PATCH | `/api/sources/:id` | `{ enabled?, browse?: "all" \| "picked" }` | `Source` (switching to `"picked"` again restarts what counts as new) |
 | DELETE | `/api/sources/:id` | | `204` (keeps installs; their apps become orphaned) |
 | POST | `/api/sources/:id/refresh` | | `Source` (after the refresh; may download an `ipa` source's new IPA) |
@@ -505,7 +507,13 @@ Kiwi's Android app (no `/api` prefix, but the owner's devices only, like `/api`)
 `<public_url>/ota/<token>/manifest.plist`. For an Android build it is
 `<public_url>/ota/<token>/app.apk`: the browser downloads the file and Android's installer
 opens it. A token serves the file of its own kind only: `manifest.plist` and `app.ipa`
-answer 404 for an Android build, `app.apk` for an iOS one.
+answer 404 for an Android build, `app.apk` for an iOS one. A token works for 24 hours,
+and while the installer keeps using it (within the last hour) up to 48 hours. Once it is
+12 hours old, the next response that includes the build's `install_url` has a new token
+(unless the installer used the old one in the last hour; always after 24 hours). A
+replaced token that still worked keeps leading to its build for 2 hours (until Kiwi
+restarts), so a page or app that still shows it, and a download that started with it, go
+on working; an expired one stays expired.
 
 ## Device platforms
 

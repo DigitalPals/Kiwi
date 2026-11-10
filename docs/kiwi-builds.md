@@ -186,7 +186,10 @@ The first Android build creates a 4096-bit RSA key in
 mode 0600). It never leaves the computer Kiwi runs on and no API returns it. Android installs an update over
 an app only when both carry the same signature, so **back these two files up** with the
 rest of the data directory: without them, every Android app Kiwi built has to be
-uninstalled before a build signed with a new key can be installed. Settings › **Android
+uninstalled before a build signed with a new key can be installed. Kiwi never makes a new
+key silently: when `keystore.p12` is missing, or isn't the key in `signer.json`, Android
+builds stop with a message to restore both files from a backup. To start over with a new
+key on purpose, delete `automation/android/signer.json`. Settings › **Android
 Signing Key** on an Android device shows the SHA-256 of its certificate, the same
 fingerprint Android shows for apps Kiwi signed; the web app never offers the key itself. The same key signs
 [Kiwi's own Android app](android-app.md), which Kiwi offers to Android phones while Kiwi

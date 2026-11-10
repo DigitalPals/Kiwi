@@ -9,6 +9,7 @@ import {
   formatRelative,
   formatVersion,
   deviceName,
+  unconfirmedNote,
   osRequirement,
   parseDate,
   serverLabel,
@@ -110,6 +111,18 @@ describe("small formatters", () => {
     expect(osRequirement({ min_os: null, max_os: null }, "android")).toBe("Android");
     expect(osRequirement({ min_os: "12", max_os: null }, "android")).toBe("Android 12+");
     expect([deviceName("android"), deviceName("ios"), deviceName(undefined)]).toEqual(["Android device", "iPhone", "iPhone"]);
+  });
+
+  it("says when a downloaded install isn't confirmed, for a day", () => {
+    const now = new Date("2026-11-10T12:00:00Z");
+    const installed = { verified: false, origin: "kiwi", installed_at: "2026-11-10T09:00:00Z" };
+    expect(unconfirmedNote(installed, "ios", now)).toBe(
+      "Your iPhone downloaded this version, but Kiwi hasn't seen it installed yet. If it isn't on your Home Screen, use Reinstall.",
+    );
+    expect(unconfirmedNote(installed, "android", now)).toContain("among your apps");
+    expect(unconfirmedNote({ ...installed, verified: true }, "ios", now)).toBeNull();
+    expect(unconfirmedNote({ ...installed, origin: "device" }, "ios", now)).toBeNull();
+    expect(unconfirmedNote({ ...installed, installed_at: "2026-11-08T09:00:00Z" }, "ios", now)).toBeNull();
   });
 
   it("names privacy keys", () => {

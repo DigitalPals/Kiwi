@@ -2043,3 +2043,156 @@ async fn apps_are_compared_with_their_app_store_original() {
     assert_eq!(r.status, StatusCode::BAD_GATEWAY);
     assert_eq!(r.body["error"]["code"], "app_store");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_artwork_comes_through_kiwi() {
+    let fx = Fixture::start().await;
+    let k = TestKiwi::start().await;
+    let phone = k.phone();
+    let source = add_source(&phone, &fx).await;
+    let detail = phone.ok(&format!("/api/apps/{source}/{BUNDLE}")).await;
+    let icon = detail["icon_url"].as_str().unwrap();
+    assert!(icon.starts_with("/api/art/"), "{icon}");
+    for shot in detail["screenshots"].as_array().unwrap() {
+        assert!(shot.as_str().unwrap().starts_with("/api/art/"), "{shot}");
+    }
+
+    let r = phone.request(Method::GET, icon).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(r.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(r.bytes().await.unwrap().as_ref(), PNG);
+    // Cached: served again without the source's host.
+    assert_eq!(std::fs::read_dir(&k.kiwi.paths.art).unwrap().count(), 1);
+
+    // A URL Kiwi didn't hand out (another page making the phone ask for it) is refused.
+    let (tag, _) = icon.split_once('?').unwrap();
+    let forged = format!("{tag}?url=https%3A%2F%2Fexample.com%2Fother.png");
+    assert_eq!(phone.get(&forged).await.status, StatusCode::NOT_FOUND);
+    // Only the owner's devices may use it.
+    let stranger = k.device("100.64.0.99").get(icon).await;
+    assert_eq!(stranger.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_response_carries_security_headers() {
+    let k = TestKiwi::start().await;
+    let phone = k.phone();
+    for path in ["/", "/api/me", "/api/health", "/ota/missing/manifest.plist"] {
+        let r = phone.get(path).await;
+        let csp = r.headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+        assert!(csp.contains("frame-ancestors 'none'"), "{path}: {csp}");
+        assert!(csp.contains("default-src 'self'"), "{path}");
+        assert_eq!(r.headers[header::X_FRAME_OPTIONS], "DENY", "{path}");
+        assert_eq!(
+            r.headers[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff",
+            "{path}"
+        );
+        assert_eq!(r.headers[header::REFERRER_POLICY], "no-referrer", "{path}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn install_links_expire_and_are_renewed() {
+    let fx = Fixture::start().await;
+    let k = TestKiwi::start().await;
+    let phone = k.phone();
+    let source = add_source(&phone, &fx).await;
+    let prepared = phone
+        .post(&format!("/api/apps/{source}/{BUNDLE}/prepare"), json!({}))
+        .await;
+    let id = prepared.body["id"].as_str().unwrap().to_owned();
+    let ready = wait_build(&phone, &id).await;
+    let old = ota_path(ready["install_url"].as_str().unwrap());
+    let manifest = |ota: String| {
+        let r = k.raw().get(format!("{}{ota}/manifest.plist", k.base));
+        async move { r.send().await.unwrap().status() }
+    };
+    assert_eq!(manifest(old.clone()).await, StatusCode::OK);
+
+    // A day later the link no longer works, and the app gets a new one.
+    let conn = rusqlite::Connection::open(&k.kiwi.paths.db).unwrap();
+    let day_ago = chrono::Utc::now() - chrono::Duration::hours(25);
+    conn.execute(
+        "UPDATE attempts SET created_at = ?1, manifest_at = ?1",
+        [day_ago],
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(manifest(old.clone()).await, StatusCode::NOT_FOUND);
+    let renewed = phone.ok(&format!("/api/builds/{id}")).await;
+    let new = ota_path(renewed["install_url"].as_str().unwrap());
+    assert_ne!(new, old);
+    assert_eq!(manifest(new).await, StatusCode::OK);
+    // An expired link stays expired.
+    assert_eq!(manifest(old).await, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_download_survives_its_link_being_renewed() {
+    let fx = Fixture::start().await;
+    let k = TestKiwi::start().await;
+    let phone = k.phone();
+    let source = add_source(&phone, &fx).await;
+    let b = phone
+        .post(&format!("/api/apps/{source}/{BUNDLE}/prepare"), json!({}))
+        .await;
+    let id = b.body["id"].as_str().unwrap().to_owned();
+    let build = wait_build(&phone, &id).await;
+    let old = ota_path(build["install_url"].as_str().unwrap());
+    let len = build["size"].as_u64().unwrap();
+    let range = |ota: String, spec: String| {
+        let r = k
+            .raw()
+            .get(format!("{}{ota}/app.ipa", k.base))
+            .header("Range", spec);
+        async move {
+            let r = r.send().await.unwrap();
+            assert_eq!(r.status(), StatusCode::PARTIAL_CONTENT);
+            r.bytes().await.unwrap().len()
+        }
+    };
+    let middle = len / 2;
+    range(old.clone(), format!("bytes=0-{middle}")).await;
+    // A day on, the installer still busy: the next view hands out a new link.
+    let conn = rusqlite::Connection::open(&k.kiwi.paths.db).unwrap();
+    let day_ago = chrono::Utc::now() - chrono::Duration::hours(25);
+    conn.execute("UPDATE attempts SET created_at = ?1", [day_ago])
+        .unwrap();
+    drop(conn);
+    let renewed = phone.ok(&format!("/api/builds/{id}")).await;
+    let new = ota_path(renewed["install_url"].as_str().unwrap());
+    assert_ne!(new, old);
+    // The rest of the file, through the old link: the install is recorded all the same.
+    range(old, format!("bytes={}-", middle + 1)).await;
+    wait_until(|| !k.kiwi.db.installs(PHONE_ID, true).unwrap().is_empty()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refreshes_of_one_source_run_one_after_the_other() {
+    let fx = Fixture::start().await;
+    let k = TestKiwi::start().await;
+    let phone = k.phone();
+    let source = add_source(&phone, &fx).await;
+    fx.hold_feed.store(true, Ordering::SeqCst);
+    let requests = fx.feed_requests.load(Ordering::SeqCst);
+    let refresh = |phone: Api| {
+        let path = format!("/api/sources/{source}/refresh");
+        tokio::spawn(async move { phone.post(&path, json!({})).await })
+    };
+    let first = refresh(phone.clone());
+    wait_until(|| fx.feed_requests.load(Ordering::SeqCst) > requests).await;
+    let second = refresh(phone.clone());
+    // The second waits for the first instead of fetching alongside it, so a slow, older
+    // answer can't replace a newer one.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(fx.feed_requests.load(Ordering::SeqCst), requests + 1);
+    assert!(!second.is_finished());
+    fx.set_releases(&[("2.0", "2"), ("1.0", "1")]);
+    fx.hold_feed.store(false, Ordering::SeqCst);
+    assert_eq!(first.await.unwrap().status, StatusCode::OK);
+    assert_eq!(second.await.unwrap().status, StatusCode::OK);
+    assert_eq!(fx.feed_requests.load(Ordering::SeqCst), requests + 2);
+    let app = k.kiwi.catalog.app(&source, BUNDLE).unwrap();
+    assert_eq!(app.app().releases[0].version, "2.0");
+}

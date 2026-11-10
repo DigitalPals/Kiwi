@@ -1,6 +1,6 @@
 //! Adding, refreshing, enabling and removing sources (database and in-memory catalog).
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::Utc;
 
@@ -73,17 +73,35 @@ pub async fn add(kiwi: &Kiwi, input: &str) -> ApiResult<SourceRow> {
     Ok(row)
 }
 
+/// A lock per source id, so refreshes of one source (the scheduler's and the owner's) run
+/// one after the other: a slow, older fetch can't overwrite the result of a newer one.
+#[derive(Default)]
+pub struct RefreshLocks(std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
+
+impl RefreshLocks {
+    fn of(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        // Locks nobody holds or waits for are dropped, so removed sources don't linger.
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        locks.entry(id.to_owned()).or_default().clone()
+    }
+}
+
 /// Conditional refetch. A failure keeps the previous catalog and records the error. Only
 /// the fetch results are written, so a source disabled during the fetch stays disabled.
 pub async fn refresh(kiwi: &Kiwi, id: &str) -> ApiResult<SourceRow> {
-    let row = kiwi
-        .catalog
-        .source(id)
-        .ok_or_else(|| ApiError::not_found("Source not found."))?;
-    if id == crate::automation::SOURCE_ID {
-        return Ok((*row).clone());
-    }
     let not_found = || ApiError::not_found("Source not found.");
+    if id == crate::automation::SOURCE_ID {
+        return kiwi
+            .catalog
+            .source(id)
+            .map(|row| (*row).clone())
+            .ok_or_else(not_found);
+    }
+    let lock = kiwi.refreshes.of(id);
+    let _refreshing = lock.lock().await;
+    // Read after waiting: a refresh that just finished may have changed it.
+    let row = kiwi.catalog.source(id).ok_or_else(not_found)?;
     // Recorded first, so a fetch that crashes the server is not repeated right after the
     // restart.
     let started = Utc::now();

@@ -425,7 +425,10 @@ pub fn inspect_ipa(path: &Path, cancel: &CancellationToken) -> Result<IpaMetadat
         let mut entry = zip
             .by_index(i)
             .map_err(|e| Error::new("IPA validation", e))?;
-        let name = entry.name().to_owned();
+        let name = entry
+            .name()
+            .map_err(|e| Error::new("IPA validation", e))?
+            .into_owned();
         let unsafe_path = || {
             Error::new(
                 "IPA validation",

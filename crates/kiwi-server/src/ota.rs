@@ -153,6 +153,59 @@ pub fn merge_range(ranges: &mut Vec<(u64, u64)>, start: u64, end: u64) {
     *ranges = merged;
 }
 
+/// How long an install link (its token) works. Kiwi hands out a new one once the old one is
+/// [`TOKEN_RENEWAL`] old, so a link the web app shows has hours left.
+pub const TOKEN_LIFETIME: chrono::Duration = chrono::Duration::hours(24);
+pub const TOKEN_RENEWAL: chrono::Duration = chrono::Duration::hours(12);
+/// A token the installer used this recently keeps working past [`TOKEN_LIFETIME`] (an
+/// install in progress), up to [`TOKEN_LIMIT`].
+pub const TOKEN_ACTIVE: chrono::Duration = chrono::Duration::hours(1);
+pub const TOKEN_LIMIT: chrono::Duration = chrono::Duration::hours(48);
+/// A replaced token keeps leading to its build for this long: a page or app that still shows
+/// the old link, and a download that started with it, go on working.
+const RETIRED_TTL: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// Whether an attempt's token still works at `now` ([`TOKEN_LIFETIME`], [`TOKEN_ACTIVE`]).
+pub fn token_alive(attempt: &AttemptRow, now: chrono::DateTime<Utc>) -> bool {
+    let age = now - attempt.created_at;
+    let active = attempt
+        .manifest_at
+        .max(attempt.download_started_at)
+        .is_some_and(|at| now - at < TOKEN_ACTIVE);
+    age < TOKEN_LIFETIME || (active && age < TOKEN_LIMIT)
+}
+
+/// Whether to hand out a new token instead of this attempt's: once it is
+/// [`TOKEN_RENEWAL`] old, unless the installer is using it, and always once it is past
+/// [`TOKEN_LIFETIME`] (the old one keeps working for a while, [`RetiredTokens`]).
+pub fn renew_token(attempt: &AttemptRow, now: chrono::DateTime<Utc>) -> bool {
+    let age = now - attempt.created_at;
+    let active = attempt
+        .manifest_at
+        .max(attempt.download_started_at)
+        .is_some_and(|at| now - at < TOKEN_ACTIVE);
+    age >= TOKEN_LIFETIME || (age >= TOKEN_RENEWAL && !active)
+}
+
+/// Replaced tokens and the token that replaced them, in memory ([`RETIRED_TTL`]).
+#[derive(Default)]
+pub struct RetiredTokens(Mutex<HashMap<String, (String, Instant)>>);
+
+impl RetiredTokens {
+    pub fn add(&self, old: String, new: String) {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, (_, at)| at.elapsed() < RETIRED_TTL);
+        map.insert(old, (new, Instant::now()));
+    }
+
+    fn current(&self, old: &str) -> Option<String> {
+        let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(old)
+            .filter(|(_, at)| at.elapsed() < RETIRED_TTL)
+            .map(|(new, _)| new.clone())
+    }
+}
+
 /// Forgotten when no range was served for a token for this long.
 const SERVED_TTL: Duration = Duration::from_secs(60 * 60);
 
@@ -263,14 +316,22 @@ fn user_agent(headers: &HeaderMap) -> Option<String> {
         .map(|s| s.chars().take(512).collect())
 }
 
-/// The attempt and its ready build.
+/// The attempt and its ready build. A replaced token leads to its attempt for a while
+/// ([`RetiredTokens`]); `attempt.token` is the current one either way.
 fn lookup(kiwi: &Kiwi, token: &str) -> Option<(AttemptRow, BuildRow)> {
     if !valid_token(token) {
         return None;
     }
-    let attempt = kiwi.db.attempt(token).ok()??;
+    let attempt = match kiwi.db.attempt(token).ok()? {
+        Some(attempt) => attempt,
+        None => kiwi.db.attempt(&kiwi.retired.current(token)?).ok()??,
+    };
+    let now = Utc::now();
+    if !token_alive(&attempt, now) {
+        return None;
+    }
     let build = kiwi.db.build(&attempt.build_id).ok()??;
-    build.usable(Utc::now()).then_some((attempt, build))
+    build.usable(now).then_some((attempt, build))
 }
 
 fn observe_device(kiwi: &Kiwi, device_id: &str, ua: Option<&str>) {
@@ -293,6 +354,7 @@ pub async fn manifest_handler(
     if crate::builds::android(&build.release) {
         return not_found();
     }
+    let token = attempt.token.clone();
     let ua = user_agent(&headers);
     if let Err(e) = kiwi.db.attempt_manifest(&token, ua.as_deref(), Utc::now()) {
         tracing::warn!("could not record manifest fetch: {e}");
@@ -364,6 +426,7 @@ async fn package(
     if crate::builds::android(&build.release) != android {
         return not_found();
     }
+    let token = attempt.token.clone();
     let Some(path) = build.ipa_path.as_ref().map(PathBuf::from) else {
         return not_found();
     };
@@ -395,13 +458,15 @@ async fn package(
     }
     tracing::info!(build = %build.id, device = %attempt.device_id, start, end, len, "app download started");
     // A full response completes the download once its last byte is written; ranges only
-    // once those served for this token cover the whole file (not e.g. just the zip tail).
+    // once those served for this attempt cover the whole file (not e.g. just the zip tail).
+    // Ranges count per build and device, not per token, which may be renewed meanwhile.
     let full = status == StatusCode::OK;
+    let served_key = format!("{}/{}", attempt.build_id, attempt.device_id);
     let on_complete: Box<dyn FnOnce() + Send> = {
         let kiwi = kiwi.clone();
         let ua = user_agent(&headers);
         Box::new(move || {
-            if full || kiwi.served.add(&token, len, start, end) {
+            if full || kiwi.served.add(&served_key, len, start, end) {
                 complete_download(&kiwi, &token, ua.as_deref());
             }
         })
@@ -508,10 +573,19 @@ pub async fn send_file(
         .unwrap_or_else(|_| not_found())
 }
 
-/// The whole IPA or APK was sent: the install is recorded for the device.
+/// The whole IPA or APK was sent: the install is recorded for the device. `token` may have
+/// been renewed while the file was sent; then its replacement is the attempt's.
 fn complete_download(kiwi: &Kiwi, token: &str, ua: Option<&str>) {
     let now = Utc::now();
     let result = (|| -> rusqlite::Result<()> {
+        let token = match kiwi.db.attempt(token)? {
+            Some(_) => token.to_owned(),
+            None => match kiwi.retired.current(token) {
+                Some(current) => current,
+                None => return Ok(()),
+            },
+        };
+        let token = token.as_str();
         kiwi.db.attempt_download_completed(token, ua, now)?;
         let Some(attempt) = kiwi.db.attempt(token)? else {
             return Ok(());
@@ -591,6 +665,47 @@ pub fn is_icon_image(bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::{db::BuildStatus, testutil::build_row};
+
+    #[test]
+    fn tokens_expire_unless_an_install_is_in_progress() {
+        let now = Utc::now();
+        let hours = |h| now - chrono::Duration::hours(h);
+        let minutes = |m| now - chrono::Duration::minutes(m);
+        let attempt = |created, used: Option<chrono::DateTime<Utc>>| AttemptRow {
+            token: "t".into(),
+            build_id: "b".into(),
+            device_id: "d".into(),
+            created_at: created,
+            manifest_at: used,
+            download_started_at: None,
+            download_completed_at: None,
+            user_agent: None,
+        };
+        // Fresh: works, kept.
+        let a = attempt(hours(1), None);
+        assert!(token_alive(&a, now) && !renew_token(&a, now));
+        // Half its life: still works, but the next link is a new one.
+        let a = attempt(hours(13), None);
+        assert!(token_alive(&a, now) && renew_token(&a, now));
+        // ... unless the installer is using it.
+        let a = attempt(hours(13), Some(minutes(5)));
+        assert!(token_alive(&a, now) && !renew_token(&a, now));
+        // Past its lifetime: dead, unless an install is in progress, and never handed out.
+        let a = attempt(hours(25), None);
+        assert!(!token_alive(&a, now) && renew_token(&a, now));
+        let a = attempt(hours(25), Some(minutes(5)));
+        assert!(token_alive(&a, now) && renew_token(&a, now));
+        let a = attempt(hours(49), Some(minutes(5)));
+        assert!(!token_alive(&a, now));
+    }
+
+    #[test]
+    fn retired_tokens_lead_to_their_replacement() {
+        let retired = RetiredTokens::default();
+        retired.add("old".into(), "new".into());
+        assert_eq!(retired.current("old").as_deref(), Some("new"));
+        assert_eq!(retired.current("new"), None);
+    }
 
     #[test]
     fn install_url_encodes_the_manifest_url() {

@@ -1448,28 +1448,38 @@ impl Db {
 
     // ---- attempts ----
 
-    /// The reusable token for (build, device), created on first use.
+    /// The token for (build, device): created on first use, reused while `keep` says so,
+    /// else replaced (token and created_at). Returns the token and the one it replaced.
     pub fn attempt_token(
         &self,
         build_id: &str,
         device_id: &str,
         new_token: impl FnOnce() -> String,
         now: Time,
-    ) -> rusqlite::Result<String> {
+        keep: impl FnOnce(&AttemptRow) -> bool,
+    ) -> rusqlite::Result<(String, Option<String>)> {
         self.with(|c| {
             let existing = c
-                .prepare_cached("SELECT token FROM attempts WHERE build_id = ?1 AND device_id = ?2")?
-                .query_row([build_id, device_id], |r| r.get(0))
+                .prepare_cached("SELECT * FROM attempts WHERE build_id = ?1 AND device_id = ?2")?
+                .query_row([build_id, device_id], attempt_row)
                 .optional()?;
-            if let Some(token) = existing {
-                return Ok(token);
+            if let Some(attempt) = existing {
+                if keep(&attempt) {
+                    return Ok((attempt.token, None));
+                }
+                let renewed = new_token();
+                c.execute(
+                    "UPDATE attempts SET token = ?1, created_at = ?2 WHERE token = ?3",
+                    params![renewed, now, attempt.token],
+                )?;
+                return Ok((renewed, Some(attempt.token)));
             }
             let token = new_token();
             c.execute(
                 "INSERT INTO attempts (token, build_id, device_id, created_at) VALUES (?1, ?2, ?3, ?4)",
                 params![token, build_id, device_id, now],
             )?;
-            Ok(token)
+            Ok((token, None))
         })
     }
 
@@ -2299,7 +2309,7 @@ mod tests {
         db.save_install(&install).unwrap();
         db.save_build(&crate::testutil::build_row("b1", BuildStatus::Ready, now))
             .unwrap();
-        db.attempt_token("b1", "local:attempted", || "tok".into(), now)
+        db.attempt_token("b1", "local:attempted", || "tok".into(), now, |_| true)
             .unwrap();
         db.save_subscription(&SubscriptionRow {
             endpoint: "https://web.push.apple.com/x".into(),
@@ -2348,13 +2358,21 @@ mod tests {
         let now = Utc::now();
         db.save_build(&crate::testutil::build_row("b1", BuildStatus::Ready, now))
             .unwrap();
-        let t1 = db.attempt_token("b1", "d1", || "tok1".into(), now).unwrap();
-        let t2 = db.attempt_token("b1", "d1", || "tok2".into(), now).unwrap();
-        let t3 = db.attempt_token("b1", "d2", || "tok3".into(), now).unwrap();
+        let keep = |_: &AttemptRow| true;
+        let t1 = db
+            .attempt_token("b1", "d1", || "tok1".into(), now, keep)
+            .unwrap();
+        let t2 = db
+            .attempt_token("b1", "d1", || "tok2".into(), now, keep)
+            .unwrap();
+        let t3 = db
+            .attempt_token("b1", "d2", || "tok3".into(), now, keep)
+            .unwrap();
         assert_eq!(
-            (t1.as_str(), t2.as_str(), t3.as_str()),
+            (t1.0.as_str(), t2.0.as_str(), t3.0.as_str()),
             ("tok1", "tok1", "tok3")
         );
+        assert_eq!((t1.1, t2.1), (None, None));
         db.attempt_manifest("tok1", Some("ua"), now).unwrap();
         let attempts = db.device_attempts("d1").unwrap();
         assert_eq!(attempts.len(), 1);
@@ -2363,9 +2381,18 @@ mod tests {
             ("src".to_owned(), "com.example.app".to_owned())
         );
         assert_eq!(attempts[0].1.user_agent.as_deref(), Some("ua"));
+        // A token `keep` turns down is replaced, and the old one reported.
+        let later = now + chrono::Duration::hours(13);
+        assert_eq!(
+            db.attempt_token("b1", "d1", || "tok5".into(), later, |a| a.token != "tok1")
+                .unwrap(),
+            ("tok5".to_owned(), Some("tok1".to_owned()))
+        );
+        assert!(db.attempt("tok1").unwrap().is_none());
+        assert_eq!(db.attempt("tok5").unwrap().unwrap().created_at, later);
         // Deleting a build removes its attempts.
         db.delete_build("b1").unwrap();
-        assert!(db.attempt("tok1").unwrap().is_none());
+        assert!(db.attempt("tok5").unwrap().is_none());
     }
 
     #[test]

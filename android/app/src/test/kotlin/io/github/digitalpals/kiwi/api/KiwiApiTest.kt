@@ -1,5 +1,6 @@
 package io.github.digitalpals.kiwi.api
 
+import io.github.digitalpals.kiwi.ui.ConnectViewModel
 import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -86,6 +87,59 @@ class KiwiApiTest {
         }
         server.enqueue(json(200, """{"ok":true,"version":"1.0.0","pid":42}"""))
         assertEquals("1.0.0", api.health().version)
+    }
+
+    @Test
+    fun healthPassesKiwisOwnErrorsThrough() = runTest {
+        // Kiwi's host check covers /api/health too: the user should learn the address is wrong.
+        server.enqueue(json(421, """{"error":{"code":"bad_host","message":"Use the public address."}}"""))
+        try {
+            api.health()
+            fail()
+        } catch (error: KiwiException.Http) {
+            assertEquals(KiwiException.BAD_HOST, error.code)
+            assertEquals(421, error.status)
+            assertEquals("Check the address", ConnectViewModel.problemFor(error).title)
+        }
+        // Other errors (a proxy's page, another server) still mean "not a Kiwi".
+        server.enqueue(MockResponse.Builder().code(502).body("<html>Bad gateway</html>").build())
+        try {
+            api.health()
+            fail()
+        } catch (error: KiwiException.BadResponse) {
+            assertTrue(error.message!!.contains("doesn't look like a Kiwi"))
+        }
+    }
+
+    @Test
+    fun doesNotFollowRedirectsToAnotherHost() = runTest {
+        val elsewhere = MockWebServer()
+        elsewhere.start()
+        try {
+            server.enqueue(MockResponse.Builder().code(307).addHeader("Location", elsewhere.url("/api/me/packages").toString()).build())
+            try {
+                api.putPackages(PackagesReport(emptyList()))
+                fail()
+            } catch (error: KiwiException.Http) {
+                assertEquals(307, error.status)
+                assertTrue(!error.isFromKiwi)
+            }
+            assertEquals(0, elsewhere.requestCount)
+        } finally {
+            elsewhere.close()
+        }
+    }
+
+    @Test
+    fun listsHiddenAppsOnRequest() = runTest {
+        server.enqueue(json(200, "[]"))
+        api.apps(hidden = true)
+        assertEquals("1", server.takeRequest().url.queryParameter("hidden"))
+        server.enqueue(json(200, "[]"))
+        api.apps("you")
+        val browse = server.takeRequest().url
+        assertNull(browse.queryParameter("hidden"))
+        assertEquals("you", browse.queryParameter("q"))
     }
 
     @Test

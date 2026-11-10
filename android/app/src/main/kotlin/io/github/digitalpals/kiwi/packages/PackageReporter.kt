@@ -11,24 +11,32 @@ import io.github.digitalpals.kiwi.api.KiwiException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
- * Sends the installed packages to Kiwi (`PUT /api/me/packages`): when the app starts, after an
- * install and when a package changes while the app runs. Kiwi then knows which of its apps are
- * really installed and which are installed with another signature.
+ * Tells Kiwi which of its packages are installed (`PUT /api/me/packages`): when the app starts,
+ * after an install and when a package changes while the app runs. Kiwi then knows which of its
+ * apps are really installed and which are installed with another signature.
+ *
+ * The report holds only the packages Kiwi asks about ([PackageReport.wanted]): this app, the
+ * Android apps Kiwi offers and the installs Kiwi recorded for this phone. The phone's other apps
+ * are never read or sent.
  */
 class PackageReporter(
-    private val context: Context,
-    private val scanner: PackageScanner,
+    private val packages: PackageLookup,
     private val scope: CoroutineScope,
     private val api: suspend () -> KiwiApi?,
+    /** This app's package, always part of the report. */
+    private val ownPackage: String,
 ) {
     private val mutex = Mutex()
     private var pending: Job? = null
@@ -37,11 +45,14 @@ class PackageReporter(
     /** Increases whenever a package was added, replaced or removed while the app runs. */
     val changes: StateFlow<Int> = _changes
 
-    /** Scans and reports now. Returns false when nothing could be sent. */
+    /** Looks up Kiwi's packages and reports them now. Returns false when nothing could be sent. */
     suspend fun report(): Boolean = mutex.withLock {
         val kiwi = api() ?: return false
-        val report = withContext(Dispatchers.IO) { PackageReport.build(scanner.scan()) }
         try {
+            // Without the full list of Kiwi's packages nothing is sent: Kiwi would take every
+            // package left out for a removed app.
+            val wanted = wanted(kiwi)
+            val report = withContext(Dispatchers.IO) { PackageReport.build(packages.scan(wanted), wanted) }
             kiwi.putPackages(report)
             true
         } catch (error: KiwiException.Http) {
@@ -55,17 +66,25 @@ class PackageReporter(
         }
     }
 
+    private suspend fun wanted(kiwi: KiwiApi): Set<String> = coroutineScope {
+        val offered = async { kiwi.apps(hidden = true) }
+        val library = async { kiwi.library() }
+        PackageReport.wanted(ownPackage, offered.await(), library.await())
+    }
+
     /** Reports after a short pause, so a burst of package changes sends one report. */
     fun reportSoon() {
-        pending?.cancel()
-        pending = scope.launch {
-            delay(DEBOUNCE_MS)
-            report()
+        synchronized(this) {
+            pending?.cancel()
+            pending = scope.launch {
+                delay(DEBOUNCE_MS)
+                report()
+            }
         }
     }
 
     /** Listens for package changes for as long as the process runs. */
-    fun watch() {
+    fun watch(context: Context) {
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
             addAction(Intent.ACTION_PACKAGE_REPLACED)
@@ -74,12 +93,12 @@ class PackageReporter(
         }
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
-                _changes.value += 1
+                _changes.update { it + 1 }
                 reportSoon()
             }
         }
         // Package broadcasts come from the system; nothing else needs to reach this receiver.
-        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(context.applicationContext, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     private companion object {

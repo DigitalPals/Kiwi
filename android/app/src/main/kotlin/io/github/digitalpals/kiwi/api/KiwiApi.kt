@@ -29,7 +29,8 @@ import kotlin.coroutines.resumeWithException
  *
  * Kiwi knows the phone by its Tailscale address, so there is no login: every request simply
  * goes over the tailnet. Mutating requests carry `X-Kiwi: 1` and a JSON body, as the server
- * requires (docs/api.md, "Conventions").
+ * requires (docs/api.md, "Conventions"). Redirects are not followed: Kiwi never sends one, and
+ * the phone's requests (its package report included) must not end up at another host.
  */
 class KiwiApi(
     val baseUrl: HttpUrl,
@@ -38,12 +39,20 @@ class KiwiApi(
 ) {
     private val client: OkHttpClient = client.newBuilder()
         .callTimeout(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .followRedirects(false)
+        .followSslRedirects(false)
         .build()
 
+    /**
+     * `GET /api/health`: is this a Kiwi? Kiwi's own errors (`421 bad_host` from its host check,
+     * which covers this route too) pass through, so the user learns what is wrong; any other
+     * answer means the address is not a Kiwi.
+     */
     suspend fun health(): Health {
         val health = try {
             send(get("api/health"), Health.serializer())
         } catch (error: KiwiException.Http) {
+            if (error.isFromKiwi) throw error
             throw KiwiException.BadResponse(NOT_KIWI, error)
         } catch (error: KiwiException.BadResponse) {
             throw KiwiException.BadResponse(NOT_KIWI, error)
@@ -57,10 +66,14 @@ class KiwiApi(
     /** `PATCH /api/me` with only the given fields, e.g. `{"onboarded": true}`. */
     suspend fun patchMe(fields: JsonObject): Me = send(mutate("PATCH", "api/me", fields.toString()), Me.serializer())
 
-    /** `GET /api/apps`: Browse's apps for this device, optionally matching [query]. */
-    suspend fun apps(query: String? = null): List<AppSummary> {
+    /**
+     * `GET /api/apps`: Browse's apps for this device, optionally matching [query]. With [hidden]
+     * also the apps hidden from Browse and those made for the other platform.
+     */
+    suspend fun apps(query: String? = null, hidden: Boolean = false): List<AppSummary> {
         val url = url("api/apps").newBuilder().apply {
             if (!query.isNullOrBlank()) addQueryParameter("q", query.trim())
+            if (hidden) addQueryParameter("hidden", "1")
         }.build()
         return send(Request.Builder().url(url).build(), ListSerializer(AppSummary.serializer()))
     }
@@ -182,7 +195,7 @@ class KiwiApi(
     private fun errorFrom(status: Int, text: String): KiwiException.Http {
         val body = runCatching { json.decodeFromString(ErrorBody.serializer(), text) }.getOrNull()
         val message = body?.error?.message?.takeIf { it.isNotBlank() } ?: "Kiwi answered with an error ($status)."
-        return KiwiException.Http(status, body?.error?.code ?: "http", message)
+        return KiwiException.Http(status, body?.error?.code?.takeIf { it.isNotBlank() } ?: KiwiException.UNKNOWN, message)
     }
 
     companion object {

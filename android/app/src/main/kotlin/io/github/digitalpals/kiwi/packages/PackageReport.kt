@@ -1,10 +1,12 @@
 package io.github.digitalpals.kiwi.packages
 
+import io.github.digitalpals.kiwi.api.AppSummary
 import io.github.digitalpals.kiwi.api.InstalledPackage
 import io.github.digitalpals.kiwi.api.PackagesReport
+import io.github.digitalpals.kiwi.api.Platforms
 import java.security.MessageDigest
 
-/** What the scanner read about one package, before it is filtered into a report. */
+/** What the scanner read about one package, before it goes into a report. */
 data class ScannedPackage(
     val packageName: String,
     val versionName: String?,
@@ -21,13 +23,29 @@ data class ScannedPackage(
 /** Builds the body of `PUT /api/me/packages` from the scanned packages. */
 object PackageReport {
     /**
-     * The packages the user installed: everything outside the system image, plus system apps
-     * that were updated (an OEM may preinstall an app Kiwi also ships, and then the user's
-     * copy is an update of it). Sorted by package, so the same phone gives the same report.
+     * The packages Kiwi asks about, and nothing else of the phone's apps: this app ([own]), every
+     * Android app Kiwi offers ([offered], `GET /api/apps?hidden=1`, hidden ones included) and
+     * every install Kiwi recorded for this phone ([library], `GET /api/library`, orphaned ones
+     * included). Kiwi marks a recorded install whose package the report lacks as removed, so
+     * all of them must be looked up.
      */
-    fun build(scanned: List<ScannedPackage>): PackagesReport = PackagesReport(
+    fun wanted(own: String, offered: List<AppSummary>, library: List<AppSummary>): Set<String> = buildSet {
+        add(own)
+        for (app in offered) {
+            if (app.platform != Platforms.ANDROID) continue
+            add(app.bundleId)
+            add(app.packageName)
+        }
+        library.forEach { add(it.packageName) }
+    }
+
+    /**
+     * The report of the [scanned] packages that are in [wanted], sorted by package, so the same
+     * phone gives the same report.
+     */
+    fun build(scanned: List<ScannedPackage>, wanted: Set<String>): PackagesReport = PackagesReport(
         scanned.asSequence()
-            .filter { !it.system || it.updatedSystem }
+            .filter { it.packageName in wanted }
             .distinctBy { it.packageName }
             .sortedBy { it.packageName }
             .map(::toInstalled)
@@ -53,4 +71,16 @@ object PackageReport {
      */
     fun signersCompatible(installed: List<String>, apk: List<String>): Boolean =
         installed.isEmpty() || apk.isEmpty() || installed.any { it in apk }
+
+    /**
+     * Whether an APK's [signers] include [expected], the certificate SHA-256 Kiwi signs Android
+     * apps with (`Me.host.android_signer_sha256`, hex with or without colons). Unknown signers
+     * don't match.
+     */
+    fun signedBy(signers: List<String>, expected: String): Boolean {
+        val wanted = normalizeSha256(expected)
+        return signers.any { normalizeSha256(it) == wanted }
+    }
+
+    private fun normalizeSha256(hex: String): String = hex.replace(":", "").trim().lowercase()
 }

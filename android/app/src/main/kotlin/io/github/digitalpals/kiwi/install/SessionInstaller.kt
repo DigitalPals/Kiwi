@@ -13,6 +13,8 @@ import io.github.digitalpals.kiwi.work.Notifications
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -21,25 +23,31 @@ import java.util.concurrent.ConcurrentHashMap
  * Installs an APK with a PackageInstaller session.
  *
  * On Android 12 and later the session asks for no confirmation (`USER_ACTION_NOT_REQUIRED`);
- * Android honours that for updates of apps whose installer of record is this app (Kiwi holds
- * `UPDATE_PACKAGES_WITHOUT_USER_ACTION`). On Android 14 and later a first install also makes
+ * Android honours that (Kiwi holds `UPDATE_PACKAGES_WITHOUT_USER_ACTION`) for updates of apps
+ * Kiwi installed and for Kiwi's own updates; [io.github.digitalpals.kiwi.packages.PackageScanner.canUpdateSilently]
+ * has the rules. On Android 14 and later a first install also makes
  * Kiwi the app's update owner (`setRequestUpdateOwnership`). Otherwise the session reports
  * `STATUS_PENDING_USER_ACTION` with Android's confirmation screen, which is shown right away
  * while Kiwi is on screen, or offered as a notification while it is in the background.
  */
-class SessionInstaller(context: Context) {
+class SessionInstaller(context: Context) : Installer {
     private val context = context.applicationContext
     private val installer: PackageInstaller = this.context.packageManager.packageInstaller
 
-    /** Whether Android lets this app install apps ("Install unknown apps"). */
-    fun canInstall(): Boolean = context.packageManager.canRequestPackageInstalls()
+    override fun canInstall(): Boolean = context.packageManager.canRequestPackageInstalls()
 
-    /** Installs [apk] as [packageName] and waits for Android's verdict. */
-    suspend fun install(apk: File, packageName: String, appName: String): InstallOutcome {
-        val sessionId = withContext(Dispatchers.IO) { createSession(apk, packageName) }
+    /**
+     * Installs [apk] as [packageName] and waits for Android's verdict. The session is abandoned
+     * when anything fails or the caller is cancelled, at any step: an abandoned session is never
+     * installed and leaves nothing behind.
+     */
+    override suspend fun install(apk: File, packageName: String, appName: String): InstallOutcome {
+        // Created without cancellation, so its id is always known here and can be abandoned.
+        val sessionId = withContext(Dispatchers.IO + NonCancellable) { installer.createSession(params(apk, packageName)) }
         val result = CompletableDeferred<InstallOutcome>()
         pending[sessionId] = Pending(appName, result)
         try {
+            withContext(Dispatchers.IO) { write(sessionId, apk) }
             withContext(Dispatchers.IO) { commit(sessionId) }
             return result.await()
         } catch (error: Throwable) {
@@ -51,8 +59,8 @@ class SessionInstaller(context: Context) {
         }
     }
 
-    private fun createSession(apk: File, packageName: String): Int {
-        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
+    private fun params(apk: File, packageName: String): PackageInstaller.SessionParams =
+        PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
             setAppPackageName(packageName)
             setSize(apk.length())
             setInstallReason(PackageManager.INSTALL_REASON_USER)
@@ -71,19 +79,24 @@ class SessionInstaller(context: Context) {
                 setRequestUpdateOwnership(true)
             }
         }
-        val sessionId = installer.createSession(params)
-        try {
-            installer.openSession(sessionId).use { session ->
-                session.openWrite("base.apk", 0, apk.length()).use { out ->
-                    apk.inputStream().use { it.copyTo(out, BUFFER) }
-                    session.fsync(out)
+
+    /** Copies [apk] into the session; stops between chunks when the install is cancelled. */
+    private suspend fun write(sessionId: Int, apk: File) {
+        val coroutine = currentCoroutineContext()
+        installer.openSession(sessionId).use { session ->
+            session.openWrite("base.apk", 0, apk.length()).use { out ->
+                apk.inputStream().use { input ->
+                    val buffer = ByteArray(BUFFER)
+                    while (true) {
+                        coroutine.ensureActive()
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        out.write(buffer, 0, read)
+                    }
                 }
+                session.fsync(out)
             }
-        } catch (error: Throwable) {
-            abandon(sessionId)
-            throw error
         }
-        return sessionId
     }
 
     private fun commit(sessionId: Int) {

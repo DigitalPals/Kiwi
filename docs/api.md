@@ -577,8 +577,9 @@ identified through Tailscale like its browser, so Chrome and the app are one dev
 `client` is `android_app`, its `os_version` the Android release (source `android_app`,
 above a browser's guess and below a value entered by hand).
 
-`PUT /api/me/packages` reports the packages the app can see (all user-installed ones; the
-server ignores the rest, and unknown fields of an entry):
+`PUT /api/me/packages` reports the packages Kiwi cares about that are installed (the app's
+own, the Android apps of `GET /api/apps?hidden=1` and the device's installs from
+`GET /api/library`; the server ignores other packages, and unknown fields of an entry):
 
 ```ts
 interface InstalledPackage {

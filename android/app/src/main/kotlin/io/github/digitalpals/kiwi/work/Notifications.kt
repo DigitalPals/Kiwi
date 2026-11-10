@@ -65,6 +65,12 @@ object Notifications {
         }
     }
 
+    /** Removes update notifications (by [UpdateNotice.tag]) of updates that were installed since. */
+    fun cancelUpdates(context: Context, tags: List<String>) {
+        val manager = NotificationManagerCompat.from(context)
+        tags.forEach { manager.cancel(it, 0) }
+    }
+
     fun showBuilds(context: Context, notices: List<BuildNotice>) {
         for (notice in notices) {
             val notification = NotificationCompat.Builder(context, CHANNEL_BUILDS)

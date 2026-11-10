@@ -32,6 +32,10 @@ class ModelsTest {
         assertEquals(false, me.onboarded)
         assertEquals(listOf("android_apps", "web_push"), me.features)
         assertEquals("linux", me.host?.os)
+        assertEquals("0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", me.host?.androidSignerSha256)
+        // Before Kiwi Builds loaded its key (and on older servers) there is none.
+        assertNull(json.decodeFromString(HostInfo.serializer(), """{"os":"macos","android_signer_sha256":null}""").androidSignerSha256)
+        assertNull(json.decodeFromString(HostInfo.serializer(), """{"os":"macos"}""").androidSignerSha256)
         val app = me.androidApp!!
         assertEquals("io.github.digitalpals.kiwi", app.packageName)
         assertEquals(3L, app.versionCode)
@@ -130,7 +134,7 @@ class ModelsTest {
          "counts":{"updates":0,"installed":0,"sources":1,"source_errors":0,"preparing":0},
          "warnings":[{"level":"info","code":"x","message":"m","link":null}],
          "onboarded":false,
-         "host":{"os":"linux","ios_signing":"files","devicectl":false},
+         "host":{"os":"linux","ios_signing":"files","devicectl":false,"android_signer_sha256":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"},
          "features":["android_apps","web_push"],
          "android_app":{"package":"io.github.digitalpals.kiwi","version_name":"0.3.0","version_code":3,"size":1234,
            "install_url":"https://mac.example.ts.net/android/kiwi.apk"}}

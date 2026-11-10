@@ -30,7 +30,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -67,12 +69,19 @@ fun ConnectScreen(
     val model: ConnectViewModel = viewModel(key = "connect:$initialUrl") { ConnectViewModel(container, initialUrl) }
     val state by model.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val connected by rememberUpdatedState(onConnected)
+    // Read from the state, not passed to connect(): this screen may have been recreated since.
+    LaunchedEffect(state.connected) {
+        val url = state.connected ?: return@LaunchedEffect
+        model.connectedHandled()
+        connected(url)
+    }
     BackHandler(enabled = onCancel != null) { onCancel?.invoke() }
     ConnectContent(
         state = state,
         fromLink = fromLink,
         onInput = model::setInput,
-        onConnect = { model.connect(onConnected) },
+        onConnect = model::connect,
         onCancel = onCancel,
         onOpenTailscale = { SystemActions.openTailscale(context) },
     )

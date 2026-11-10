@@ -25,7 +25,7 @@ object UpdateNotices {
             else -> versionChange(installed, target)
         }
         return UpdateNotice(
-            tag = "update:${app.libraryKey}",
+            tag = tag(app),
             key = key(app),
             title = "${app.name} update available",
             body = change ?: "A new version is available",
@@ -47,6 +47,9 @@ object UpdateNotices {
         val base = if (build != null && build != version) "$version ($build)" else version
         return if (revision != null) "$base · Kiwi $revision" else base
     }
+
+    /** Identifies [app]'s update notification, so it can be replaced or removed. */
+    fun tag(app: AppSummary): String = "update:${app.libraryKey}"
 
     /** The key of the notice that Kiwi offers a newer version of this app. */
     fun selfKey(versionCode: Long): String = "$SELF_PREFIX$versionCode"

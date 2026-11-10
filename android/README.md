@@ -2,7 +2,7 @@
 
 A native Android client for Kiwi. It talks to the same JSON API as the web app
 ([docs/api.md](../docs/api.md)), installs Kiwi Builds' Android apps with Android's
-PackageInstaller, tells Kiwi which packages are installed, checks for updates in the
+PackageInstaller, tells Kiwi which of its packages are installed, checks for updates in the
 background and installs them without asking where Android allows it.
 
 Screens: Connect, Browse, an app's page, My Apps, Builds (Kiwi Builds) and Settings, in
@@ -52,8 +52,11 @@ Outputs:
 The unit tests (`./gradlew test`) run on the JVM: API models and the Kiwi Builds endpoints,
 the User-Agent, server addresses and `kiwi://connect` links, the app button's states, the app
 colours and the "Fresh this week" shelf (ported from the web app, with its test cases), Kiwi
-Builds' wording, the package report, install outcomes, and update and build notifications.
-Nothing needs an emulator.
+Builds' wording, the package report (against a fake Kiwi), the install flow (one job per app,
+"Update all", cancelling, the APK checks; with fakes for PackageInstaller and PackageManager),
+downloads (resuming, stale partial files, redirects, cancelling), install outcomes, the
+background install conditions, and update and build notifications. Nothing needs an
+emulator.
 
 `testDebugUnitTest` also renders every screen with made-up data (`ui/preview/PreviewData.kt`)
 in light and dark, in Robolectric with native graphics and Roborazzi, to
@@ -75,7 +78,9 @@ Kiwi address (`https://<name>.<tailnet>.ts.net`) or opens a link
 hosts). A link only fills in the address; the user still taps Connect.
 
 Connecting calls `GET /api/health` (is this Kiwi?) and `GET /api/me` (may this phone use
-it?), and only then saves the address (DataStore). Errors:
+it?), and only then saves the address (DataStore). Kiwi's own errors from `/api/health` (its
+host check covers it) are shown as they are; any other answer means "This doesn't look like a
+Kiwi server". Errors:
 
 - Network failures: "Can't reach Kiwi at <host>. Is Tailscale on?"
 - `403 not_owner`: "Not Your Kiwi" with Kiwi's message, which names the owner.
@@ -85,7 +90,10 @@ it?), and only then saves the address (DataStore). Errors:
 Every request to Kiwi sends the User-Agent
 `Kiwi-Android/<versionName> (<versionCode>; Android <release>; SDK <int>; <manufacturer> <model>)`,
 from which Kiwi marks the device Android and reads its Android release. Requests for icons
-on other hosts only send `Kiwi-Android/<versionName>`.
+on other hosts only send `Kiwi-Android/<versionName>`. API requests and APK downloads don't
+follow redirects (Kiwi sends none, and nothing the phone sends or installs may come from
+another host), and a network security config forbids plain HTTP, also on Android 8.x where it
+would otherwise be allowed.
 
 ## How it works
 
@@ -109,25 +117,46 @@ app/src/main/kotlin/io/github/digitalpals/kiwi/
   while Kiwi downloads, update cards washed with the app's colour, and the "Fresh this week"
   carousel (Material 3's multi-browse carousel) of releases from the last week.
 
-- **Installed packages.** `PackageScanner` lists every installed package with its version,
-  signing certificates (SHA-256 of each DER certificate: all signers of a multi-signer APK,
-  else the signer and its rotation history) and installer of record. The app sends the
-  user-installed packages (and updated system apps) to `PUT /api/me/packages` when it
-  starts, after each install and, while it runs, after a package was added, replaced or
-  removed. Kiwi matches them against its Android releases and its signing certificate
-  (verified install, or `foreign_install` for a copy with another signature).
+- **Installed packages.** The app reports only the packages Kiwi asks about: its own, every
+  Android app Kiwi offers (`GET /api/apps?hidden=1`, hidden ones included, filtered to
+  platform `android`) and every install Kiwi recorded for the phone (`GET /api/library`,
+  orphaned ones included, by `signed_bundle_id`). `PackageScanner` looks each of them up by
+  name with its version, signing certificates (SHA-256 of each DER certificate: all signers of
+  a multi-signer APK, else the signer and its rotation history) and installer of record; the
+  phone's other apps are never read or sent. Without both lists nothing is sent, since Kiwi
+  marks a recorded install whose package a report lacks as removed. The report goes to
+  `PUT /api/me/packages` when the app starts, after each install and, while it runs, after a
+  package was added, replaced or removed. Kiwi matches it against its Android releases and
+  its signing certificate (verified install, or `foreign_install` for a copy with another
+  signature).
 - **Installing.** For `install`/`update`/`open` (reinstall) the app uses the state's
   `install_url`; otherwise it asks Kiwi to prepare the build (`POST .../prepare`) and waits
   until it is ready. It downloads the APK from Kiwi only (the URL must be on the server's
-  host) into the app's cache, resuming a partial file with `Range`. Before installing it
-  checks that the file is the expected package, not older than the installed one, and
-  signed like the installed copy; a different signature stops with "Another <Name> is
-  installed with a different signature" and a button that opens Android's uninstall
-  dialog. Then it writes the APK into a PackageInstaller session and commits it.
+  host) into the app's cache, resuming a partial file with `Range`. A partial file belongs to
+  one URL, version code and size (Kiwi's own app has one URL for every version), and is
+  started over when the server's file no longer has the size Kiwi announced. Before
+  installing it checks that the file is the package Kiwi offered, in the version Kiwi offered
+  (the build's `build`, which is the version code for Android, or `android_app.version_code`),
+  signed with Kiwi's Android key (`Me.host.android_signer_sha256`, when Kiwi knows it, for
+  Kiwi Builds' apps and Kiwi itself), not older than the installed copy and signed like it; a
+  different signature than the installed copy's stops with "Another <Name> is installed with
+  a different signature" and a button that opens Android's uninstall dialog. Then it writes
+  the APK into a PackageInstaller session and commits it. A session is abandoned whenever
+  the install fails or is cancelled, also while the APK is still being copied into it.
+- **One job per app.** Every install, from a screen or from the background worker, registers
+  one job per app (and one for Kiwi itself) before it starts; asking again while it runs
+  joins that job, and Cancel on the app's button stops it, also when the worker started it.
+  "Update all" in My Apps starts the updates that aren't running yet and Kiwi's own update
+  only once all of them have finished, since installing it restarts the app.
 - **Confirmation.** On Android 12 and later every session asks for
-  `USER_ACTION_NOT_REQUIRED`. Android honours this for an update of an app whose installer
-  of record (or, on Android 14, update owner) is Kiwi, so apps Kiwi installed update
-  silently afterwards.
+  `USER_ACTION_NOT_REQUIRED`. Android (PackageInstallerSession's user action rules) honours
+  this when the app holds `UPDATE_PACKAGES_WITHOUT_USER_ACTION` and the session updates a
+  package that has an update owner (Android 14+) that is Kiwi, or, without an update owner, a
+  package whose installer of record is Kiwi or Kiwi itself (a self-update, also when the
+  browser installed Kiwi first). The APK must also target a recent SDK (Kiwi targets the
+  newest), and a repeated update of one package within a short time asks anyway.
+  `PackageScanner.canUpdateSilently` follows these rules; whatever Android decides, an
+  install that needs a confirmation still gets one.
 - **Update ownership.** On Android 14 and later every session also calls
   `setRequestUpdateOwnership(true)`. Android applies it to the first install of a package
   (it is a no-op for updates): Kiwi becomes the app's update owner, so another installer, such
@@ -140,13 +169,19 @@ app/src/main/kotlin/io/github/digitalpals/kiwi/
   again. While its own job runs, the button offers Cancel (which abandons the session), in
   case a confirmation was dismissed without Android reporting it.
 - **Kiwi itself.** When `Me.android_app.version_code` is newer than the running app, My Apps
-  offers the update (`android_app.install_url`), installed the same way.
+  offers the update (`android_app.install_url`), installed the same way. The background
+  check installs it silently on Android 12+ (see Confirmation) and otherwise, or when that
+  doesn't finish, notifies it once per version.
 - **Background updates.** WorkManager runs a check about every two hours while there is a
-  network: it reports the packages, reads `GET /api/updates`, notifies each update once
-  (per app and target release) and, with "Install updates automatically" (on by default),
-  installs the updates Android allows without a confirmation. Updates that would need a
-  tap are notified instead. A check that cannot reach Kiwi (Tailscale off) waits for the
-  next period.
+  network (any network): it reports the packages, reads `GET /api/updates`, notifies each
+  update once (per app and target release) and, with "Install updates automatically" (on by
+  default), installs the updates Android allows without a confirmation, but only on an
+  unmetered network (Wi-Fi, Ethernet; under Tailscale's VPN a validated unmetered network
+  counts) with a battery that isn't low (charging or above 15 %), checked before each
+  install. Updates that would need a tap, or that wait for Wi-Fi, are notified instead; an
+  update installed later removes its notification. The periodic check and the build watch
+  are separate works; only one of them installs at a time. A check that cannot reach Kiwi
+  (Tailscale off) waits for the next period.
 - **Opening apps.** Kiwi's API has no `open_url` for Android; the app opens installed apps
   with their launcher intent.
 - **Kiwi Builds.** The Builds tab manages Kiwi Builds' Android apps through `/api/automation`
@@ -165,7 +200,8 @@ app/src/main/kotlin/io/github/digitalpals/kiwi/
   update notification (or the silent update). While a build runs,
   the app checks again 5 minutes later, so a build is notified (and installed, where Android
   needs no confirmation) soon after it finishes.
-- **Settings.** The server, this phone, "Install updates automatically" (on by default),
+- **Settings.** The server, this phone, "Install updates automatically" (on by default; on
+  Wi-Fi with a battery that isn't low),
   Android's notification settings for the app's channels (Updates, Kiwi Builds, Installs),
   the Kiwi app's own update, "Show setup again" (the Connect screen with the current address)
   and Disconnect. Connecting marks the device as set up on Kiwi (`PATCH /api/me
@@ -176,13 +212,14 @@ app/src/main/kotlin/io/github/digitalpals/kiwi/
 | Permission | Why |
 |---|---|
 | `INTERNET` | Talk to Kiwi over the tailnet. |
-| `QUERY_ALL_PACKAGES` | See every installed package, so Kiwi knows what is installed and with which signature. The app is not distributed through Google Play, whose policy restricts this permission. |
+| `QUERY_ALL_PACKAGES` | Look up the packages Kiwi asks about (its Android apps, which change with Kiwi's catalogue, and the app itself), so Kiwi knows what is installed and with which signature. The app looks them up by name and never lists or reports the phone's other apps. It is not distributed through Google Play, whose policy restricts this permission. |
 | `REQUEST_INSTALL_PACKAGES` | Install APKs with PackageInstaller. The user also has to allow "Install unknown apps" for Kiwi once; the app links to that setting. |
 | `UPDATE_PACKAGES_WITHOUT_USER_ACTION` | Android 12+: update apps Kiwi installed without a confirmation (`USER_ACTION_NOT_REQUIRED`). |
 | `ENFORCE_UPDATE_OWNERSHIP` | Android 14+: become the update owner of the apps Kiwi installs (`setRequestUpdateOwnership`). |
 | `REQUEST_DELETE_PACKAGES` | Open Android's uninstall dialog for a copy of an app that has another signature. The app never uninstalls anything itself. |
 | `POST_NOTIFICATIONS` | Android 13+: update notifications and installs waiting for a tap. Asked once after connecting, and from Settings. |
-| `ACCESS_NETWORK_STATE`, `WAKE_LOCK`, `RECEIVE_BOOT_COMPLETED`, `FOREGROUND_SERVICE` | Added by WorkManager for its scheduling (the app itself starts no foreground service). |
+| `ACCESS_NETWORK_STATE` | Background installs wait for an unmetered network (WorkManager needs it too). |
+| `WAKE_LOCK`, `RECEIVE_BOOT_COMPLETED`, `FOREGROUND_SERVICE` | Added by WorkManager for its scheduling (the app itself starts no foreground service). |
 | `<applicationId>.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` | Added by AndroidX Core: keeps other apps out of the package-change receiver on Android versions without `RECEIVER_NOT_EXPORTED`. |
 
 The app keeps no backup or device transfer (`allowBackup="false"`, data extraction rules
@@ -193,7 +230,9 @@ that exclude everything): it stores only the server address and its switches.
 The app has been built, unit-tested and its screens rendered on the JVM; it has not run on a
 device or emulator yet. To check on a phone: connecting (and the error pages), the package
 report, a first install (confirmation), update ownership on Android 14+, a silent update of an
-app Kiwi installed, the signature-conflict path, the self-update, background checks and
-notifications (updates and builds), the Builds tab against a real Kiwi (adding, patches,
+app Kiwi installed, the signature-conflict path, the self-update (silent on Android 12+ when
+Kiwi was first installed from the browser), background checks and notifications (updates and
+builds), background installs waiting for Wi-Fi under Tailscale's VPN, Cancel during a stalled
+download and during the copy into a session, connecting while the screen rotates, the Builds tab against a real Kiwi (adding, patches,
 schedule, Build now, cancel, remove, turning Kiwi Builds on), the carousel and pull to refresh
 by touch, the bottom sheets and menus, and the themed launcher icon.

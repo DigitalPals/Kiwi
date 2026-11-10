@@ -217,7 +217,7 @@ fun SettingsContent(
                 row {
                     GroupRow(
                         "Install updates automatically",
-                        subtitle = AnnotatedString("For apps Kiwi installed"),
+                        subtitle = AnnotatedString("Apps Kiwi installed · on Wi-Fi, battery not low"),
                         leading = { IconCircle(KiwiIcons.Refresh, Color(0xFF1E8E9E)) },
                         trailing = { KiwiSwitch(phone.autoUpdate, actions.autoUpdate) },
                         onClick = { actions.autoUpdate(!phone.autoUpdate) },

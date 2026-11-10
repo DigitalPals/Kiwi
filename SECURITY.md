@@ -32,5 +32,11 @@ could do with it. You'll get an answer within a week.
   `.p12` password, protect the key there.
 - Kiwi Builds keeps its App Store sign-in in ipatool's own keyring on the Mac; Kiwi's API
   and database never see it.
+- Kiwi Builds' Android patcher runs third-party patch code. It never receives the Android
+  signing key or its password (Kiwi signs its output afterwards), it starts with a minimal
+  environment, and on Linux and in Docker it runs in a Landlock and seccomp sandbox: no
+  network, no access to Kiwi's data directory, writes only to its own job folder. On macOS
+  there is no sandbox. See
+  [How the patcher is contained](docs/kiwi-builds.md#how-the-patcher-is-contained).
 
 See [the architecture](docs/architecture.md#security) for details.

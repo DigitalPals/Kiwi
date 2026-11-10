@@ -133,18 +133,22 @@ tell them apart.
 ### What a build does
 
 1. **Fetches the pinned tools**, once: a Java runtime (Eclipse Temurin 21), the Morphe
-   patcher and the patch bundle. Each is checked against the SHA-256 and size in
-   `automation/android.json` before use.
+   patcher, the patch bundle and Google's `apksigner` (Android build-tools). Each is checked
+   against the SHA-256 and size in `automation/android.json` before use.
 2. **Downloads the original app** at the exact version the recipe pins (below).
 3. **Proves who signed it.** Kiwi verifies the APK Signature Scheme v2/v3 signature over
    every byte of each file and compares the signing certificate with the publisher's
    certificate pinned in the recipe (Google's for YouTube and YouTube Music, Reddit's for
    Reddit). The package name, version and version code must match as well. A file that
    fails is discarded and the next source is tried.
-4. **Patches and signs it** with the pinned patcher and this Kiwi's own key, keeping only
-   the 64-bit ARM code.
-5. **Checks the result**: every patch applied, the expected package, version and version
-   code, Kiwi's own signature over the whole file. Only then is it published.
+4. **Patches it** with the pinned patcher, keeping only the 64-bit ARM code. The patcher
+   writes an unsigned app and never sees the signing key; on Linux it runs in a sandbox
+   ([How the patcher is contained](#how-the-patcher-is-contained)).
+5. **Signs it** with this Kiwi's own key, using `apksigner` (APK Signature Scheme v2 and
+   v3), after checking that the patcher's output carries no signature of its own.
+6. **Checks the result**: every patch applied, the expected package, version and version
+   code, Kiwi's own signature over the whole file, and the alignment Android needs. Only
+   then is it published.
 
 ### Where the original app comes from
 
@@ -179,6 +183,53 @@ YouTube and YouTube Music need for signing in, is installed by you from its own 
 The patched apps talk to the services their patches use (for example SponsorBlock and
 Return YouTube Dislike when those are on).
 
+### How the patcher is contained
+
+The patcher and the patch bundle are someone else's code, and a patch bundle is a program:
+it runs inside the patcher with everything the patcher can reach. Kiwi therefore treats the
+patch step as untrusted and keeps its own secrets out of it:
+
+- **The key stays out.** The patcher writes an unsigned app (Morphe's `--unsigned`). It is
+  never given the keystore, its password or a file naming either. Kiwi then checks that the
+  output is a plain, unsigned package (no v1, v2 or v3 signature, and not a link) and signs
+  it itself with the pinned `apksigner`, which gets the password through its environment.
+- **A minimal environment.** The patcher, `apksigner` and `keytool` start with only `PATH`,
+  `LANG`, `LC_ALL`, `HOME` and `TMPDIR` (inside the job folder), plus `MORPHE_DATA_DIR` for
+  the patcher: nothing of Kiwi's own environment.
+- **A sandbox on Linux and in Docker** (`automation/sandbox.py`), made of features any
+  unprivileged process may use, so it needs no root, setuid helper or extra container
+  privileges:
+  - **Landlock** (Linux 6.2 or later): the patcher may read only the Java runtime, its own
+    jar, the patch bundle, the original app and the system libraries and settings a Java
+    program needs, and write only its own job folder. Kiwi's data directory (the signing
+    key, `kiwi.db`, other jobs, artifacts) and everything else is out of reach, including
+    truncating or renaming files. On Linux 6.7 and later Landlock also refuses TCP
+    connections, and on 6.12 and later signals to processes outside the sandbox.
+  - **A system call filter** (seccomp) that refuses creating any socket, so the patcher has
+    no network at all: no TCP or UDP, no Unix sockets such as tailscaled's, and no
+    connection to Kiwi itself. It also refuses io_uring, bpf, perf events, userfaultfd and
+    the kernel keyrings.
+  - `no_new_privs`, no core dumps, a file size limit (8 GB) and a CPU time limit (3 hours)
+    besides the hour the job may take. A process the patcher leaves running is ended when
+    it exits. (A limit on the number of processes is not used: Linux counts that per user,
+    for all of Kiwi.)
+
+  `apksigner` runs in the same sandbox, with the keystore added to what it may read and
+  the job folder to what it may write.
+- **macOS has no such sandbox.** On a Mac the patcher runs as the Kiwi user without a
+  sandbox, with the key kept out and the minimal environment as above. The build log says
+  so.
+
+Each job's private log (`automation/jobs/<id>/build.log`) records what the sandbox could
+apply, for example `kiwi: sandbox: Landlock ABI 6 (...; no TCP), seccomp (no sockets)`, or
+`kiwi: sandbox unavailable: <reason>`. The pinned official patches build even where the
+sandbox is unavailable (an older kernel, a container whose seccomp profile blocks
+Landlock); a recipe can instead require it (`"sandbox": "required"`), and then the build
+stops with a message saying why the computer can't provide one. `python3
+automation/sandbox.py --probe` prints what a computer supports. Docker's default seccomp
+profile allows Landlock: in Kiwi's image the sandbox works without any change to
+`compose.yaml`.
+
 ### The signing key
 
 The first Android build creates a 4096-bit RSA key in
@@ -196,9 +247,11 @@ fingerprint Android shows for apps Kiwi signed; the web app never offers the key
 Builds is on.
 
 The password never appears on a command line, where other local users could read it while
-a build runs: `keytool` and `apksigner` get it through their environment, and the patcher
-reads it from an argument file (`@file`) that only Kiwi can read, in the build's job
-directory, deleted once patching is done.
+a build runs: `keytool` and `apksigner` get it through their environment. The patcher never
+gets the key or its password at all; Kiwi signs its output afterwards
+([How the patcher is contained](#how-the-patcher-is-contained)). Patched apps carry APK
+Signature Scheme v2 and v3 signatures with this key (earlier Kiwi versions signed them with
+v2 only); the certificate is the same, so Android installs the new builds over the old.
 
 ### Install on Android
 
@@ -228,7 +281,9 @@ and Kiwi's signing warnings don't apply to them.
   for `install.sh`'s service; the Docker image has 3.13). An older Python fails the build
   with a message saying so. Nothing else: the setup below, the Apple account, Xcode and
   enrollment are for iPhone apps only.
-- Linux on x86-64 or ARM64, or a Mac: the pinned Java runtime exists for those.
+- Linux on x86-64 or ARM64, or a Mac: the pinned Java runtime exists for those. The
+  patcher's sandbox needs Linux 6.2 or later (6.7 or later adds Landlock's own TCP block);
+  on older kernels and on a Mac the official recipes build without it.
 - About 1 GB of disk for the tools and cached originals, plus 75 to 180 MB for each
   retained release (the newest 5 per app), and network access to GitHub, `auroraoss.com`,
   Google Play and APKPure.
@@ -349,7 +404,7 @@ Paths under `automation/` are in the data directory, `~/Library/Application Supp
 |---|---|
 | `kiwi.db` meta `automation_v2` | Per-app preferences, revisions and health, and job history. Migrated once from `youtube_automation_v1`, which is left in place for a rollback |
 | `automation/runner.py`, `automation/recipes.json` | The runner and pinned recipes built into Kiwi, rewritten at every start |
-| `automation/android.py`, `automation/apk.py`, `automation/android.json` | The Android runner, its APK signature verifier and the pinned Android recipes, rewritten at every start |
+| `automation/android.py`, `automation/apk.py`, `automation/sandbox.py`, `automation/android.json` | The Android runner, its APK signature verifier, the sandbox for the patcher and the pinned Android recipes, rewritten at every start |
 | `automation/kiwi-app.json`, `automation/kiwi-app.log` | The pinned release of [Kiwi's Android app](android-app.md), and the private log of signing it |
 | `automation/android/keystore.p12`, `keystore.pass` | This Kiwi's Android signing key and its password, mode 0600. Back them up |
 | `automation/android/originals/` | Original Android apps you supply by hand (optional) |

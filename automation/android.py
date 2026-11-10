@@ -6,6 +6,12 @@ publisher signed every byte of it (apk.py), patches it with the pinned patcher
 and patch bundle, and signs the result with a key that never leaves this
 computer. Nothing here needs an Android device, a Google account or macOS.
 
+The patcher and its patch bundle are third-party code, so they never see the
+signing key: the patcher writes an unsigned APK, and Kiwi signs it afterwards
+with the pinned apksigner. On Linux the patcher runs confined (sandbox.py): it
+reads only its own tools and the original, writes only its working folder and
+has no network. Every tool runs with a minimal environment, never Kiwi's own.
+
 The original comes from the first source that can supply it:
 
 1. `automation/android/originals/` - files the owner placed there by hand;
@@ -31,6 +37,7 @@ import re
 import secrets
 import shutil
 import signal
+import stat
 import sys
 import tarfile
 import threading
@@ -42,6 +49,7 @@ import zipfile
 
 import apk
 from runner import BuildError, Builder, canonical, digest, emit, recipe_key
+import sandbox
 
 RECIPES_PATH = Path(__file__).with_name("android.json")
 KIWI_APP_PATH = Path(__file__).with_name("kiwi-app.json")
@@ -56,6 +64,9 @@ MAX_APK = 1024**3
 BUNDLES = (".apks", ".xapk", ".apkm")
 ALIAS = "kiwi"
 SESSION_SECONDS = 1800
+# The JVM options of every tool Kiwi runs: no shared-memory statistics in /tmp, no attach socket.
+JVM = ("-XX:-UsePerfData", "-XX:+DisableAttachMechanism")
+MAX_RESULT = 16 * 1024**2
 # hashlib.file_digest (3.11) and tarfile's extraction filters (3.12).
 MIN_PYTHON = (3, 12)
 
@@ -218,22 +229,6 @@ def download(url, target, *, limit=MAX_APK, headers=None, sha256=None):
     return hasher.hexdigest()
 
 
-def argument_file(path, arguments):
-    """Writes arguments to an @-file that only this user can read and returns "@<path>". The
-    patcher (picocli) reads its arguments from such a file, so secrets stay off its command
-    line, which every local user can read in /proc. Quoted as picocli parses @-files
-    (java.io.StreamTokenizer): in double quotes, with backslashes and quotes escaped."""
-    def quoted(value):
-        value = str(value)
-        if "\n" in value or "\r" in value:
-            raise BuildError("An argument for the patcher contains a line break")
-        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as out:
-        out.write(" ".join(quoted(a) for a in arguments) + "\n")
-    return f"@{path}"
-
-
 def unpack_bundle(path, target):
     """The APKs of a split-APK bundle (.apks, .xapk, .apkm), extracted flat."""
     target.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -385,9 +380,30 @@ class Android:
                            "device": recipe_key(self.recipes["device"])})
 
     def build_toolchain(self):
-        """The pinned tools a patched app depends on. apksigner only signs Kiwi's own app,
-        so a new version of it does not rebuild the patched apps."""
-        return {name: spec for name, spec in self.toolchain.items() if name != "apksigner"}
+        """The pinned tools a patched app depends on: all of them, apksigner included, which
+        signs the patched apps too."""
+        return dict(self.toolchain)
+
+    def sandbox_mode(self, app):
+        """How strictly the patcher must be confined for this app. The pinned official patch
+        bundle runs confined where the computer allows it; a recipe whose patches come from
+        less trusted publishers says "required" and is never built unconfined."""
+        mode = app.get("sandbox", sandbox.BEST_EFFORT)
+        if mode not in sandbox.MODES:
+            raise BuildError("Unknown sandbox setting in the app recipe")
+        return mode
+
+    def confined(self, argv, *, mode, read=(), run=(), write=(), env, **kwargs):
+        """Runs a tool through the sandbox; any process it left behind is ended afterwards."""
+        try:
+            wrapped = sandbox.command(argv, mode=mode, read=read, run=run, write=write, log=self.builder.log)
+        except sandbox.SandboxError as error:
+            raise BuildError(str(error), True) from error
+        try:
+            return self.builder.command(wrapped, env=env, **kwargs)
+        finally:
+            if strays := sandbox.kill_strays():
+                self.builder.log.write(f"kiwi: ended {strays} process(es) the tool left running\n".encode())
 
     # --- pinned tools ------------------------------------------------------
 
@@ -499,7 +515,7 @@ class Android:
             self.builder.command([keytool, "-genkeypair", "-keystore", partial, "-storetype", "PKCS12", "-alias", ALIAS,
                                   "-keyalg", "RSA", "-keysize", "4096", "-sigalg", "SHA256withRSA", "-validity", "36500",
                                   "-dname", "CN=Kiwi", "-storepass:env", "KIWI_KEYSTORE", "-keypass:env", "KIWI_KEYSTORE"],
-                                 env=dict(self.builder.env, KIWI_KEYSTORE=password),
+                                 env=sandbox.environment(self.private, self.private, KIWI_KEYSTORE=password),
                                  message="Kiwi could not create its Android signing key.")
             secret.write_text(password)
             secret.chmod(0o600)
@@ -510,7 +526,8 @@ class Android:
         except OSError as error:
             raise BuildError("Kiwi's Android signing key has no password file; restore both from a backup.", True) from error
         pem = self.builder.command([keytool, "-exportcert", "-rfc", "-keystore", store, "-alias", ALIAS,
-                                    "-storepass:env", "KIWI_KEYSTORE"], env=dict(self.builder.env, KIWI_KEYSTORE=password),
+                                    "-storepass:env", "KIWI_KEYSTORE"],
+                                   env=sandbox.environment(self.private, self.private, KIWI_KEYSTORE=password),
                                    capture=True, message="Kiwi's Android signing key could not be read.")
         body = re.search(r"-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----", pem, re.S)
         if not body:
@@ -656,9 +673,11 @@ class Android:
         if not isinstance(sequence, int) or not 0 < sequence < 2**53:
             raise BuildError("Invalid Kiwi build revision")
         tweaks = self.options(app, plan)
+        mode = self.sandbox_mode(app)
         java = self.java()
         patches = self.tool("patches")
         patcher = self.tool("patcher")
+        signer_jar = self.apksigner()
         store, password, signer = self.keystore(java)
         emit("stage", stage=f"Downloading original {app['name']}")
         files, source = self.original(app, plan, job_dir)
@@ -671,43 +690,78 @@ class Android:
                 for path in files:
                     bundle.write(path, path.name)
         emit("stage", stage=f"Patching {app['name']}")
-        for name in ("patcher", "home"):
-            (job_dir / name).mkdir(mode=0o700)
+        # The patcher's only writable folder. It gets the original, its own jar and the patch
+        # bundle to read, and nothing of Kiwi's: no key, no password, no environment.
+        box = job_dir / "patch"
+        for name in ("home", "tmp", "data"):
+            (box / name).mkdir(mode=0o700, parents=True)
         # Patches the recipe leaves out, such as the one that replaces the app's own icon.
         selection = [arg for name in app.get("disabled_patches", []) for arg in ("--disable", name)]
         for package in app["packages"]:
             for name in package.get("patches", []) if package.get("optional") else []:
                 selection += ["--enable" if package["id"] in tweaks else "--disable", name]
-        candidate, result = job_dir / "candidate.apk", job_dir / "result.json"
-        # The keystore password reaches the patcher in a private @-file, never its arguments.
-        passwords = job_dir / "keystore.args"
+        self.confined(
+            [java, *JVM, f"-Djava.io.tmpdir={box / 'tmp'}", f"-Duser.home={box / 'home'}", "-jar", patcher, "patch",
+             "--patches", patches, "--out", box / "unsigned.apk", "--temporary-files-path", box / "work",
+             "--result-file", box / "result.json", "--unsigned", "--striplibs", self.toolchain["abi"], *selection, original],
+            mode=mode, read=[patcher, patches, original], run=[java.parent.parent], write=[box],
+            cwd=box, timeout=3600,
+            # The patcher records every app it patches; keep that inside the job.
+            env=sandbox.environment(box / "home", box / "tmp", MORPHE_DATA_DIR=box / "data"),
+            message=f"Patching failed. {app['name']} {plan['version']} may need an updated patch recipe.")
+        # What the patcher left is read only as plain files moved out of its folder: a link
+        # could otherwise point Kiwi at a file of its own.
+        unsigned, result = job_dir / "unsigned.apk", job_dir / "result.json"
+        for made, kept in ((box / "unsigned.apk", unsigned), (box / "result.json", result)):
+            try:
+                if not stat.S_ISREG(os.lstat(made).st_mode):
+                    raise OSError("not a file")
+                os.replace(made, kept)
+            except OSError as error:
+                raise BuildError("The patcher reported no result" if made.name == "result.json"
+                                 else "The patcher produced no app") from error
         try:
-            self.builder.command(
-                [java, "-jar", patcher, "patch", "--patches", patches, "--out", candidate,
-                 "--temporary-files-path", job_dir / "work", "--result-file", result,
-                 "--keystore", store, "--keystore-entry-alias", ALIAS,
-                 argument_file(passwords, ["--keystore-password", password, "--keystore-entry-password", password]),
-                 "--signer", "Kiwi", "--striplibs", self.toolchain["abi"], *selection, original],
-                cwd=job_dir, timeout=3600,
-                # The patcher records every app it patches; keep that inside the job.
-                env=dict(self.builder.env, MORPHE_DATA_DIR=str(job_dir / "patcher"), HOME=str(job_dir / "home")),
-                message=f"Patching failed. {app['name']} {plan['version']} may need an updated patch recipe.")
-        finally:
-            passwords.unlink(missing_ok=True)
-        try:
+            if result.stat().st_size > MAX_RESULT:
+                raise ValueError("oversized")
             outcome = json.loads(result.read_text())
+            if not isinstance(outcome, dict):
+                raise ValueError("not an object")
         except (OSError, ValueError) as error:
             raise BuildError("The patcher reported no result") from error
         if outcome.get("success") is not True or outcome.get("failedPatches") or not outcome.get("appliedPatches"):
             raise BuildError(f"Some patches did not apply to {app['name']} {plan['version']}; nothing was published")
+        if not isinstance(outcome["appliedPatches"], list) or not all(isinstance(p, str) for p in outcome["appliedPatches"]):
+            raise BuildError("The patcher reported an unreadable result")
+        try:
+            before = apk.unsigned(unsigned)
+        except (apk.ApkError, OSError) as error:
+            raise BuildError(f"The patched app is not a valid unsigned package: {error}") from error
+        emit("stage", stage=f"Signing {app['name']}")
+        candidate = job_dir / "candidate.apk"
+        # The password reaches apksigner through its environment, never its arguments.
+        self.confined(
+            [java, *JVM, f"-Djava.io.tmpdir={job_dir}", "-jar", signer_jar, "sign", "--ks", store, "--ks-type", "PKCS12",
+             "--ks-key-alias", ALIAS, "--ks-pass", "env:KIWI_KEYSTORE", "--key-pass", "env:KIWI_KEYSTORE",
+             "--v1-signing-enabled", "false", "--v2-signing-enabled", "true", "--v3-signing-enabled", "true",
+             "--v4-signing-enabled", "false", "--out", candidate, unsigned],
+            mode=mode, read=[signer_jar, store, unsigned], run=[java.parent.parent], write=[job_dir],
+            cwd=job_dir, timeout=600, env=sandbox.environment(job_dir, job_dir, KIWI_KEYSTORE=password),
+            message="apksigner could not sign the patched app; details are in the private log.")
         emit("stage", stage="Validating the patched app")
         try:
             patched = apk.inspect(candidate)
+            unaligned = apk.misaligned(candidate)
         except (apk.ApkError, OSError) as error:
             raise BuildError("The patched app is not a valid signed package") from error
         self.builder.log.write(f"kiwi: patched app: {json.dumps(patched)}\n".encode())
         if patched["certificates"] != [signer]:
             raise BuildError("The patched app is not signed with Kiwi's key")
+        if not {2, 3} <= set(patched["schemes"]):
+            raise BuildError("The patched app lacks an APK signature v2 or v3")
+        if unaligned:
+            raise BuildError("The patched app is not aligned (" + ", ".join(unaligned[:3]) + ")")
+        if any(patched[k] != before[k] for k in ("package", "version", "version_code", "abis")):
+            raise BuildError("Signing changed the patched app unexpectedly")
         # Some patches deliberately raise the version code so that a store cannot
         # replace the app; the recipe then pins the code the patched app carries.
         if (patched["package"] != app["bundle_id"] or patched["version"] != plan["version"]
@@ -807,10 +861,11 @@ class Android:
              "--ks-pass", "env:KIWI_KEYSTORE", "--key-pass", "env:KIWI_KEYSTORE",
              "--v1-signing-enabled", "false", "--v2-signing-enabled", "true", "--v3-signing-enabled", "true",
              "--v4-signing-enabled", "false", "--out", signed, source_path],
-            env=dict(self.builder.env, KIWI_KEYSTORE=password), timeout=600,
+            env=sandbox.environment(job_dir, job_dir, KIWI_KEYSTORE=password), timeout=600,
             message="apksigner could not sign Kiwi's Android app; details are in the private log.")
         emit("stage", stage="Verifying the signed app")
         self.builder.command([java, "-jar", signer_jar, "verify", "--verbose", signed], timeout=600,
+                             env=sandbox.environment(job_dir, job_dir),
                              message="apksigner does not accept the signed Kiwi app; details are in the private log.")
         try:
             result = apk.inspect(signed)
@@ -915,11 +970,14 @@ def main():
     job_dir.mkdir(mode=0o700, exist_ok=True)
     log_dir = builder.root / "jobs" / args.job_id
     log_dir.mkdir(mode=0o700, exist_ok=True)
+    # A process a tool detaches still comes back to this one, which ends it (sandbox.py).
+    sandbox.adopt_orphans()
     try:
         with open(log_dir / "build.log", "ab") as log:
             builder.log = log
             android.build(app, request["plan"], request["sequence"], job_dir)
     finally:
+        sandbox.kill_strays()
         # Only the private log, the verified original cache and the artifact remain.
         for child in job_dir.iterdir():
             if child.is_dir() and not child.is_symlink():

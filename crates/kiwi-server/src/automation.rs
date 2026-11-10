@@ -39,6 +39,7 @@ const RUNNER: &str = include_str!("../../../automation/runner.py");
 const ANDROID_RECIPES: &str = include_str!("../../../automation/android.json");
 const ANDROID_RUNNER: &str = include_str!("../../../automation/android.py");
 const APK_READER: &str = include_str!("../../../automation/apk.py");
+const SANDBOX: &str = include_str!("../../../automation/sandbox.py");
 
 mod view;
 pub use view::{AppView, Overview, app_view, overview};
@@ -386,6 +387,7 @@ impl Automation {
             ("recipes.json", RECIPES),
             ("android.py", ANDROID_RUNNER),
             ("apk.py", APK_READER),
+            ("sandbox.py", SANDBOX),
             ("android.json", ANDROID_RECIPES),
             ("kiwi-app.json", crate::kiwi_app::PIN),
         ] {

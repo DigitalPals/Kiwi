@@ -505,10 +505,35 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
 
   const visibleApps = () => db.apps.filter((a) => db.sources.some((s) => s.id === a.source_id && s.enabled));
 
+  /** Why Kiwi can't sign, in the server's words; `no_identity` when there is no identity at all. */
+  function signingProblem(): { code: "no_identity" | "no_profile"; message: string } | null {
+    const files = db.signing_backend === "files";
+    if (!db.identities[0]) {
+      return {
+        code: "no_identity",
+        message: files
+          ? "No signing identity was uploaded. Export your Apple Development certificate with its private key as a .p12 file and upload it."
+          : "No code signing identity was found in the login keychain. Sign in to Xcode and create an Apple Development certificate.",
+      };
+    }
+    if (!db.profiles.some((p) => p.usable && p.wildcard)) {
+      return {
+        code: "no_profile",
+        message: files
+          ? "No usable wildcard provisioning profile was found. Download a profile for the App ID * that includes this certificate from the Apple Developer site and upload it."
+          : "No usable wildcard provisioning profile was found. Open an app project in Xcode with automatic signing once, then rescan.",
+      };
+    }
+    return null;
+  }
+
   function me(now: number, origin: string): Me {
     const updates = visibleApps().filter((a) => isUpdate(a, now)).length;
     const errors = db.sources.filter((s) => s.enabled && s.error);
     const warnings: Warning[] = [];
+    // Signing doesn't concern Android devices.
+    const problem = db.device.platform === "android" ? null : signingProblem();
+    if (problem) warnings.push({ level: "error", code: problem.code, link: "/settings", message: problem.message });
     if (errors.length > 0) {
       warnings.push({
         level: "warning",
@@ -1107,7 +1132,6 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     const signing = (): Signing => {
       const identity = db.identities[0];
       const profile = db.profiles.find((p) => p.usable && p.wildcard);
-      const files = db.signing_backend === "files";
       return {
         backend: db.signing_backend,
         identities: db.identities,
@@ -1116,15 +1140,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
           identity && profile
             ? { identity_sha1: identity.sha1, profile_uuid: profile.uuid, expires_at: iso(Math.min(PROFILE_EXPIRES, CERT_EXPIRES)) }
             : null,
-        error: !identity
-          ? files
-            ? "No signing identity was uploaded. Export your Apple Development certificate with its private key as a .p12 file and upload it."
-            : "No code signing identity was found in the login keychain. Sign in to Xcode and create an Apple Development certificate."
-          : !profile
-            ? files
-              ? "No usable wildcard provisioning profile was found. Download a profile for the App ID * that includes this certificate from the Apple Developer site and upload it."
-              : "No usable wildcard provisioning profile was found. Open an app project in Xcode with automatic signing once, then rescan."
-            : null,
+        error: signingProblem()?.message ?? null,
       };
     };
     const base64 = (field: string, value: unknown): Buffer => {

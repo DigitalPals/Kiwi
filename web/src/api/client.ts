@@ -10,9 +10,11 @@ import type {
   DevicePatch,
   DevicesResponse,
   Health,
+  IdentityUpload,
   Me,
   MePatch,
   PrepareRequest,
+  ProfileUpload,
   PushSubscriptionBody,
   PushTestResult,
   Settings,
@@ -231,6 +233,11 @@ export function createClient(
 
     signing: () => get<Signing>("/api/signing"),
     rescanSigning: () => slowPost<Signing>("/api/signing/rescan"),
+    // Uploads and removals answer after a rescan, like rescanSigning.
+    uploadIdentity: (body: IdentityUpload) => slowPost<Signing>("/api/signing/identity", body),
+    removeIdentity: () => request<Signing>("DELETE", "/api/signing/identity", undefined, true),
+    uploadProfile: (body: ProfileUpload) => slowPost<Signing>("/api/signing/profiles", body),
+    removeProfile: (uuid: string) => request<Signing>("DELETE", `/api/signing/profiles/${seg(uuid)}`, undefined, true),
     settings: () => get<Settings>("/api/settings"),
     updateSettings: (body: Partial<Settings>) => patch<Settings>("/api/settings", body),
 

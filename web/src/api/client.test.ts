@@ -75,6 +75,25 @@ describe("api client", () => {
     expect(calls[4]?.input).toBe("/api/library/com.example.app.TEAM");
   });
 
+  it("uploads and removes signing files", async () => {
+    const signing = { backend: "files", identities: [], profiles: [], active: null, error: null };
+    const { calls, client } = await primed(() => json(signing));
+    await expect(client.uploadIdentity({ p12: "AAAA", password: "secret" })).resolves.toEqual(signing);
+    await client.removeIdentity();
+    await client.uploadProfile({ profile: "BBBB" });
+    await expect(client.removeProfile("1A2B/3C")).resolves.toEqual(signing);
+    expect(calls.map((c) => [c.init.method, c.input])).toEqual([
+      ["POST", "/api/signing/identity"],
+      ["DELETE", "/api/signing/identity"],
+      ["POST", "/api/signing/profiles"],
+      ["DELETE", "/api/signing/profiles/1A2B%2F3C"],
+    ]);
+    expect(calls[0]?.init.body).toBe(JSON.stringify({ p12: "AAAA", password: "secret" }));
+    expect(calls[1]?.init.body).toBeUndefined();
+    expect(calls[2]?.init.body).toBe(JSON.stringify({ profile: "BBBB" }));
+    expect(calls.every((c) => headers(c)["X-Kiwi"] === "1")).toBe(true);
+  });
+
   it("surfaces the server's error message and code", async () => {
     const { client } = fakeFetch(() =>
       json({ error: { code: "conflict", message: "This source is already added." } }, 409),

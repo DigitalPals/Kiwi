@@ -231,10 +231,10 @@ Kiwi signs on Linux with the same Apple Development certificate and development 
 on a Mac ([section 2](#2-signing-certificate-and-profile)), but there is no keychain or
 Xcode to find them in. Export the certificate with its private key as a `.p12` file (on a
 Mac: Keychain Access, right-click the certificate › Export) and download the profile from
-the developer portal, then upload both to Kiwi (`POST /api/signing/identity` and
-`POST /api/signing/profiles`, see [the API](api.md)). Kiwi keeps them in its data
-directory, under `signing/`. Without a Mac there is no `devicectl`, so Kiwi learns an
-iPhone's iOS version from Safari and from installs.
+the developer portal, then upload both in Kiwi's **Settings › Signing**. Kiwi keeps them
+in its data directory, under `signing/`. [Signing on Linux](signing-on-linux.md) explains
+each step, including how to make the `.p12` with OpenSSL. Without a Mac there is no
+`devicectl`, so Kiwi learns an iPhone's iOS version from Safari and from installs.
 
 ### Updating and removing
 
@@ -272,7 +272,8 @@ tailscaled who each device is and what Kiwi's own address is.
    ```
 
 4. Open that address on your phone ([section 6](#6-set-up-your-iphone)). iOS apps are signed
-   as on [Linux](#signing-ios-apps-on-linux).
+   as on [Linux](#signing-ios-apps-on-linux): upload your certificate and profile in
+   **Settings › Signing** ([Signing on Linux](signing-on-linux.md)).
 
 Kiwi's data is in the volume `kiwi-data` (`/data` in the container) and the Tailscale
 machine's identity in `tailscale-state`. Keep both: without `tailscale-state` the container

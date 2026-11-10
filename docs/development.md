@@ -109,7 +109,8 @@ The demo imitates a Kiwi on a Mac, which signs with the keychain. Add
 `KIWI_MOCK_SIGNING=files` and it imitates one on Linux (`Signing.backend: "files"`): the
 identity and profiles are uploads, which the `/api/signing/identity` and
 `/api/signing/profiles` endpoints add and remove (any base64 is accepted; the password
-`wrong` is refused).
+`wrong` is refused). Without an identity or a usable wildcard profile, `/api/me` warns
+about it as the server does (`no_identity`, `no_profile`).
 
 ## Running the server locally
 

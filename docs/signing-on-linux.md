@@ -60,9 +60,27 @@ upload it again.
 
 ## Uploading
 
-The web app does not upload these files yet. Upload them on the Kiwi host itself (requests
-from the host need no Tailscale identity; `8742` is Kiwi's default port). The script reads
-the password from the terminal, so it does not end up in your shell history:
+Open Kiwi on your phone or computer and go to **Settings › Signing**. Until both files are
+uploaded it says **Signing Isn't Set Up**.
+
+1. Under **Signing Identity**, tap **Upload .p12…**, choose the `.p12` file and enter the
+   password you set when you exported it. Kiwi checks the file before it keeps it: a wrong
+   password, a certificate without its private key, an expired certificate or a `.p12`
+   encrypted with AES (see above) is refused with a message that says what to do.
+2. Under **Provisioning Profiles**, tap **Upload Profile…** and choose the
+   `.mobileprovision` file.
+
+The page then says **Ready to Sign** and shows the identity (**In Use**) and the profiles.
+Uploading another identity replaces the first: when the certificate is about to expire,
+the page offers **Upload a New .p12…**. **Remove Identity** and a profile's **Remove**
+delete the uploads again (Xcode's profiles on a Mac can't be removed there). A `.p12` may
+be at most 64 KB, a profile 1 MB.
+
+### With curl
+
+You can also upload the files on the Kiwi host itself (requests from the host need no
+Tailscale identity; `8742` is Kiwi's default port). The script reads the password from the
+terminal, so it does not end up in your shell history:
 
 ```sh
 python3 - kiwi-development.p12 <<'EOF' | curl -sS http://127.0.0.1:8742/api/signing/identity \
@@ -80,9 +98,8 @@ EOF
 ```
 
 Each answers with Kiwi's signing state ([`Signing`](api.md#signing-uploads)): `error` is
-`null` once Kiwi can sign. Settings then says **Ready to sign**. Uploading another
-identity replaces the first; `DELETE /api/signing/identity` and
-`DELETE /api/signing/profiles/<uuid>` remove them.
+`null` once Kiwi can sign. `DELETE /api/signing/identity` and
+`DELETE /api/signing/profiles/<uuid>` remove the uploads.
 
 A wildcard profile can't grant capabilities such as push notifications or App Groups, as
 on a Mac. If you upload an explicit App ID profile for an app, Kiwi prefers it.

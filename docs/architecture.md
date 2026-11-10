@@ -653,7 +653,17 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
   off), the Mac (Signing with its expiry, App Store country),
   Updates (source refresh interval, auto-prepare updates, notify on updates/expiry, remove
   watch apps) and Kiwi Builds (a switch that asks for confirmation before turning it on). Sub-pages: Signing (ready or why not, the certificates, the profiles named by
-  App ID with expiry and entitlements, Rescan), This iPhone (name, iOS version and where it
+  App ID with expiry and entitlements, Rescan; "Upload Profile…" and Remove for uploaded
+  profiles. On a Kiwi that signs with uploaded files (`Signing.backend: "files"`): "Signing
+  Isn't Set Up" in amber until an identity and a profile are uploaded, then "Signing
+  Identity" (the identity with In Use, team and expiry, "Remove Identity" after a
+  confirmation, "Upload .p12…" with the Keychain Access export hint and a link to
+  signing-on-linux.md while there is none or it expires within a month) and "Provisioning
+  Profiles" (each with Remove, "Upload Profile…"), no Rescan. Upload rows are labels round
+  hidden file inputs; the browser checks the size (64 KB for a `.p12`, 1 MB for a profile),
+  reads the file as base64, asks the `.p12`'s password in a sheet, and shows the server's
+  message (wrong password, AES-encrypted `.p12` with the command to convert it) in place.
+  Every upload, removal and rescan reloads `/api/me` for the warnings), This iPhone (name, iOS version and where it
   came from, model, Tailscale name, linked Mac device, Sync Now, devicectl sync, device ID)
   and Notifications (enable, test, disable).
 - PWA: `manifest.webmanifest` (`display: standalone`, scope `/`), apple-touch-icon and

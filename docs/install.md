@@ -236,6 +236,15 @@ but isn't such an account (a system account with the home `/var/lib/kiwi` and no
 shell), it stops rather than run Kiwi as someone else's account; `./install.sh --check`
 says so too.
 
+Other users and services on the computer can reach Kiwi's port too, so on Linux (and in
+Docker) a request made on the computer itself is nobody's: only connections from
+tailscaled, which runs as root, may name a device in your tailnet, and everything else
+gets "Kiwi is used through Tailscale" (`403`), except `/api/health`. That includes a
+browser on the computer, also at its own `https://….ts.net` address: use Kiwi from your
+phone or another computer. If tailscaled runs as another user, or Docker's user namespaces
+show it as another uid (the log names the uid Kiwi saw), pass that uid with `--proxy-uid`
+(`KIWI_PROXY_UID`).
+
 ### Signing iOS apps on Linux
 
 Kiwi signs on Linux with the same Apple Development certificate and development profile as

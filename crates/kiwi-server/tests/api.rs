@@ -44,9 +44,12 @@ async fn build_polling_reads_only_its_build_and_reuses_device_tokens() {
     let path = format!("/api/builds/{id}");
     assert_eq!(phone.ok(&path).await["install_url"], ready["install_url"]);
     assert_eq!(phone.ok(&path).await["install_url"], ready["install_url"]);
-    let browser = k.browser().ok(&path).await;
-    assert!(browser["install_url"].is_string());
-    assert_ne!(browser["install_url"], ready["install_url"]);
+    // Another of the owner's devices gets its own token.
+    k.devices
+        .add_peer("100.64.0.9", "nIPAD1CNTRL", "alex@example.com", "iPad");
+    let other = k.device("100.64.0.9").ok(&path).await;
+    assert!(other["install_url"].is_string());
+    assert_ne!(other["install_url"], ready["install_url"]);
     assert_eq!(
         phone.get("/api/builds/absent").await.status,
         StatusCode::NOT_FOUND
@@ -518,6 +521,7 @@ async fn csrf_and_error_shape() {
         .raw()
         .post(format!("{url}/refresh"))
         .header("X-Kiwi", "1")
+        .header("X-Forwarded-For", PHONE_IP)
         .send()
         .await
         .unwrap();
@@ -638,7 +642,8 @@ async fn settings_persist_and_validate() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cookie_devices_and_manual_os_version() {
-    let k = TestKiwi::start().await;
+    // Cookie devices are browsers on the Mac Kiwi runs on.
+    let k = TestKiwi::start_on_mac(tempfile::tempdir().unwrap(), FakeDevices::with_phone()).await;
     let mut browser = k.browser();
     let r = browser.get("/api/me").await;
     let cookie = r.headers[header::SET_COOKIE].to_str().unwrap().to_owned();
@@ -699,7 +704,8 @@ async fn cookie_devices_and_manual_os_version() {
         .await;
     assert!(r.body["device"]["os_version"].is_null());
 
-    // Loopback peers with X-Forwarded-For are `tailscale serve` (other peers: unit tests).
+    // On a Mac, loopback peers with X-Forwarded-For are `tailscale serve` (other peers:
+    // unit tests; other computers: tests/local.rs).
     let spoofed = k
         .raw()
         .get(format!("{}/api/me", k.base))
@@ -709,6 +715,7 @@ async fn cookie_devices_and_manual_os_version() {
         .unwrap();
     let body: Value = spoofed.json().await.unwrap();
     assert_eq!(body["device"]["id"], PHONE_ID, "loopback peers are trusted");
+    assert!(k.peers.lookups.lock().unwrap().is_empty());
     k.phone().get("/api/me").await;
     assert_eq!(
         k.devices.whois_calls.load(Ordering::SeqCst),
@@ -1399,12 +1406,14 @@ async fn whois_errors_are_retried_then_reported() {
     assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(k.devices.whois_calls.load(Ordering::SeqCst), calls);
 
-    // An address whois knows is not a peer: a cookie device, as before.
+    // An address whois knows is not a peer: nobody Kiwi knows (on a Mac, a cookie device:
+    // tests/local.rs).
     other.forwarded_for = Some("100.64.0.10".into());
     let r = other.get("/api/me").await;
-    assert_eq!(r.status, StatusCode::OK);
-    assert_eq!(r.body["device"]["kind"], "browser");
-    assert!(r.headers.get(header::SET_COOKIE).is_some());
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    assert_eq!(r.body["error"]["code"], "not_owner");
+    assert!(r.headers.get(header::SET_COOKIE).is_none());
+    assert_eq!(k.kiwi.db.devices().unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

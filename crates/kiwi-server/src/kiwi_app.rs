@@ -26,7 +26,7 @@ use crate::{
     android::{self, AndroidApp, META_FILE},
     automation::{self, Invocation, Recipe, recipe},
     db::{Platform, Time},
-    devices,
+    devices, owner,
 };
 
 /// The worker's id for this job; it names the runner's request file.
@@ -176,8 +176,8 @@ impl Status {
     }
 }
 
-/// Whether Kiwi has a reason to offer its Android app: an Android device, or an Android app
-/// in Kiwi Builds.
+/// Whether Kiwi has a reason to offer its Android app: an Android device of the owner's
+/// (other people's devices get nothing from Kiwi), or an Android app in Kiwi Builds.
 fn wanted(kiwi: &Kiwi) -> bool {
     let builds = kiwi
         .automation
@@ -187,9 +187,9 @@ fn wanted(kiwi: &Kiwi) -> bool {
         .any(|(id, app)| app.added && recipe(id).is_ok_and(Recipe::android));
     builds
         || kiwi.db.devices().is_ok_and(|devices| {
-            devices
-                .iter()
-                .any(|d| devices::effective_platform(d) == Platform::Android)
+            devices.iter().any(|d| {
+                devices::effective_platform(d) == Platform::Android && owner::is_owner(kiwi, d)
+            })
         })
 }
 

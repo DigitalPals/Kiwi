@@ -1,5 +1,6 @@
 //! The owner (architecture.md "The owner"): the Tailscale user who owns the Mac, or
-//! `--owner`. Kiwi is theirs alone; other people on the tailnet get `403 not_owner`.
+//! `--owner`. Kiwi is theirs alone; other people on the tailnet get `403 not_owner`, and so
+//! does anyone on a computer other than a Mac who doesn't come through Tailscale.
 
 use std::{
     sync::{Mutex, RwLock},
@@ -8,6 +9,7 @@ use std::{
 
 use crate::{
     Kiwi,
+    config::LocalTrust,
     db::DeviceRow,
     error::{ApiError, ApiResult},
 };
@@ -78,13 +80,32 @@ pub async fn tick(kiwi: &Kiwi) {
     }
 }
 
-/// Browser devices on the Mac and devices from before Kiwi recorded Tailscale users count
-/// as the owner's; every other device must belong to the owner's Tailscale user.
+/// Browser devices on a Mac (or with `--trust-local`) and devices from before Kiwi recorded
+/// Tailscale users count as the owner's; every other device must belong to the owner's
+/// Tailscale user. Otherwise a browser device is nobody's: anyone on the computer could have
+/// made it.
 pub fn is_owner(kiwi: &Kiwi, device: &DeviceRow) -> bool {
     match &device.person_id {
-        None => true,
+        None => device.kind == "tailscale" || kiwi.config.local == LocalTrust::Anyone,
         Some(user) => kiwi.owner.login().as_ref() == Some(user),
     }
+}
+
+/// `403 not_owner` for a request made on the computer Kiwi runs on, other than a Mac,
+/// without going through Tailscale (or through Tailscale from the computer's own node):
+/// anyone who can log in to the computer could have made it.
+pub fn not_on_this_computer(kiwi: &Kiwi) -> ApiError {
+    let device = match kiwi.owner.login() {
+        Some(owner) => format!("a phone or computer signed in to Tailscale as {owner}"),
+        None => "a phone or computer in your tailnet".into(),
+    };
+    let address = kiwi
+        .known_public_url()
+        .unwrap_or_else(|| "its Tailscale address".into());
+    ApiError::not_owner(format!(
+        "Kiwi is used through Tailscale, not on the computer it runs on. Open {address} on \
+         {device}."
+    ))
 }
 
 /// `403 not_owner` for a device of someone else (also while the owner is unknown).

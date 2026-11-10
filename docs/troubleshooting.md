@@ -54,10 +54,32 @@ container through the socket in the `tailscale-socket` volume: check that both c
 run (`docker compose ps`).
 
 **"This host name is not served by Kiwi"** (`421 bad_host`) in Docker: Kiwi started before
-the Tailscale container had its name, so it only answers on its listen address. The log
-says "no public URL" at start. Make sure the Tailscale container is logged in
-(`docker compose logs tailscale`), then `docker compose restart kiwi`. Setting
+the Tailscale container had its name (after a reboot or a Docker restart, Docker may start
+Kiwi before the Tailscale container, before its socket even exists), so it only answers on
+its listen address for now. The log says "no public URL (…): Kiwi answers only on … and
+keeps asking". Kiwi asks Tailscale again every few seconds, then every 30 s, and logs
+"public URL from Tailscale: https://…" when it has the name; from then on the address
+works, without a restart. If that never comes, make sure the Tailscale container is
+running and logged in (`docker compose ps`, `docker compose logs tailscale`). Setting
 `KIWI_PUBLIC_URL` to the address avoids the lookup.
+
+**"Kiwi is used through Tailscale, not on the computer it runs on"** (`403 not_owner`, on
+Linux and in Docker): the request was made on Kiwi's computer itself, which anyone who
+can log in there could have done (also through the computer's own `https://….ts.net`
+address). Open Kiwi on your phone or another device in your tailnet. When that message
+also reaches your phone, the log tells why:
+
+- "ignored X-Forwarded-For from …: it comes from uid N": Kiwi trusts only tailscaled's
+  connections, and expects tailscaled to run as root (uid 0). If uid N is tailscaled (it
+  runs as another user, or in Docker user namespaces show the Tailscale container's root
+  as another uid, often 65534), pass `--proxy-uid N` (`KIWI_PROXY_UID=N` in `.env` or the
+  compose file). Don't do that when Kiwi shares the host's network
+  ([With the host's Tailscale](install.md#with-the-hosts-tailscale)) and N is 65534: every
+  user outside Kiwi's user namespace looks like that.
+- "could not tell which user made the connection": Kiwi couldn't read
+  `/proc/self/net/tcp` (or `tcp6`), or the connection wasn't in it. Kiwi must see the
+  sockets of the network namespace `tailscale serve` connects from; don't hide `/proc/net`
+  from it.
 
 **Kiwi works in Safari but not from the Home Screen** (or the other way around): the
 Home Screen app and Safari are the same device for Kiwi when Tailscale identifies them.

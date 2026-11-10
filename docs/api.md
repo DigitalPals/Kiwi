@@ -14,22 +14,32 @@ RFC 3339 strings in UTC. All `/api` responses are `application/json` with
   `message` is user-readable. Codes used: `bad_request`, `csrf`, `not_found`,
   `conflict`, `source_fetch`, `source_parse`, `signing_unavailable`, `app_store` (502,
   the App Store could not be reached), `device_unidentified` (503), `bad_host` (421),
-  `not_owner` (403, the device belongs to someone other than the owner), `builds_off` (409,
+  `not_owner` (403, the device belongs to someone other than the owner, or the request was
+  made on the computer Kiwi runs on, not on a Mac, without Tailscale), `builds_off` (409,
   Kiwi Builds is turned off in Settings), `needs_mac` (409, an iOS app in Kiwi Builds on a
   Kiwi that doesn't run on macOS), `internal`.
 - Every request (`/api`, `/ota` and the web app) must be addressed to the public URL's
   host (`Host`, as `tailscale serve` forwards it) or to the listen address
   (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`); an `X-Forwarded-Host`, when
-  present, must be the public host. Otherwise `421 bad_host` (blocks DNS rebinding).
+  present, must be the public host. Otherwise `421 bad_host` (blocks DNS rebinding). When
+  Kiwi learns its public URL from Tailscale after it started, its host is allowed from then
+  on.
 - The device is resolved from Tailscale (`X-Forwarded-For` + whois) or the
-  `kiwi_device` cookie. When a request proxied from the tailnet cannot be identified
-  because the Tailscale whois fails (retried once), the response is
-  `503 device_unidentified` ("Couldn't identify this device through Tailscale. Try
-  again."); the cookie is used only without a forwarded address or when whois reports that
-  the address is not a peer. The web app should send requests with
-  `credentials: "same-origin"`, and on startup completes `GET /api/me` (which sets the
-  cookie) before sending other requests, so concurrent first requests do not each create
-  a browser device.
+  `kiwi_device` cookie. `X-Forwarded-For` counts only from `tailscale serve` on loopback:
+  on a Mac from any loopback connection, elsewhere only from a connection of tailscaled's
+  user (`--proxy-uid`, root by default; architecture.md "Security"). When a request proxied
+  from the tailnet cannot be identified because the Tailscale whois fails (retried once),
+  the response is `503 device_unidentified` ("Couldn't identify this device through
+  Tailscale. Try again."). On a Mac (or with `--trust-local`) the cookie is used without a
+  forwarded address or when whois reports that the address is not a peer: a browser on the
+  Mac. On other computers
+  such a request, and one from the computer's own Tailscale address, could come from
+  anyone who can log in there; it gets `403 not_owner` ("Kiwi is used through Tailscale,
+  not on the computer it runs on. Open https://kiwi.example.ts.net on a phone or computer
+  signed in to Tailscale as alex@example.com.") and makes no device or cookie. The web app
+  should send requests with `credentials: "same-origin"`, and on startup completes
+  `GET /api/me` (which sets the cookie) before sending other requests, so concurrent first
+  requests do not each create a browser device.
 - Path parameters are URL-encoded. `bundle_id` contains dots; it is one path segment.
 - Only the owner may use Kiwi (see "The owner" below): every endpoint but `/api/health`
   answers other people's devices `403 not_owner`.
@@ -129,7 +139,10 @@ network. Raw artifacts and provenance files have no HTTP download route. See
 Kiwi is one person's: the **owner**, the Tailscale user who owns the Mac (according to
 tailscaled), or `--owner`. Kiwi remembers the owner (meta `owner_login`), so they are still
 known while Tailscale is down. Devices whose Tailscale user is the owner, browser devices on
-the Mac itself and devices seen before Kiwi recorded users are the owner's.
+the Mac itself and devices seen through Tailscale before Kiwi recorded users are the
+owner's. On a computer other than a Mac, other users and services may share it, so a
+browser device there is nobody's, and requests made on it without Tailscale get
+`403 not_owner` (see "Conventions").
 
 Every other device gets `403 not_owner` from every endpoint but `/api/health`, with a message
 that names the owner ("This Kiwi belongs to alex@example.com. To use it here, sign in to
@@ -470,7 +483,7 @@ interface Settings {
 | POST | `/api/push/unsubscribe` | `{ endpoint }` | `204` |
 | POST | `/api/push/test` | | `{ sent: number }` |
 | GET | `/api/devices` | | `{ devices: Device[], core_devices: CoreDevice[] }` |
-| PATCH | `/api/devices/:id` | `{ name?, devicectl_id?: string \| null }` | `Device` |
+| PATCH | `/api/devices/:id` | `{ name?, devicectl_id?: string \| null }` | `Device`; linking (`devicectl_id` a string) is `400` for a device whose `platform` is not `ios` |
 | POST | `/api/devices/sync` | | `{ devices: Device[], core_devices: CoreDevice[] }` (runs devicectl sync now) |
 
 OTA (no `/api` prefix, no cookies, token-authorized; see architecture.md):
@@ -584,20 +597,22 @@ the version is `version_name`); the same package signed with another key is fore
 (`AppState.foreign_install`; Kiwi's download of it did not install, and installing it
 fails until the other app is removed); an install whose package is missing is marked
 removed (one whose download completed less than 10 minutes ago is kept: Android may
-still be installing it). Android's install can fail after the download, and the app
-reports right after it: such a report counts for that install once the 10 minutes are
-over, without another report (Kiwi keeps each device's last report in memory and checks
-every minute). Until the Android runner has recorded Kiwi's key (it does so
-whenever it builds or signs Kiwi's app), Kiwi only records removals. Each report replaces
-the previous one; at most 5000 packages (2 MiB).
+still be installing it). When the app downloaded the APK itself, it installs it at once
+and reports right after, and Android's install can fail after the download: such a report
+counts for that install once the 10 minutes are over, without another report (Kiwi keeps
+the device's last report in memory while such an install waits for it, and checks every
+minute). A download in the browser waits until the owner opens it in Android's installer,
+so for it only reports made after the 10 minutes count. Until the Android runner has
+recorded Kiwi's key (it does so whenever it builds or signs Kiwi's app), Kiwi only records
+removals. Each report replaces the previous one; at most 5000 packages (2 MiB).
 
 Kiwi offers its Android app (`Me.android_app`) when `<data>/android-app/` holds
 `kiwi.apk` and `kiwi.json` (`{package, version_name, version_code, sha256, size}`, other
 fields are ignored) describing it. A description that doesn't match the file (size or
 SHA-256) is ignored. The web app offers it on devices detected as Android
 (`android_app_offer`; a desktop browser can't install it, even when its owner chose Android);
-`install_url` downloads it from `/android/kiwi.apk`. While Kiwi Builds is on and Kiwi has an
-Android device or Android build, Kiwi writes both itself: it signs the unsigned release
+`install_url` downloads it from `/android/kiwi.apk`. While Kiwi Builds is on and the owner has
+an Android device or Android build, Kiwi writes both itself: it signs the unsigned release
 pinned in `automation/kiwi-app.json` (or an unsigned APK the owner placed in
 `android-app/unsigned/`) with its Android key ([android-app.md](android-app.md)).
 

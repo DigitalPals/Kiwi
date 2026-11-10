@@ -1162,12 +1162,109 @@ async fn an_android_install_missing_after_the_grace_period_is_removed() {
     let now = chrono::Utc::now();
     kiwi_server::android::settle_reports(&k.kiwi, now).unwrap();
     assert!(app.ok(&path).await["state"]["installed"].is_object());
+    // Kiwi keeps the report for that install alone (it lists none of its packages).
+    let android_id = app.ok("/api/me").await["device"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(k.kiwi.package_reports.kept(), [(android_id, 0)]);
     // ...until the grace period is over: then that report counts, without another one.
     kiwi_server::android::settle_reports(&k.kiwi, now + chrono::Duration::minutes(11)).unwrap();
     let state = app.ok(&path).await["state"].clone();
     assert!(state["installed"].is_null(), "{state}");
     assert_eq!(state["action"], "install");
     assert_eq!(app.ok("/api/me").await["counts"]["installed"], 0);
+    // Nothing waits for the report any more.
+    assert!(k.kiwi.package_reports.kept().is_empty());
+}
+
+#[tokio::test]
+async fn a_browser_download_is_not_removed_by_a_report_made_before_its_install() {
+    const PACKAGE: &str = "app.morphe.android.youtube";
+    let k = TestKiwi::start_building().await;
+    fake_runner(&k, false);
+    fake_android_runner(&k, PACKAGE);
+    k.devices.add_android(ANDROID_IP);
+    let phone = k.phone();
+    let initial = phone.ok("/api/automation/android-youtube").await;
+    phone
+        .post(
+            "/api/automation/android-youtube/add",
+            initial["preferences"].clone(),
+        )
+        .await;
+    assert_eq!(
+        finished_app(&k, "android-youtube").await["jobs"][0]["status"],
+        "ready"
+    );
+    let signer = k.dir.path().join("data/automation/android/signer.json");
+    std::fs::create_dir_all(signer.parent().unwrap()).unwrap();
+    std::fs::write(&signer, json!({ "sha256": "c".repeat(64) }).to_string()).unwrap();
+    // The owner downloads the APK in Chrome...
+    let browser = k.android(ANDROID_IP);
+    let path = format!("/api/apps/kiwi-youtube/{PACKAGE}");
+    let prepared = browser.post(&format!("{path}/prepare"), json!({})).await;
+    let url = prepared.body["install_url"].as_str().unwrap();
+    let ota = url.strip_prefix("https://kiwi.test").unwrap();
+    let response = browser.request(Method::GET, ota).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.bytes().await.unwrap();
+    let mut state = Value::Null;
+    for _ in 0..100 {
+        state = browser.ok(&path).await["state"].clone();
+        if state["installed"].is_object() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(state["installed"]["origin"], "kiwi", "{state}");
+
+    // ...and Kiwi's app reports the packages before they open it in Android's installer.
+    let app = Api {
+        user_agent: Some("Kiwi-Android/1.0.0 (1; Android 15; SDK 35; Google Pixel 9a)".into()),
+        ..k.android(ANDROID_IP)
+    };
+    let r = app
+        .send(
+            Method::PUT,
+            "/api/me/packages",
+            Some(json!({ "packages": [] })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+    // That report says nothing about the download, so Kiwi doesn't keep it...
+    assert!(k.kiwi.package_reports.kept().is_empty());
+    // ...and the install stands after the grace period.
+    let now = chrono::Utc::now();
+    kiwi_server::android::settle_reports(&k.kiwi, now + chrono::Duration::minutes(11)).unwrap();
+    assert!(app.ok(&path).await["state"]["installed"].is_object());
+
+    // A report made after the grace period decides, as for any install.
+    let device = app.ok("/api/me").await["device"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    k.kiwi
+        .db
+        .change_installs(&device, |installs| {
+            installs
+                .iter()
+                .map(|i| kiwi_server::db::InstallRow {
+                    installed_at: i.installed_at - chrono::Duration::minutes(11),
+                    ..i.clone()
+                })
+                .collect()
+        })
+        .unwrap();
+    let r = app
+        .send(
+            Method::PUT,
+            "/api/me/packages",
+            Some(json!({ "packages": [] })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+    assert!(app.ok(&path).await["state"]["installed"].is_null());
 }
 
 /// The Android runner's `kiwi-app` command, as far as Kiwi sees it: writes the signed app
@@ -1227,6 +1324,24 @@ async fn kiwi_signs_and_offers_its_own_android_app() {
     std::fs::write(unsigned.join("kiwi-1.2.0.apk"), "PK unsigned").unwrap();
 
     // Without an Android device or Android build, Kiwi has no one to offer its app to.
+    kiwi_server::kiwi_app::tick(&k.kiwi).await;
+    settle().await;
+    assert_eq!(runs(), 0);
+    // Nor for someone else's Android phone, refused when it opened Kiwi.
+    k.devices.peers.lock().unwrap().insert(
+        "100.64.0.30".parse().unwrap(),
+        kiwi_device::TailscalePeer {
+            stable_id: "nNOAHPIXEL".into(),
+            name: "noah-pixel".into(),
+            dns_name: "noah-pixel.example.ts.net".into(),
+            os: Some("android".into()),
+            user_login: Some("noah@example.com".into()),
+            user_name: None,
+        },
+    );
+    let noah = k.android("100.64.0.30").get("/api/me").await;
+    assert_eq!(noah.status, StatusCode::FORBIDDEN);
+    assert!(k.kiwi.db.device("ts:nNOAHPIXEL").unwrap().is_some());
     kiwi_server::kiwi_app::tick(&k.kiwi).await;
     settle().await;
     assert_eq!(runs(), 0);

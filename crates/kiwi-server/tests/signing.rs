@@ -64,6 +64,8 @@ async fn keychain_hosts_refuse_identity_uploads_but_take_profiles() {
 async fn validates_uploads() {
     let k = TestKiwi::start().await;
     *k.signer.backend.lock().unwrap() = Backend::Files;
+    // The backend is read when signing is scanned; the first scan ran with this system's.
+    k.kiwi.rescan_signing().await;
     let api = k.phone();
     let post = |path: &'static str, body: serde_json::Value| {
         let api = api.clone();

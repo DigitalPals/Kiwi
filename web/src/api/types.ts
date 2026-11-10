@@ -77,6 +77,8 @@ export interface Host {
   /** How this Kiwi signs iOS apps: the Mac's login keychain, or an uploaded identity file. */
   ios_signing: "keychain" | "files";
   devicectl: boolean;
+  /** SHA-256 (hex) of the certificate of the key Kiwi signs Android apps with; null until Kiwi Builds has loaded it. */
+  android_signer_sha256: string | null;
 }
 
 /** Kiwi's Android app, when this Kiwi serves it. */

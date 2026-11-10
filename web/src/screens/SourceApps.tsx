@@ -5,6 +5,7 @@ import { AppIcon } from "../components/AppIcon";
 import { BackBar, Banner, Cell, Empty, ErrorState, LinkCell, Loading, Section, Spinner, Toggle } from "../components/ui";
 import { appKey } from "../lib/action";
 import { deviceName, formatRelative, plural } from "../lib/format";
+import { hasFeature } from "../lib/features";
 import { useResource, useTask } from "../lib/hooks";
 import { useMe } from "../lib/me";
 import { navigate } from "../lib/router";
@@ -257,7 +258,8 @@ export function SourceApps({ sourceId }: { sourceId: string }) {
 
   return (
     <main class="page page-detail">
-      <BackBar label="Sources" fallback="/sources" />
+      {/* Android reaches only Kiwi Builds' source, from the Builds tab. */}
+      {hasFeature(me, "android_apps") ? <BackBar label="Kiwi Builds" fallback={BUILDS_PATH} /> : <BackBar label="Sources" fallback="/sources" />}
       {content}
     </main>
   );

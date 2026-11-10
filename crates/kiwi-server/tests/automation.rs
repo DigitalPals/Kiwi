@@ -1075,6 +1075,11 @@ async fn kiwis_android_app_reports_which_packages_are_installed() {
     let signer = k.dir.path().join("data/automation/android/signer.json");
     std::fs::create_dir_all(signer.parent().unwrap()).unwrap();
     std::fs::write(&signer, json!({ "sha256": KIWI_KEY }).to_string()).unwrap();
+    // Settings shows its fingerprint, so the owner can tell which key to back up.
+    assert_eq!(
+        app.ok("/api/me").await["host"]["android_signer_sha256"],
+        KIWI_KEY
+    );
 
     // The same package from another publisher: Kiwi's build can't be installed over it.
     put(report(PLAY_KEY)).await;

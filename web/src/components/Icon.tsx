@@ -71,6 +71,21 @@ const PATHS = {
       <path d="M10.5 18.5h3" />
     </>
   ),
+  android: () => (
+    <>
+      <path d="M3.5 18.5a8.5 8.5 0 0 1 17 0Z" />
+      <path d="m7.6 11.3-1.9-3M16.4 11.3l1.9-3" />
+      <circle cx="8.8" cy="15" r=".9" fill="currentColor" stroke="none" />
+      <circle cx="15.2" cy="15" r=".9" fill="currentColor" stroke="none" />
+    </>
+  ),
+  download: () => <path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" />,
+  addSquare: () => (
+    <>
+      <rect x="3.5" y="3.5" width="17" height="17" rx="4" />
+      <path d="M12 8v8M8 12h8" />
+    </>
+  ),
   key: () => (
     <>
       <circle cx="8" cy="15" r="4.5" />

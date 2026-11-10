@@ -266,6 +266,15 @@ pub fn kiwi_signer(kiwi: &Kiwi, android_apps: &[CatalogApp]) -> Option<String> {
     })
 }
 
+/// The Android apps in Kiwi's catalog (Kiwi Builds' Android releases).
+pub fn catalog_apps(kiwi: &Kiwi) -> Vec<CatalogApp> {
+    kiwi.catalog
+        .apps(None, None)
+        .into_iter()
+        .filter(|a| crate::builds::android_app(a.app()))
+        .collect()
+}
+
 /// What a package report changes: install rows to save, and the packages of Kiwi's
 /// Android apps installed with another signature.
 #[derive(Debug, Default, PartialEq)]
@@ -396,7 +405,7 @@ pub fn settle_reports(kiwi: &Kiwi, now: Time) -> ApiResult<()> {
         if !installs.iter().any(|i| i.origin == "kiwi" && !i.verified) {
             continue;
         }
-        let apps = android_apps.get_or_insert_with(|| kiwi_android_apps(kiwi));
+        let apps = android_apps.get_or_insert_with(|| catalog_apps(kiwi));
         let signer = kiwi_signer(kiwi, apps);
         let rows = settle_report(
             &device_id,
@@ -419,15 +428,6 @@ pub fn settle_reports(kiwi: &Kiwi, now: Time) -> ApiResult<()> {
     Ok(())
 }
 
-/// The catalogue's Android apps (Kiwi Builds' Android releases).
-fn kiwi_android_apps(kiwi: &Kiwi) -> Vec<CatalogApp> {
-    kiwi.catalog
-        .apps(None, None)
-        .into_iter()
-        .filter(|a| crate::builds::android_app(a.app()))
-        .collect()
-}
-
 /// Saves a package report of an Android device (`PUT /api/me/packages`).
 pub fn record_packages(kiwi: &Kiwi, device_id: &str, report: PackageReport) -> ApiResult<()> {
     if report.packages.len() > MAX_PACKAGES {
@@ -445,7 +445,7 @@ pub fn record_packages(kiwi: &Kiwi, device_id: &str, report: PackageReport) -> A
             p
         })
         .collect();
-    let android_apps = kiwi_android_apps(kiwi);
+    let android_apps = catalog_apps(kiwi);
     let signer = kiwi_signer(kiwi, &android_apps);
     let installs = kiwi.db.installs(device_id, true)?;
     let result = reconcile_packages(

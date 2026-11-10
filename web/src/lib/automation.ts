@@ -88,3 +88,23 @@ export function selectedFeatures(state: AutomationState, tweaks: string[], name?
     ...(name && state.names.length > 0 ? [`Named ${name}`] : []),
   ].join(" · ");
 }
+
+/**
+ * What turning Kiwi Builds on means, for its confirmation: on an iPhone the App Store apps it
+ * downloads with the owner's Apple account, on Android the Google Play apps.
+ */
+export function buildsNotice(android: boolean): string {
+  const what = android
+    ? "Kiwi will download apps from Google Play, patch them with open-source patches and sign them with this Kiwi's own key."
+    : "Kiwi will download App Store apps with your Apple account, decrypt them on this Mac and patch them with open-source tweaks.";
+  const setup = android ? "" : "\n\nThe Mac needs a one-time setup first (see Kiwi's documentation).";
+  return (
+    `Turn on Kiwi Builds?\n\n${what} Patched apps may break the app's terms of service. ` +
+    `Use it only for apps you may use, on your own devices, at your own risk.${setup}`
+  );
+}
+
+/** Kiwi Builds' apps for this device: Android recipes on Android, the iPhone's elsewhere. */
+export function appsForDevice(apps: readonly AutomationState[], android: boolean): AutomationState[] {
+  return apps.filter((app) => (app.platform === "android") === android);
+}

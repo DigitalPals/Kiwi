@@ -458,6 +458,7 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
         .devicectl_available
         .load(std::sync::atomic::Ordering::Relaxed);
     let android_app = kiwi.android_app.get(&kiwi.paths.android_app).await;
+    let android_signer = android::kiwi_signer(kiwi, &android::catalog_apps(kiwi));
     Ok(json!({
         "device": device_json(&ctx.device, ctx.client),
         "onboarded": ctx.device.onboarded_at.is_some(),
@@ -471,6 +472,7 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
             "os": HOST_OS,
             "ios_signing": if HOST_OS == "macos" { "keychain" } else { "files" },
             "devicectl": devicectl,
+            "android_signer_sha256": android_signer,
         },
         "features": features(platform, ctx.client, HOST_OS == "macos", android_app.is_some()),
         "android_app": android_app.map(|app| app.json(&ctx.public_url)),

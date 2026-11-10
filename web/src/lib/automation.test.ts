@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AutomationJob, AutomationState } from "../api/types";
 import {
-  automationSummary, heroLine, intervalLabel, overviewSummary, samePreferences, selectedFeatures, statusLine,
+  appsForDevice, automationSummary, buildsNotice, heroLine, intervalLabel, overviewSummary, samePreferences, selectedFeatures, statusLine,
 } from "./automation";
 
 const job = (over: Partial<AutomationJob> = {}): AutomationJob => ({
@@ -71,5 +71,22 @@ describe("Kiwi Builds settings", () => {
     expect(intervalLabel(1440)).toBe("Every day");
     expect(intervalLabel(180)).toBe("Every 3 hours");
     expect(intervalLabel(150)).toBe("Every 150 minutes");
+  });
+});
+
+describe("appsForDevice", () => {
+  it("lists Android recipes on Android and the iPhone's elsewhere", () => {
+    const apps = [state(), state({ id: "android-youtube", platform: "android" }), state({ id: "x" })];
+    expect(appsForDevice(apps, true).map((a) => a.id)).toEqual(["android-youtube"]);
+    expect(appsForDevice(apps, false).map((a) => a.id)).toEqual(["youtube", "x"]);
+  });
+});
+
+describe("buildsNotice", () => {
+  it("names where the apps come from", () => {
+    expect(buildsNotice(false)).toContain("Apple account");
+    expect(buildsNotice(false)).toContain("one-time setup");
+    expect(buildsNotice(true)).toContain("Google Play");
+    expect(buildsNotice(true)).not.toContain("Mac");
   });
 });

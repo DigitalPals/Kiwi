@@ -237,3 +237,14 @@ export function privacyLabel(key: string): string {
   const core = key.replace(/^NS/, "").replace(/UsageDescription$/, "");
   return core.replace(/([a-z])([A-Z])/g, "$1 $2").trim() || key;
 }
+
+/** A certificate's SHA-256 as Android shows it: "3D:7A:…:99:4A". */
+export function fingerprint(sha256: string): string {
+  return (sha256.toUpperCase().match(/.{1,2}/g) ?? []).join(":");
+}
+
+/** The ends of a SHA-256, enough to recognise it: "3D7A…994A". */
+export function shortFingerprint(sha256: string): string {
+  const hex = sha256.toUpperCase();
+  return hex.length > 8 ? `${hex.slice(0, 4)}…${hex.slice(-4)}` : hex;
+}

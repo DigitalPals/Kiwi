@@ -194,8 +194,12 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
   db.onboarded = options.onboarded ?? true;
   db.foreign_packages = new Set(options.foreign ?? []);
   const client: Client = options.client ?? "web";
-  const host: Host =
-    options.host === "linux" ? { os: "linux", ios_signing: "files", devicectl: false } : { os: "macos", ios_signing: "keychain", devicectl: true };
+  const host: Host = {
+    ...(options.host === "linux"
+      ? { os: "linux", ios_signing: "files", devicectl: false }
+      : { os: "macos", ios_signing: "keychain", devicectl: true }),
+    android_signer_sha256: MOCK_ANDROID_SIGNER,
+  };
   const servesAndroidApp = options.androidApp ?? true;
   const vapid = vapidPublicKey();
   const builds = createBuilds(iso(clock()));

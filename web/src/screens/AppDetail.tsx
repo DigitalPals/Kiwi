@@ -6,7 +6,7 @@ import { ActionButton, ReinstallButton, VersionButton } from "../components/Acti
 import { AppIcon } from "../components/AppIcon";
 import { Icon } from "../components/Icon";
 import { Empty, ErrorState, ExpandableText, LinkCell, Loading, Spinner, VersionChange } from "../components/ui";
-import { canReinstall, replacesLabel, versionChange, type ButtonView } from "../lib/action";
+import { canReinstall, foreignInstallWarning, replacesLabel, versionChange, type ButtonView } from "../lib/action";
 import { BUILD_SOURCE_ID } from "../lib/automation";
 import {
   deviceName,
@@ -22,16 +22,19 @@ import {
   privacyLabel,
   splitBytes,
 } from "../lib/format";
+import { useFeatures } from "../lib/features";
 import { useDebounced, useOnForeground, useResource, useTask } from "../lib/hooks";
 import { goBack, previousTab } from "../lib/router";
-import { BUILDS_PATH, TABS, appPath, buildPath } from "../lib/routes";
+import { BUILDS_PATH, appPath, buildPath, shownTab, tabsFor } from "../lib/routes";
 import { originalNote, searchTerm } from "../lib/store";
 import { appColor, heroColors } from "../lib/tint";
 
 function BackBar({ trailing }: { trailing?: ComponentChildren }) {
-  const tab = previousTab();
-  const label = TABS.find((t) => t.tab === tab)?.label ?? "Browse";
-  const fallback = TABS.find((t) => t.tab === tab)?.path ?? "/";
+  const { features } = useFeatures();
+  const tabs = tabsFor(features);
+  const tab = tabs.find((t) => t.tab === shownTab(previousTab(), tabs));
+  const label = tab?.label ?? "Browse";
+  const fallback = tab?.path ?? "/";
   return (
     <div class="back-bar">
       <button type="button" class="back-button" onClick={() => goBack(fallback)}>
@@ -513,6 +516,7 @@ function Details(props: {
   const replaces = replacesLabel(app.state);
   const change = versionChange(app.state);
   const android = app.platform === "android";
+  const foreign = foreignInstallWarning(app);
 
   return (
     <article class="detail">
@@ -536,6 +540,7 @@ function Details(props: {
               <div>
                 <div class="detail-action">{button}</div>
                 <ActionStatus view={view} platform={app.platform} />
+                {foreign && <p class="action-status warn">{foreign}</p>}
                 <p class="action-status">
                   <button type="button" class="text-button small" onClick={onReinstallEnd}>
                     Cancel Reinstall
@@ -559,6 +564,7 @@ function Details(props: {
                 {/* Why it is unavailable shows once, below. */}
                 {!(view.kind === "disabled" && view.caption === app.unavailable) && <ActionStatus view={view} platform={app.platform} />}
                 {replaces && <p class="action-status">{replaces}</p>}
+                {foreign && <p class="action-status warn">{foreign}</p>}
                 {app.unavailable && <p class="action-status warn">{app.unavailable}</p>}
               </div>
             )}

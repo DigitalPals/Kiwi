@@ -449,8 +449,8 @@ describe("mock api", () => {
 });
 
 describe("mock signing", () => {
-  function signingSetup(signing: "keychain" | "files") {
-    const api = createMockApi(() => Date.parse("2026-10-29T12:00:00Z"), { signing });
+  function signingSetup(signing: "keychain" | "files", device: "ios" | "android" = "ios") {
+    const api = createMockApi(() => Date.parse("2026-10-29T12:00:00Z"), { signing, device });
     return (method: string, path: string, body?: unknown) =>
       api.handle({
         method,
@@ -495,5 +495,19 @@ describe("mock signing", () => {
     expect(uploaded.profiles[0]?.uploaded).toBe(true);
     expect(uploaded.active?.profile_uuid).toBe(uploaded.profiles[0]?.uuid);
     expect(uploaded.error).toBeNull();
+  });
+
+  it("warns about signing problems like the server, except on Android", () => {
+    const signingWarnings = (request: ReturnType<typeof signingSetup>) =>
+      (request("GET", "/api/me").json as Me).warnings.filter((w) => w.link === "/settings").map((w) => [w.level, w.code]);
+    const request = signingSetup("files");
+    expect(signingWarnings(request)).toEqual([]);
+    for (const p of (request("GET", "/api/signing").json as Signing).profiles) request("DELETE", `/api/signing/profiles/${p.uuid}`);
+    expect(signingWarnings(request)).toEqual([["error", "no_profile"]]);
+    request("DELETE", "/api/signing/identity");
+    expect(signingWarnings(request)).toEqual([["error", "no_identity"]]);
+    const android = signingSetup("files", "android");
+    android("DELETE", "/api/signing/identity");
+    expect(signingWarnings(android)).toEqual([]);
   });
 });

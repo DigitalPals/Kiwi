@@ -1595,9 +1595,44 @@ a.cell-link:active,
   overflow-wrap: anywhere;
 }
 
+/* Signing uploads: "Upload .p12…" is a label round a hidden file input. */
+.upload-cell {
+  cursor: pointer;
+}
+
+.upload-cell .cell-action {
+  gap: 7px;
+}
+
+.upload-cell:has(input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.upload-cell:has(input:disabled) {
+  cursor: default;
+}
+
+/* A command in an error message ("convert it with: openssl …"), on its own line. */
+.error-command {
+  display: block;
+  margin-top: 6px;
+  color: var(--label);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  user-select: all;
+  -webkit-user-select: all;
+}
+
+.error-command span {
+  white-space: nowrap;
+}
+
 /* Sources */
 
-.add-source {
+.add-source,
+.sheet-field {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1608,7 +1643,8 @@ a.cell-link:active,
   color: var(--label3);
 }
 
-.add-source input {
+.add-source input,
+.sheet-field input {
   flex: 1;
   min-width: 0;
   height: 100%;
@@ -1620,15 +1656,22 @@ a.cell-link:active,
   font-size: 16px;
 }
 
-.add-source input::placeholder {
+.add-source input::placeholder,
+.sheet-field input::placeholder {
   color: var(--label3);
 }
 
-.add-source-status {
+.add-source-status,
+.sheet-field-status {
   margin: 8px 6px 0;
   color: var(--label2);
   font-size: 13px;
   line-height: 1.4;
+}
+
+.add-source-status.form-error,
+.sheet-field-status.form-error {
+  color: var(--red);
 }
 
 .source-url {

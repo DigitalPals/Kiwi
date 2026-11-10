@@ -2122,7 +2122,7 @@ name = "kiwi-push"
 version = "0.2.0"
 dependencies = [
  "aes-gcm",
- "base64 0.22.1",
+ "base64 0.23.1",
  "getrandom 0.4.3",
  "hkdf 0.13.0",
  "p256 0.14.0",
@@ -2141,7 +2141,7 @@ name = "kiwi-server"
 version = "0.2.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "futures-util",
@@ -2176,7 +2176,7 @@ version = "0.2.0"
 dependencies = [
  "apple-bundles",
  "apple-codesign",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "hex",
  "p12",

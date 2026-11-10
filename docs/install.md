@@ -332,6 +332,11 @@ rollback like `install.sh`, so back up first ([Operations](operations.md#backups
 - The App Store country starts as the region of `LANG` (`LANG=nl_NL.UTF-8`: the
   Netherlands), else the United States; Settings changes it.
 - The image's healthcheck asks `/api/health`; `docker compose ps` shows it.
+- Kiwi Builds runs the Android patcher in a sandbox (Landlock and a seccomp filter,
+  [How the patcher is contained](kiwi-builds.md#how-the-patcher-is-contained)). Docker's
+  default seccomp profile allows both, so the container needs no extra privileges or
+  `security_opt`; don't add `--privileged` for it. On a host kernel older than 6.2 the
+  official Android apps still build, without the sandbox; the build log says so.
 
 ### With the host's Tailscale
 

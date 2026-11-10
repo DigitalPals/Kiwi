@@ -456,10 +456,22 @@ small:
   warning of Android devices and retried after an hour or when the key changes. See
   [android-app.md](android-app.md).
 
-The Android runner needs no Mac-specific tool: it downloads a pinned Java runtime, patcher
-and patch bundle, fetches the original app, verifies the publisher's signature over the
-whole file with its own verifier (`automation/apk.py`, standard library only) and emits
-the same events as `runner.py`. Details are in [kiwi-builds.md](kiwi-builds.md#android-apps).
+The Android runner needs no Mac-specific tool: it downloads a pinned Java runtime, patcher,
+patch bundle and `apksigner`, fetches the original app, verifies the publisher's signature
+over the whole file with its own verifier (`automation/apk.py`, standard library only) and
+emits the same events as `runner.py`. The patcher runs third-party code, so it produces an
+unsigned APK without ever seeing the keystore, and the runner signs it afterwards with
+`apksigner` (v2 + v3). Every tool gets a minimal environment (`sandbox.environment`), never
+the server's. On Linux the patcher and `apksigner` run through `automation/sandbox.py`, a
+wrapper that confines itself and then `execve`s the tool: Landlock (ABI 3+, Linux 6.2;
+reads only the listed tool and input paths, writes only the job's folder; ABI 4+ denies TCP
+bind/connect, ABI 6 scopes signals and abstract Unix sockets), a seccomp filter refusing
+`socket()`, io_uring, bpf, perf events, userfaultfd and keyrings, `no_new_privs` and
+rlimits. A recipe's `sandbox` is `best-effort` (default: run with what the computer
+supports and log what is missing) or `required` (refuse to build without both Landlock and
+the filter; always refused on macOS). The runner is the child subreaper of its tools and
+kills whatever they leave running. Details are in
+[kiwi-builds.md](kiwi-builds.md#android-apps).
 
 ### Kiwi Builds on Linux
 

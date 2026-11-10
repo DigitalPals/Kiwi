@@ -2,6 +2,7 @@
 // action rules in docs/architecture.md closely enough to exercise every UI state.
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import type {
+  AndroidApp,
   AppDetail,
   AppState,
   AppSummary,
@@ -9,7 +10,11 @@ import type {
   AutomationPreferences,
   AutomationState,
   Build,
+  Client,
+  Device,
   DevicesResponse,
+  Feature,
+  Host,
   Installed,
   Me,
   Original,
@@ -54,8 +59,46 @@ export interface MockOptions {
    * through the Mac's stages and publishes a signed release in the Kiwi Builds source.
    */
   builds?: "blocked" | "simulated";
-  /** The device the mock answers as: an iPhone (default) or an Android phone. */
-  device?: Platform;
+  /**
+   * The device the mock answers as: an iPhone (default), an Android phone, or a desktop browser
+   * (nothing tells its platform, so iOS is assumed until one is chosen).
+   */
+  device?: Platform | "desktop";
+  /** false: the device has not been through the first-run setup yet. Default true. */
+  onboarded?: boolean;
+  /** The program asking: the web app (default) or Kiwi's Android app. */
+  client?: Client;
+  /** The computer Kiwi runs on: a Mac (default) or Linux. */
+  host?: "macos" | "linux";
+  /** Whether Kiwi serves its Android app (default true). */
+  androidApp?: boolean;
+  /** Android packages installed with another signature than Kiwi's, e.g. "app.morphe.android.youtube". */
+  foreign?: string[];
+}
+
+/** The certificate the mock's Android builds are signed with (`PUT /api/me/packages`). */
+export const MOCK_ANDROID_SIGNER = "c0ffee".padEnd(64, "0");
+
+const MOCK_ANDROID_APP = {
+  package: "io.github.digitalpals.kiwi",
+  version_name: "1.0.0",
+  version_code: 1,
+  size: 9_400_000,
+};
+
+/** Mirrors kiwi-server's `routes::features`. */
+export function featuresOf(platform: Platform, client: Client, host: Host, androidApp: boolean): Feature[] {
+  const web = client === "web";
+  const ios = platform === "ios";
+  const features: [boolean, Feature][] = [
+    [ios, "ios_apps"],
+    [!ios, "android_apps"],
+    [web && ios, "home_screen_app"],
+    [web, "web_push"],
+    [web && !ios && androidApp, "android_app_offer"],
+    [ios && host.os === "macos", "devicectl"],
+  ];
+  return features.filter(([on]) => on).map(([, feature]) => feature);
 }
 
 export interface MockResponse {
@@ -122,12 +165,46 @@ function newerThanInstalled(target: Release, installed: Installed): boolean {
 }
 
 export function createMockApi(clock: () => number = Date.now, options: MockOptions = {}) {
-  const db: MockDb = createDb(clock(), options.device);
+  const db: MockDb = createDb(clock(), options.device === "android" ? "android" : "ios");
+  if (options.device === "desktop") {
+    Object.assign(db.device, {
+      id: "local:mQ3x7Lr2Vt9KpZ4wYb8N1c",
+      name: "Browser",
+      kind: "browser",
+      tailscale_name: null,
+      os_version: null,
+      os_version_source: null,
+      model: null,
+    });
+    db.detected_platform = null;
+    db.installs = [];
+    db.attempts = [];
+  }
+  db.onboarded = options.onboarded ?? true;
+  db.foreign_packages = new Set(options.foreign ?? []);
+  const client: Client = options.client ?? "web";
+  const host: Host =
+    options.host === "linux" ? { os: "linux", ios_signing: "files", devicectl: false } : { os: "macos", ios_signing: "keychain", devicectl: true };
+  const servesAndroidApp = options.androidApp ?? true;
   const vapid = vapidPublicKey();
   const builds = createBuilds(iso(clock()));
   const simulated = options.builds === "simulated";
 
   // ---- derived state ------------------------------------------------------------------
+
+  /** The device's platform: the owner's choice, else the detected one, else iOS. */
+  function syncPlatform() {
+    const chosen = db.chosen_platform;
+    db.device.platform = chosen ?? db.detected_platform ?? "ios";
+    db.device.platform_source = chosen ? "chosen" : db.detected_platform ? "detected" : "assumed";
+    db.device.detected_platform = db.detected_platform;
+  }
+  syncPlatform();
+
+  const deviceJson = (now: number): Device => ({ ...db.device, client, last_seen: iso(now) });
+
+  const androidApp = (origin: string): AndroidApp | null =>
+    servesAndroidApp ? { ...MOCK_ANDROID_APP, install_url: `${origin}/android/kiwi.apk` } : null;
 
   const platformOf = (app: Pick<MockApp, "platform">): Platform => app.platform ?? "ios";
   const onDevice = (app: MockApp) => platformOf(app) === db.device.platform;
@@ -335,6 +412,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       update_reason: null,
       install_url: null,
       replaces: inst ? null : replaces(app),
+      foreign_install: platformOf(app) === "android" && db.foreign_packages.has(app.bundle_id),
     };
     if (!target) return { ...base, action: inst ? "open" : "unavailable", target: null, build: null };
 
@@ -416,7 +494,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
 
   const visibleApps = () => db.apps.filter((a) => db.sources.some((s) => s.id === a.source_id && s.enabled));
 
-  function me(now: number): Me {
+  function me(now: number, origin: string): Me {
     const updates = visibleApps().filter((a) => isUpdate(a, now)).length;
     const errors = db.sources.filter((s) => s.enabled && s.error);
     const warnings: Warning[] = [];
@@ -440,14 +518,19 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         });
       }
     }
+    const offer = androidApp(origin);
     return {
-      device: { ...db.device, last_seen: iso(now) },
+      device: deviceJson(now),
+      onboarded: db.onboarded,
       server: {
         version: VERSION,
         public_url: "https://mac-studio.example.ts.net",
         team_id: TEAM_ID,
-        devicectl_available: true,
+        devicectl_available: host.devicectl,
       },
+      host,
+      features: featuresOf(db.device.platform, client, host, offer !== null),
+      android_app: offer,
       push: { vapid_public_key: vapid, subscribed: db.subscriptions.size > 0 },
       counts: {
         updates,
@@ -463,8 +546,8 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     };
   }
 
-  function devices(): DevicesResponse {
-    return { devices: [db.device], core_devices: db.core_devices };
+  function devices(now: number): DevicesResponse {
+    return { devices: [deviceJson(now)], core_devices: db.core_devices };
   }
 
   /** Completes simulated installs and builds whose time has come. */
@@ -712,6 +795,15 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     const parts = path.split("/").filter(Boolean).map(decodeURIComponent);
     const ok = (json: unknown, status = 200): MockResponse => ({ status, json });
 
+    if (parts[0] === "android") {
+      if (parts[1] !== "kiwi.apk" || !servesAndroidApp) throw new HttpError(404, "not_found", "Kiwi's Android app is not available here.");
+      return {
+        status: 200,
+        contentType: "application/vnd.android.package-archive",
+        text: "PK mock Kiwi app",
+        headers: { "Content-Disposition": `attachment; filename="Kiwi-${MOCK_ANDROID_APP.version_name}.apk"` },
+      };
+    }
     if (parts[0] === "ota") {
       const attempt = db.attempts.find((a) => a.token === parts[1]) ?? null;
       const build = db.builds.find((b) => b.token === parts[1]);
@@ -843,8 +935,31 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         return ok(automationView(build));
       }
     }
-    if (is("GET", "me")) return ok(me(now));
+    if (is("GET", "me")) return ok(me(now, origin));
+    if (is("PUT", "me", "packages")) {
+      if (db.device.platform !== "android") throw new HttpError(400, "bad_request", "Only Android devices report their installed packages.");
+      if (!Array.isArray(body.packages)) throw new HttpError(400, "bad_request", "Invalid request body: missing field `packages`.");
+      const android = new Set(db.apps.filter((a) => a.platform === "android").map((a) => a.bundle_id));
+      db.foreign_packages = new Set(
+        (body.packages as { package?: unknown; signer_sha256?: unknown }[])
+          .filter((p) => typeof p.package === "string" && android.has(p.package))
+          .filter((p) => !(Array.isArray(p.signer_sha256) && p.signer_sha256.includes(MOCK_ANDROID_SIGNER)))
+          .map((p) => p.package as string),
+      );
+      return { status: 204 };
+    }
     if (is("PATCH", "me")) {
+      if (body.platform !== undefined) {
+        if (body.platform !== null && body.platform !== "ios" && body.platform !== "android") {
+          throw new HttpError(400, "bad_request", "Invalid request body: unknown variant, expected `ios` or `android`.");
+        }
+        db.chosen_platform = body.platform;
+        syncPlatform();
+      }
+      if (body.onboarded !== undefined) {
+        if (typeof body.onboarded !== "boolean") throw new HttpError(400, "bad_request", "Invalid request body: onboarded must be true or false.");
+        db.onboarded = body.onboarded;
+      }
       if (body.name !== undefined) {
         if (typeof body.name !== "string" || !body.name.trim()) throw new HttpError(400, "bad_request", "Name can't be empty.");
         db.device.name = body.name.trim();
@@ -859,7 +974,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         db.device.os_version = body.os_version.trim();
         db.device.os_version_source = "manual";
       }
-      return ok(me(now));
+      return ok(me(now, origin));
     }
 
     if (resource === "sources") {
@@ -1027,14 +1142,14 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     }
     if (is("POST", "push", "test")) return ok({ sent: db.subscriptions.size });
 
-    if (is("GET", "devices")) return ok(devices());
+    if (is("GET", "devices")) return ok(devices(now));
     if (is("POST", "devices", "sync")) {
       const linked = db.device.devicectl;
       if (linked) {
         linked.last_sync_at = iso(now);
         linked.last_error = linked.reachable ? null : "The device is not connected (tunnel unavailable).";
       }
-      return ok(devices());
+      return ok(devices(now));
     }
     if (is("PATCH", "devices", id)) {
       if (id !== db.device.id) throw new HttpError(404, "not_found", "Device not found.");
@@ -1055,7 +1170,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
           };
         }
       }
-      return ok(db.device);
+      return ok(deviceJson(now));
     }
 
     throw new HttpError(404, "not_found", `No route for ${method} ${path}.`);

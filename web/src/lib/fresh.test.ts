@@ -51,6 +51,7 @@ const app = (name: string, date: string | null, state: Partial<AppState> = {}, o
     install_url: null,
     open_url: null,
     replaces: null,
+    foreign_install: false,
     ...state,
   },
   ...over,

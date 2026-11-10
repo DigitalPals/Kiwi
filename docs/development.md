@@ -94,7 +94,11 @@ and update. For a new version to build, release one in the demo's App Store with
 
 The demo answers as an iPhone. Add `KIWI_MOCK_DEVICE=android` and it answers as an Android
 phone: Browse lists Android apps only, and a simulated Android build installs as an APK
-download.
+download. `KIWI_MOCK_DEVICE=desktop` answers as a desktop browser (no platform detected).
+`KIWI_MOCK_ONBOARDED=0` starts before the first-run setup, `KIWI_MOCK_HOST=linux` answers as
+a Kiwi on Linux, `KIWI_MOCK_ANDROID_APP=0` without Kiwi's Android app, and
+`KIWI_MOCK_FOREIGN=app.morphe.android.youtube` with that package installed under another
+signature.
 
 ## Running the server locally
 

@@ -117,6 +117,44 @@ async fn validates_uploads() {
     .await;
     assert_eq!(r.body["error"]["message"], "Request body is too large.");
 
+    // A profile nested deep enough to overflow a stack is refused, and Kiwi keeps running.
+    let deep = kiwi_signer::testutil::nested_profile(60_000);
+    let r = post(
+        "/api/signing/profiles",
+        json!({ "profile": B64.encode(&deep) }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert_eq!(
+        r.body["error"]["message"],
+        "Invalid provisioning profile: nested more than 64 levels deep"
+    );
+    assert_eq!(api.ok("/api/signing").await["backend"], "files");
+
+    // The identity's body is read like other JSON bodies.
+    let r = post(
+        "/api/signing/identity",
+        json!({ "p12": "", "pasword": "x" }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Invalid request body: unknown field `pasword`")
+    );
+    let r = api.send(Method::POST, "/api/signing/identity", None).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert!(
+        r.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing field `p12`"),
+        "{}",
+        r.body
+    );
+
     let r = post(
         "/api/signing/identity",
         json!({ "p12": B64.encode(b"not a p12"), "password": "hunter2" }),
@@ -133,7 +171,7 @@ async fn validates_uploads() {
         .send(Method::DELETE, "/api/signing/identity", None)
         .await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
-    assert!(!k.kiwi.paths.signing.path().join("identity.p12").exists());
+    assert!(!k.kiwi.paths.signing.path().join("identity").exists());
     k.stop().await;
 }
 
@@ -198,10 +236,9 @@ async fn uploads_an_identity_and_profiles_on_files_hosts() {
             .mode()
             & 0o777
     };
-    assert_eq!(
-        (mode(""), mode("identity.p12"), mode("identity.password")),
-        (0o700, 0o600, 0o600)
-    );
+    // The .p12 and its password are kept together in one file.
+    assert_eq!((mode(""), mode("identity")), (0o700, 0o600));
+    assert!(!files.join("identity.p12").exists() && !files.join("identity.password").exists());
 
     let profile = wildcard_profile(Some(identity.certificate.clone()), "2099-01-01T00:00:00Z");
     let r = api
@@ -233,7 +270,7 @@ async fn uploads_an_identity_and_profiles_on_files_hosts() {
         .await;
     assert_eq!(r.status, StatusCode::OK);
     assert_eq!(r.body["identities"], json!([]));
-    assert!(!files.join("identity.p12").exists() && !files.join("identity.password").exists());
+    assert!(!files.join("identity").exists());
     k.stop().await;
 }
 

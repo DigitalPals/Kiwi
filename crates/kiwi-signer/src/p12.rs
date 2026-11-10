@@ -3,8 +3,10 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use apple_codesign::{AppleCodesignError, cryptography::InMemoryPrivateKey};
+use apple_codesign::cryptography::InMemoryPrivateKey;
+use p12::{CertBag, ContentInfo, PFX, SafeBag, SafeBagKind};
 use x509_certificate::{CapturedX509Certificate, Sign};
+use zeroize::Zeroizing;
 
 use crate::{
     Error, Identity, Result,
@@ -44,23 +46,18 @@ pub(crate) fn open(p12: &[u8], password: &str) -> Result<SigningKey> {
         ));
     }
     // The PKCS#12 parser asserts on unexpected structures; this is untrusted input.
-    let (cert, key) = catch_unwind(AssertUnwindSafe(|| {
-        apple_codesign::cryptography::parse_pfx_data(p12, password).map_err(|e| match e {
-            AppleCodesignError::PfxBadPassword => invalid("The password is wrong"),
-            AppleCodesignError::PfxParseError(_) => {
-                invalid("The file is not a .p12 signing identity, or the password is wrong")
-            }
-            other => invalid(format!(
-                "The private key in the .p12 is not supported ({other})"
-            )),
-        })
-    }))
-    .map_err(|_| invalid("Kiwi could not read the .p12 file"))??;
-    if key.public_key_data() != cert.public_key_data() {
-        return Err(invalid(
-            "The private key in the .p12 does not belong to its certificate. Export a single identity: the certificate with its private key.",
-        ));
-    }
+    let (certificates, key) = catch_unwind(AssertUnwindSafe(|| parse_pfx(p12, password)))
+        .map_err(|_| invalid("Kiwi could not read the .p12 file"))??;
+    // The identity's certificate is the one for its key; others are its chain.
+    let public_key = key.public_key_data();
+    let cert = certificates
+        .into_iter()
+        .find(|cert| cert.public_key_data() == public_key)
+        .ok_or_else(|| {
+            invalid(
+                "The private key in the .p12 does not belong to its certificate. Export a single identity: the certificate with its private key.",
+            )
+        })?;
     let der = cert
         .encode_der()
         .map_err(|e| invalid(format!("The certificate could not be read ({e})")))?;
@@ -95,6 +92,84 @@ pub(crate) fn open(p12: &[u8], password: &str) -> Result<SigningKey> {
     })
 }
 
+/// The certificates and the private key in a `.p12`, like rcodesign's `parse_pfx_data`
+/// (which keeps only the last certificate, often a chain certificate rather than the
+/// identity's). The decrypted key and the encoded password are zeroed after use.
+fn parse_pfx(
+    data: &[u8],
+    password: &str,
+) -> Result<(Vec<CapturedX509Certificate>, InMemoryPrivateKey)> {
+    let unreadable =
+        || invalid("The file is not a .p12 signing identity, or the password is wrong");
+    let pfx = PFX::parse(data).map_err(|_| unreadable())?;
+    if !pfx.verify_mac(password) {
+        return Err(invalid("The password is wrong"));
+    }
+    // Keychain Access and OpenSSL put the bags in plain Data holding (encrypted) contents.
+    let ContentInfo::Data(contents) = &pfx.auth_safe else {
+        return Err(unreadable());
+    };
+    let contents = yasna::parse_der(contents, |r| r.collect_sequence_of(ContentInfo::parse))
+        .map_err(|_| unreadable())?;
+    let password = bmp_string(password);
+    let mut certificates = Vec::new();
+    let mut key = None;
+    for content in contents {
+        let bags = match content {
+            ContentInfo::Data(bags) => bags,
+            ContentInfo::EncryptedData(encrypted) => {
+                encrypted.data(&password).ok_or_else(unreadable)?
+            }
+            ContentInfo::OtherContext(_) => return Err(unreadable()),
+        };
+        let bags = yasna::parse_ber(&bags, |r| r.collect_sequence_of(SafeBag::parse))
+            .map_err(|_| unreadable())?;
+        for bag in bags {
+            match bag.bag {
+                SafeBagKind::CertBag(CertBag::X509(der)) => {
+                    certificates.push(CapturedX509Certificate::from_der(der).map_err(|e| {
+                        invalid(format!("A certificate in the .p12 could not be read ({e})"))
+                    })?)
+                }
+                SafeBagKind::Pkcs8ShroudedKeyBag(shrouded) => {
+                    if key.is_some() {
+                        return Err(invalid(
+                            "The .p12 holds more than one private key. Export a single identity: the certificate with its private key.",
+                        ));
+                    }
+                    let der = Zeroizing::new(shrouded.decrypt(&password).ok_or_else(unreadable)?);
+                    key = Some(InMemoryPrivateKey::from_pkcs8_der(&*der).map_err(|e| {
+                        invalid(format!(
+                            "The private key in the .p12 is not supported ({e})"
+                        ))
+                    })?);
+                }
+                SafeBagKind::CertBag(CertBag::SDSI(_)) | SafeBagKind::OtherBagKind(_) => {
+                    return Err(unreadable());
+                }
+            }
+        }
+    }
+    let key = key.ok_or_else(|| {
+        invalid(
+            "The .p12 holds no private key. Export the certificate together with its private key.",
+        )
+    })?;
+    if certificates.is_empty() {
+        return Err(unreadable());
+    }
+    Ok((certificates, key))
+}
+
+/// A PKCS#12 password: UTF-16BE with a terminating zero.
+fn bmp_string(password: &str) -> Zeroizing<Vec<u8>> {
+    let mut bytes = Zeroizing::new(Vec::with_capacity(password.len() * 2 + 2));
+    for unit in password.encode_utf16().chain([0]) {
+        bytes.extend_from_slice(&unit.to_be_bytes());
+    }
+    bytes
+}
+
 /// The OID of the MAC digest of a DER PKCS#12 file; `None` when it can't be read this way
 /// (the PKCS#12 parser then decides).
 fn mac_algorithm(p12: &[u8]) -> Option<&[u8]> {
@@ -124,6 +199,50 @@ mod tests {
             format!("Apple Development: Kiwi Test ({TEAM})")
         );
         assert!(key.identity.expires_at.is_some());
+    }
+
+    #[test]
+    fn finds_the_identity_among_chain_certificates() {
+        use crate::testutil::p12_with_bags;
+        let leaf = signing_identity(TEAM, "secret");
+        // Any other certificate stands in for Apple's intermediate.
+        let intermediate = signing_identity(TEAM, "x").certificate;
+        let chain = [&leaf.certificate[..], &intermediate[..]];
+        for certificates in [chain, [chain[1], chain[0]]] {
+            let p12 = p12_with_bags(&certificates, &[&leaf.private_key], "secret");
+            let key = open(&p12, "secret").unwrap();
+            assert_eq!(key.identity.sha1, sha1_hex(&leaf.certificate));
+            assert_eq!(key.cert.encode_der().unwrap(), leaf.certificate);
+        }
+
+        let err = |p12: &[u8]| open(p12, "secret").err().unwrap().to_string();
+        let lone = p12_with_bags(&[&intermediate], &[&leaf.private_key], "secret");
+        assert!(err(&lone).contains("does not belong to its certificate"));
+        let other = signing_identity(TEAM, "y");
+        let two = p12_with_bags(
+            &[&leaf.certificate, &other.certificate],
+            &[&leaf.private_key, &other.private_key],
+            "secret",
+        );
+        assert!(err(&two).contains("more than one private key"));
+        let keyless = p12_with_bags(&[&leaf.certificate], &[], "secret");
+        assert!(err(&keyless).contains("holds no private key"));
+        let empty = p12_with_bags(&[], &[&leaf.private_key], "secret");
+        assert!(err(&empty).starts_with("The file is not a .p12"));
+    }
+
+    #[test]
+    fn opens_identities_with_any_password() {
+        for password in ["", "pässwörd 🔑", "\"quotes\" \\ and more"] {
+            let test = signing_identity(TEAM, password);
+            let key = open(&test.p12, password).unwrap();
+            assert_eq!(key.identity.sha1, sha1_hex(&test.certificate));
+            assert_eq!(
+                bmp_string(password).len(),
+                password.encode_utf16().count() * 2 + 2
+            );
+        }
+        assert_eq!(*bmp_string("ä🔑"), [0, 0xe4, 0xd8, 0x3d, 0xdd, 0x11, 0, 0]);
     }
 
     #[test]

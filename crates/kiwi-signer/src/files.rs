@@ -1,15 +1,18 @@
 //! Kiwi's own signing files in `<data>/signing`: the uploaded `.p12` identity with its
 //! password (the files backend) and uploaded provisioning profiles (every backend).
 //!
-//! The directory is private (0700), every file in it is 0600 and replaced atomically. The
+//! The directory is private (0700), every file in it is 0600 and replaced atomically (a
+//! new file renamed over the old one); the identity and its password share one file, so
+//! they are always replaced together. Uploads and removals take a lock, one at a time. The
 //! identity and its password are secrets: they are never logged or returned, and the
-//! buffers that held them are zeroed when dropped.
+//! buffers Kiwi read them into are zeroed when dropped.
 
 use std::{
     fs::{self, DirBuilder, File},
     io::{self, Read, Write},
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::{Path, PathBuf},
+    sync::{Mutex, MutexGuard, PoisonError},
 };
 
 use chrono::{DateTime, Utc};
@@ -17,8 +20,15 @@ use zeroize::Zeroizing;
 
 use crate::{Error, Identity, Profile, Result, parse_profile};
 
-const IDENTITY_FILE: &str = "identity.p12";
-const PASSWORD_FILE: &str = "identity.password";
+/// The identity: [`IDENTITY_MAGIC`], the password's length (4 bytes, big-endian), the
+/// password, then the `.p12`.
+const IDENTITY_FILE: &str = "identity";
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const IDENTITY_MAGIC: &[u8] = b"kiwi-identity 1\n";
+/// Where the `.p12` and its password were kept before, in two files: still read when
+/// [`IDENTITY_FILE`] is missing, removed by the next upload or removal.
+const LEGACY_P12_FILE: &str = "identity.p12";
+const LEGACY_PASSWORD_FILE: &str = "identity.password";
 const PROFILES_DIR: &str = "profiles";
 
 /// Largest `.p12` Kiwi accepts; an exported identity is a few KiB.
@@ -27,6 +37,18 @@ pub const MAX_P12_BYTES: usize = 64 * 1024;
 pub const MAX_PROFILE_BYTES: usize = 1024 * 1024;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 const MAX_PASSWORD_BYTES: usize = 1024;
+
+/// Serializes changes to signing files (and reading the identity, which a change may
+/// migrate) across every [`SigningDir`] in the process.
+static FILES_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock() -> MutexGuard<'static, ()> {
+    FILES_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A stored `.p12` and its password.
+#[cfg(not(target_os = "macos"))]
+type StoredIdentity = (Zeroizing<Vec<u8>>, Zeroizing<String>);
 
 /// `<data>/signing`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +102,7 @@ impl SigningDir {
                 profile.name
             )));
         }
+        let _lock = lock();
         self.create_dirs()?;
         let path = self
             .profiles_dir()
@@ -94,6 +117,7 @@ impl SigningDir {
             return Ok(false);
         }
         let path = self.profiles_dir().join(format!("{uuid}.mobileprovision"));
+        let _lock = lock();
         remove(&path)
     }
 
@@ -135,28 +159,84 @@ impl SigningDir {
                     expires.format("%Y-%m-%d")
                 )));
             }
+            let mut contents = Zeroizing::new(Vec::with_capacity(
+                IDENTITY_MAGIC.len() + 4 + password.len() + p12.len(),
+            ));
+            contents.extend_from_slice(IDENTITY_MAGIC);
+            // At most MAX_PASSWORD_BYTES, checked above.
+            contents.extend_from_slice(&(password.len() as u32).to_be_bytes());
+            contents.extend_from_slice(password.as_bytes());
+            contents.extend_from_slice(p12);
+            let _lock = lock();
             self.create_dirs()?;
-            write_private(&self.root.join(PASSWORD_FILE), password.as_bytes())?;
-            write_private(&self.root.join(IDENTITY_FILE), p12)?;
+            write_private(&self.root.join(IDENTITY_FILE), &contents)?;
+            self.remove_legacy_identity()?;
             Ok(key.identity)
         }
     }
 
     /// Deletes the uploaded identity and its password; `false` when there was none.
     pub fn remove_identity(&self) -> Result<bool> {
+        let _lock = lock();
         let removed = remove(&self.root.join(IDENTITY_FILE))?;
-        remove(&self.root.join(PASSWORD_FILE))?;
+        Ok(self.remove_legacy_identity()? || removed)
+    }
+
+    /// Removes the identity files of the earlier layout; `true` when there was a `.p12`.
+    fn remove_legacy_identity(&self) -> Result<bool> {
+        let removed = remove(&self.root.join(LEGACY_P12_FILE))?;
+        remove(&self.root.join(LEGACY_PASSWORD_FILE))?;
         Ok(removed)
     }
 
     /// The stored identity with its key, for signing.
     #[cfg(not(target_os = "macos"))]
     pub(crate) fn signing_key(&self) -> Result<Option<crate::p12::SigningKey>> {
-        let Some(p12) = read_secret(&self.root.join(IDENTITY_FILE), MAX_P12_BYTES)? else {
+        let Some((p12, password)) = self.read_identity()? else {
             return Ok(None);
         };
-        let mut password =
-            read_secret(&self.root.join(PASSWORD_FILE), MAX_PASSWORD_BYTES)?.unwrap_or_default();
+        crate::p12::open(&p12, &password).map(Some).map_err(|e| {
+            Error::InvalidIdentity(format!(
+                "The uploaded signing identity can't be opened ({e}). Upload it again."
+            ))
+        })
+    }
+
+    /// The stored `.p12` and its password, from either layout.
+    #[cfg(not(target_os = "macos"))]
+    fn read_identity(&self) -> Result<Option<StoredIdentity>> {
+        let damaged = || {
+            Error::InvalidIdentity(
+                "The stored signing identity is damaged. Upload the identity again.".into(),
+            )
+        };
+        let _lock = lock();
+        let max = IDENTITY_MAGIC.len() + 4 + MAX_PASSWORD_BYTES + MAX_P12_BYTES;
+        let (p12, mut password) = match read_secret(&self.root.join(IDENTITY_FILE), max)? {
+            Some(contents) => {
+                let rest = contents.strip_prefix(IDENTITY_MAGIC).ok_or_else(damaged)?;
+                let (len, rest) = rest.split_first_chunk::<4>().ok_or_else(damaged)?;
+                let len = u32::from_be_bytes(*len) as usize;
+                if len > MAX_PASSWORD_BYTES || len > rest.len() {
+                    return Err(damaged());
+                }
+                let (password, p12) = rest.split_at(len);
+                (
+                    Zeroizing::new(p12.to_vec()),
+                    Zeroizing::new(password.to_vec()),
+                )
+            }
+            None => {
+                let Some(p12) = read_secret(&self.root.join(LEGACY_P12_FILE), MAX_P12_BYTES)?
+                else {
+                    return Ok(None);
+                };
+                let password =
+                    read_secret(&self.root.join(LEGACY_PASSWORD_FILE), MAX_PASSWORD_BYTES)?
+                        .unwrap_or_default();
+                (p12, password)
+            }
+        };
         let password = String::from_utf8(std::mem::take(&mut *password)).map_err(|e| {
             zeroize::Zeroize::zeroize(&mut e.into_bytes());
             Error::InvalidIdentity(
@@ -164,12 +244,7 @@ impl SigningDir {
                     .into(),
             )
         })?;
-        let password = Zeroizing::new(password);
-        crate::p12::open(&p12, &password).map(Some).map_err(|e| {
-            Error::InvalidIdentity(format!(
-                "The uploaded signing identity can't be opened ({e}). Upload it again."
-            ))
-        })
+        Ok(Some((p12, Zeroizing::new(password))))
     }
 
     /// Creates `<data>/signing` and its `profiles` directory, private to Kiwi's user.
@@ -312,6 +387,13 @@ mod tests {
             ..ProfileSpec::wildcard()
         };
         assert_eq!(err(&sneaky), "The provisioning profile has an invalid UUID");
+        let deep = dir
+            .add_profile(&crate::testutil::nested_profile(60_000), now())
+            .unwrap_err();
+        assert!(
+            deep.to_string()
+                .ends_with("nested more than 64 levels deep")
+        );
         let garbage = dir.add_profile(b"not a profile", now()).unwrap_err();
         assert!(matches!(garbage, Error::InvalidProfile(_)), "{garbage}");
         let huge = dir
@@ -327,6 +409,121 @@ mod tests {
         let dir = SigningDir::new(tmp.path().join("signing"));
         assert_eq!(dir.identity().unwrap(), None);
         assert!(!dir.remove_identity().unwrap());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn stores_the_identity_with_its_password_in_one_file() {
+        use crate::testutil::{TEAM, p12_with_bags, signing_identity};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = SigningDir::new(tmp.path().join("signing"));
+        let test = signing_identity(TEAM, "correct horse");
+        let identity = dir.set_identity(&test.p12, "correct horse", now()).unwrap();
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(names, [IDENTITY_FILE, PROFILES_DIR]);
+        assert_eq!(mode(&dir.path().join(IDENTITY_FILE)), 0o600);
+        assert_eq!(dir.identity().unwrap(), Some(identity.clone()));
+
+        // An identity exported with its chain, the chain first.
+        let chain = signing_identity(TEAM, "x").certificate;
+        let p12 = p12_with_bags(&[&chain, &test.certificate], &[&test.private_key], "pw");
+        assert_eq!(dir.set_identity(&p12, "pw", now()).unwrap(), identity);
+        assert_eq!(dir.identity().unwrap(), Some(identity));
+
+        // A damaged file is reported, not mistaken for no identity.
+        let path = dir.path().join(IDENTITY_FILE);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[IDENTITY_MAGIC.len()..IDENTITY_MAGIC.len() + 4]
+            .copy_from_slice(&u32::MAX.to_be_bytes());
+        fs::write(&path, &bytes).unwrap();
+        let err = dir.identity().unwrap_err().to_string();
+        assert!(err.contains("is damaged"), "{err}");
+        fs::write(&path, b"kiwi").unwrap();
+        assert!(dir.identity().is_err());
+
+        assert!(dir.remove_identity().unwrap());
+        assert!(!path.exists());
+        assert_eq!(dir.identity().unwrap(), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn reads_and_replaces_the_earlier_two_file_layout() {
+        use crate::testutil::{TEAM, signing_identity};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = SigningDir::new(tmp.path().join("signing"));
+        dir.create_dirs().unwrap();
+        let legacy = |test: &crate::testutil::TestIdentity, password: &str| {
+            write_private(&dir.path().join(LEGACY_P12_FILE), &test.p12).unwrap();
+            write_private(&dir.path().join(LEGACY_PASSWORD_FILE), password.as_bytes()).unwrap();
+        };
+        let old = signing_identity(TEAM, "old");
+        legacy(&old, "old");
+        let identity = dir.identity().unwrap().unwrap();
+        assert_eq!(identity.sha1, crate::cert::sha1_hex(&old.certificate));
+
+        // The next upload writes the new file and removes the old ones.
+        let new = signing_identity(TEAM, "new");
+        dir.set_identity(&new.p12, "new", now()).unwrap();
+        assert!(!dir.path().join(LEGACY_P12_FILE).exists());
+        assert!(!dir.path().join(LEGACY_PASSWORD_FILE).exists());
+        assert_eq!(
+            dir.identity().unwrap().unwrap().sha1,
+            crate::cert::sha1_hex(&new.certificate)
+        );
+
+        // Removal removes either layout.
+        legacy(&old, "old");
+        assert!(dir.remove_identity().unwrap());
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "only profiles/ is left"
+        );
+        legacy(&old, "old");
+        assert!(dir.remove_identity().unwrap());
+        assert!(!dir.remove_identity().unwrap());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn readers_never_see_half_an_upload() {
+        use crate::testutil::{TEAM, signing_identity};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = SigningDir::new(tmp.path().join("signing"));
+        let identities = [signing_identity(TEAM, "one"), signing_identity(TEAM, "two")];
+        let passwords = ["one", "two"];
+        let sha1s: Vec<_> = identities
+            .iter()
+            .map(|i| crate::cert::sha1_hex(&i.certificate))
+            .collect();
+        dir.set_identity(&identities[0].p12, passwords[0], now())
+            .unwrap();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            for writer in 0..2 {
+                let (dir, identities, done) = (&dir, &identities, &done);
+                scope.spawn(move || {
+                    for round in 0..20 {
+                        let i = (writer + round) % 2;
+                        dir.set_identity(&identities[i].p12, passwords[i], now())
+                            .unwrap();
+                    }
+                    done.store(true, std::sync::atomic::Ordering::Relaxed);
+                });
+            }
+            let mut reads = 0;
+            while !done.load(std::sync::atomic::Ordering::Relaxed) || reads < 10 {
+                let identity = dir.identity().unwrap().unwrap();
+                assert!(sha1s.contains(&identity.sha1));
+                reads += 1;
+            }
+        });
     }
 
     #[cfg(target_os = "macos")]

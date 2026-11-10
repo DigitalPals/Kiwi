@@ -8,7 +8,7 @@ license.workspace = true
 
 [features]
 # Test identities, profiles and IPAs for other crates' tests.
-test-support = ["dep:p12", "dep:semver"]
+test-support = ["dep:semver"]
 
 [dependencies]
 base64.workspace = true
@@ -28,14 +28,15 @@ zip.workspace = true
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 apple-bundles = "0.21"
 apple-codesign = { version = "0.29", default-features = false }
-p12 = { version = "0.6", optional = true }
+# PKCS#12, as apple-codesign reads it (Kiwi keeps the chain to find the identity's certificate).
+p12 = "0.6"
 regex = "1"
 semver = { version = "1", optional = true }
 x509-certificate = "0.24"
+yasna = "0.5"
 
 [dev-dependencies]
 serde_json.workspace = true
 
 [target.'cfg(not(target_os = "macos"))'.dev-dependencies]
-p12 = "0.6"
 semver = "1"

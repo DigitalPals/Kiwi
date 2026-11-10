@@ -57,6 +57,17 @@ pub fn cms(content: &[u8]) -> Vec<u8> {
     cms_with_content(&tlv(OCTET_STRING, content))
 }
 
+/// A provisioning profile whose entitlements nest `levels` arrays deep: deserializing it
+/// recursively overflows the stack. 60 000 levels make about 900 KB, within the upload limit.
+pub fn nested_profile(levels: usize) -> Vec<u8> {
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>UUID</key><string>deep</string><key>Entitlements</key><dict><key>deep</key>{}{}</dict></dict></plist>",
+        "<array>".repeat(levels),
+        "</array>".repeat(levels)
+    );
+    cms(xml.as_bytes())
+}
+
 fn name_attribute(oid: &[u8], tag: u8, value: &str) -> Vec<u8> {
     tlv(
         SET,
@@ -428,6 +439,58 @@ pub fn p12_with(certificate: &[u8], private_key: &[u8], password: &str) -> Vec<u
     p12::PFX::new(certificate, private_key, None, password, "Kiwi Test")
         .unwrap()
         .to_der()
+}
+
+/// A `.p12` with `certificates` in this order and the private `keys` (legacy encryption,
+/// SHA-1 MAC), like an identity exported with its certificate chain.
+#[cfg(not(target_os = "macos"))]
+pub fn p12_with_bags(certificates: &[&[u8]], keys: &[&[u8]], password: &str) -> Vec<u8> {
+    use p12::{CertBag, ContentInfo, EncryptedData, MacData, PFX, SafeBag, SafeBagKind};
+    let bmp: Vec<u8> = password
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_be_bytes)
+        .collect();
+    // The p12 crate encrypts a key only while it builds a whole file: take the bag from one.
+    let key_bags: Vec<SafeBag> = keys
+        .iter()
+        .map(|key| {
+            PFX::new(&[], key, None, password, "Kiwi Test")
+                .unwrap()
+                .bags(password)
+                .unwrap()
+                .into_iter()
+                .find(|bag| matches!(bag.bag, SafeBagKind::Pkcs8ShroudedKeyBag(_)))
+                .unwrap()
+        })
+        .collect();
+    let cert_bags: Vec<SafeBag> = certificates
+        .iter()
+        .map(|der| SafeBag {
+            bag: SafeBagKind::CertBag(CertBag::X509(der.to_vec())),
+            attributes: Vec::new(),
+        })
+        .collect();
+    let contents = yasna::construct_der(|w| {
+        w.write_sequence_of(|w| {
+            ContentInfo::EncryptedData(EncryptedData::from_safe_bags(&cert_bags, &bmp).unwrap())
+                .write(w.next());
+            let keys = yasna::construct_der(|w| {
+                w.write_sequence_of(|w| {
+                    for bag in &key_bags {
+                        bag.write(w.next());
+                    }
+                })
+            });
+            ContentInfo::Data(keys).write(w.next());
+        })
+    });
+    PFX {
+        version: 3,
+        mac_data: Some(MacData::new(&contents, &bmp)),
+        auth_safe: ContentInfo::Data(contents),
+    }
+    .to_der()
 }
 
 /// A structurally complete arm64 iOS Mach-O (segments, `__LINKEDIT`, build version) that

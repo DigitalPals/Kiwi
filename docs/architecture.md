@@ -108,15 +108,23 @@ Two backends sign (`Backend`, `Signing.backend` in the API):
 - **`keychain`** (macOS): identities come from the login keychain (`security find-identity`
   / `find-certificate`); `codesign` signs and verifies and `/usr/bin/zip` packages.
 - **`files`** (every other system): the identity is a `.p12` uploaded to
-  `<data>/signing/identity.p12` with its password in `identity.password` (both 0600, the
-  directory 0700, replaced atomically, never logged or returned; the buffers that held them
-  are zeroed). rcodesign's library ([`apple-codesign`](https://github.com/indygreg/apple-platform-rs),
-  MPL-2.0, default features off, a dependency only on non-macOS targets) signs; Kiwi
-  verifies and packages in Rust. A `.p12` is accepted when it opens with the password (the
-  legacy PKCS#12 encryption Keychain Access exports; an AES-encrypted file from OpenSSL 3
-  is refused with advice how to convert it), holds a certificate whose Extended Key Usage
-  includes code signing, whose subject has a team id (OU) and that has not expired, and the
-  private key (RSA, P-256 or Ed25519) that belongs to it.
+  `<data>/signing/identity`, stored together with its password in that one file (0600, the
+  directory 0700). It is written to a new file that is renamed over the old one, so the
+  `.p12` and its password are always replaced together, and uploads and removals take a
+  lock; the earlier layout (`identity.p12` and `identity.password`) is still read and is
+  removed by the next upload or removal. Neither is logged or returned. The buffers Kiwi
+  holds them in (the request body, the parsed strings, the decoded `.p12`, the stored
+  file's contents, the decrypted key while it is read) are zeroed when dropped; copies
+  made inside the HTTP server, the JSON parser (for a password with escaped characters)
+  and the PKCS#12 and key libraries are out of its reach. rcodesign's library
+  ([`apple-codesign`](https://github.com/indygreg/apple-platform-rs), MPL-2.0, default
+  features off, a dependency only on non-macOS targets) signs; Kiwi reads the `.p12`
+  (with the `p12` crate, as rcodesign does), verifies and packages in Rust. A `.p12` is
+  accepted when it opens with the password (the legacy PKCS#12 encryption Keychain Access
+  exports; an AES-encrypted file from OpenSSL 3 is refused with advice how to convert it),
+  holds one private key (RSA, P-256 or Ed25519) and the certificate for it (further
+  certificates, such as Apple's intermediate, are ignored), and that certificate's Extended
+  Key Usage includes code signing, its subject has a team id (OU) and it has not expired.
 
 Profiles uploaded to `<data>/signing/profiles/<uuid>.mobileprovision` are scanned on every
 host, before Xcode's folders (`~/Library/Developer/Xcode/UserData/Provisioning Profiles`,
@@ -152,14 +160,20 @@ Signing algorithm (shared; the backends differ only in signing, verifying and pa
    and with DER entitlements next to the XML ones:
    - `keychain`: `codesign --force --timestamp=none --generate-entitlement-der -s <sha1>
      [--entitlements f] <path>`.
-   - `files`: a dylib is signed as a Mach-O. A bundle is sealed like `codesign` seals an
-     iOS bundle: every file except the main executable goes into
-     `_CodeSignature/CodeResources` with Apple's rules for bundles without a `Resources`
-     directory (code signed in an earlier step is sealed as it is, nested code as plain
-     files, other Mach-O files are signed on the way), then the main executable is signed
-     with its bundle id, the entitlements and digests of `Info.plist` and that file. The
-     CMS signature carries the certificate and, for an Apple-issued certificate, Apple's
-     intermediate and root; the code directory carries the team id.
+   - `files`: like `codesign --force`, nothing is taken from an existing signature (its
+     identifier, flags, entitlements and launch constraints are never parsed). A dylib is
+     signed as its file name (`Lib.dylib` as `Lib`, binding an Info.plist linked into it),
+     without entitlements. A bundle is sealed like `codesign` seals an iOS bundle: every
+     file except the main executable goes into `_CodeSignature/CodeResources` with Apple's
+     rules for bundles without a `Resources` directory, by its hash as it is (shallow: nested
+     code signed in an earlier step keeps its signature, and other Mach-O files such as
+     object files or dSYM contents are data), then the main executable is signed with its
+     bundle id, digests of `Info.plist` and that file, and for apps and extensions their
+     entitlements (frameworks get none). Code directories use SHA-256, with a SHA-1 one
+     first when the binary targets an OS without SHA-256 support or names none. The CMS
+     signature carries the certificate and, for an Apple-issued certificate, Apple's
+     intermediate and root; the code directory carries the team id. Signing runs on a
+     thread of its own with a 64 MiB stack.
 7. Set directories and executables to 0755 and other files to 0644, verify, then zip
    `Payload` into `output_ipa` (via `<output>.partial`, symlinks preserved):
    - `keychain`: `codesign --verify --deep --strict` on the main app; `/usr/bin/zip -qry`.
@@ -230,7 +244,7 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
 - SQLite (`rusqlite`, bundled) at `<data>/kiwi.db`, migrations embedded and versioned.
 - Data layout: `downloads/<sha256>.ipa` (content addressed), `builds/<build_id>/<Name>.ipa`,
   `work/` (temporary, cleared at start), `icons/<sha256(url)>.png`, `vapid.json` (0600),
-  `signing/` (0700: `identity.p12` and `identity.password`, 0600, on `files` hosts;
+  `signing/` (0700: `identity`, the `.p12` with its password, 0600, on `files` hosts;
   uploaded `profiles/<uuid>.mobileprovision` on every host),
   `automation/` (Kiwi Builds; `automation/android/signer.json` names the certificate of the
   Android signing key), `android-app/` (Kiwi's Android app, `kiwi.apk` + `kiwi.json`, written
@@ -510,10 +524,13 @@ without one, the same bundle id).
   finished build fails (e.g. a full disk), it is retried once, then the build is marked
   failed and retryable with a minimal update, so it never stays active until a restart.
 - Untrusted input is bounded before it is parsed: JSON5 feeds nested deeper than 128
-  levels are rejected, and plists from an IPA (Info.plist, entitlements; at most 4 MiB)
-  deeper than 64 levels or with more than a million values, so a hostile file cannot
-  overflow the stack. Downloads may take 20 minutes plus 1 s per 128 KiB of their size
-  (stalls fail after 30 s without data) and are flushed to disk before they are cached.
+  levels are rejected, and plists from an IPA (Info.plist, entitlements; at most 4 MiB) or
+  a provisioning profile (uploaded or in Xcode's folders) deeper than 64 levels or with
+  more than a million values, so a hostile file cannot overflow the stack. Of the code
+  signatures already in an IPA, Kiwi reads only the entitlements of apps and extensions,
+  checked the same way. Signing uploads are checked on blocking threads. Downloads may
+  take 20 minutes plus 1 s per 128 KiB of their size (stalls fail after 30 s without data)
+  and are flushed to disk before they are cached.
 - A cached download is reused only while its SHA-256 matches its name; a damaged one is
   deleted and downloaded again, as is one that `sign_ipa` cannot extract.
 - External tools have deadlines: `codesign` 10 minutes per call (a keychain prompt blocks

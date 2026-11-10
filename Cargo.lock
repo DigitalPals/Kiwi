@@ -2185,6 +2185,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "x509-certificate",
+ "yasna",
  "zeroize",
  "zip 8.6.0",
 ]

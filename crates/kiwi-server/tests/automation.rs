@@ -933,3 +933,81 @@ async fn android_builds_must_be_the_app_in_the_recipe() {
     assert!(failed["published"].is_null());
     assert!(k.kiwi.db.builds().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn kiwis_android_app_reports_which_packages_are_installed() {
+    const PACKAGE: &str = "app.morphe.android.youtube";
+    const KIWI_KEY: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const PLAY_KEY: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let k = TestKiwi::start_building().await;
+    fake_runner(&k, false);
+    fake_android_runner(&k, PACKAGE);
+    k.devices.add_android(ANDROID_IP);
+    let phone = k.phone();
+    let initial = phone.ok("/api/automation/android-youtube").await;
+    phone
+        .post(
+            "/api/automation/android-youtube/add",
+            initial["preferences"].clone(),
+        )
+        .await;
+    assert_eq!(
+        finished_app(&k, "android-youtube").await["jobs"][0]["status"],
+        "ready"
+    );
+    let app = Api {
+        user_agent: Some("Kiwi-Android/1.0.0 (1; Android 15; SDK 35; Google Pixel 9a)".into()),
+        ..k.android(ANDROID_IP)
+    };
+    let report = |signer: &str| {
+        json!({ "packages": [
+            { "package": PACKAGE, "version_name": "21.30.216", "version_code": 1561187872,
+              "signer_sha256": [signer], "installer": "com.android.packageinstaller" },
+            { "package": "com.example.unrelated", "version_name": "1.0", "version_code": 1,
+              "signer_sha256": [PLAY_KEY], "installer": null },
+        ]})
+    };
+    let put = |body: Value| {
+        let app = app.clone();
+        async move {
+            let r = app.send(Method::PUT, "/api/me/packages", Some(body)).await;
+            assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+        }
+    };
+    let path = format!("/api/apps/kiwi-youtube/{PACKAGE}");
+
+    // Until Kiwi knows its own Android key, it can't tell whose a package is.
+    put(report(PLAY_KEY)).await;
+    let state = app.ok(&path).await["state"].clone();
+    assert_eq!(state["foreign_install"], false);
+    assert!(state["installed"].is_null());
+
+    // The runner records the key's certificate whenever it loads the key.
+    let signer = k.dir.path().join("data/automation/android/signer.json");
+    std::fs::create_dir_all(signer.parent().unwrap()).unwrap();
+    std::fs::write(&signer, json!({ "sha256": KIWI_KEY }).to_string()).unwrap();
+
+    // The same package from another publisher: Kiwi's build can't be installed over it.
+    put(report(PLAY_KEY)).await;
+    let state = app.ok(&path).await["state"].clone();
+    assert_eq!(state["foreign_install"], true, "{state}");
+    assert!(state["installed"].is_null());
+    assert_eq!(state["action"], "install");
+
+    // Kiwi's build, installed outside Kiwi's download: a verified install.
+    put(report(&KIWI_KEY.to_uppercase())).await;
+    let state = app.ok(&path).await["state"].clone();
+    assert_eq!(state["foreign_install"], false);
+    assert_eq!(state["action"], "open", "{state}");
+    assert_eq!(state["installed"]["verified"], true);
+    assert_eq!(state["installed"]["origin"], "device");
+    assert_eq!(state["installed"]["version"], "21.30.216");
+    assert_eq!(app.ok("/api/me").await["counts"]["installed"], 1);
+
+    // Uninstalled on the phone: the install is marked removed.
+    put(json!({ "packages": [] })).await;
+    let state = app.ok(&path).await["state"].clone();
+    assert!(state["installed"].is_null(), "{state}");
+    assert!(app.ok("/api/library").await.as_array().unwrap().is_empty());
+    assert_eq!(app.ok("/api/me").await["counts"]["installed"], 0);
+}

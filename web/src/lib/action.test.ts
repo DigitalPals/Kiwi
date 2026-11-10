@@ -69,6 +69,7 @@ const state = (over: Partial<AppState> = {}): AppState => ({
   install_url: null,
   open_url: null,
   replaces: null,
+  foreign_install: false,
   ...over,
 });
 

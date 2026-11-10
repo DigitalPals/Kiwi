@@ -140,7 +140,11 @@ but does not answer is an error, not a reason to try the CLI, which would use th
 
 User agents: Safari `Version/27.0` gives an approximate OS version (the `iPhone OS 18_6` token is
 frozen and is ignored); the OTA installer (`... iOS/27.0.1 model/iPhone19,4 build/24A434 ...`)
-gives the exact OS version and model.
+gives the exact OS version and model; Kiwi's Android app
+(`Kiwi-Android/1.2.0 (12; Android 15; SDK 35; Google Pixel 9a)`) the Android release.
+`user_agent_platform` tells the platform of a client also when it reports no version (Chrome
+on iOS, the Home Screen app); desktop browsers, an iPad asking for desktop sites among them,
+tell none.
 
 ### kiwi-push
 
@@ -166,7 +170,9 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
 - SQLite (`rusqlite`, bundled) at `<data>/kiwi.db`, migrations embedded and versioned.
 - Data layout: `downloads/<sha256>.ipa` (content addressed), `builds/<build_id>/<Name>.ipa`,
   `work/` (temporary, cleared at start), `icons/<sha256(url)>.png`, `vapid.json` (0600),
-  `automation/` (Kiwi Builds), `kiwi.lock`.
+  `automation/` (Kiwi Builds; `automation/android/signer.json` names the certificate of the
+  Android signing key), `android-app/` (Kiwi's Android app, `kiwi.apk` + `kiwi.json`, put
+  there by whatever provides it), `kiwi.lock`.
 - At start Kiwi takes an exclusive lock on `<data>/kiwi.lock` before any startup cleanup
   (clearing `work/`, failing interrupted builds); a second instance exits with an error
   instead of damaging the running one.
@@ -187,10 +193,15 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
   App Store app has the bundle id), name, developer, version, released_at, icon_url,
   store_url, checked_at.
 - `devices`: id (`ts:<StableID>` or `local:<random>`), kind, name, tailscale_name,
-  os_version + os_version_source (`devicectl` > `installer` > `manual` > `safari`), model,
-  devicectl_id (link to a paired CoreDevice), udid, person_id (the device's Tailscale user:
-  their login, or `node:<StableID>`; `NULL` for browser devices on the Mac and devices from
-  before Kiwi recorded users), first_seen, last_seen.
+  os_version + os_version_source (`devicectl` > `installer` > `manual` > `android_app` >
+  `safari` = `android`), model, devicectl_id (link to a paired CoreDevice), udid, person_id
+  (the device's Tailscale user: their login, or `node:<StableID>`; `NULL` for browser
+  devices on the Mac and devices from before Kiwi recorded users), platform (`ios` |
+  `android`, only the owner's choice), detected_platform (the first platform Tailscale or a
+  User-Agent reported), onboarded_at (first-run setup done), first_seen, last_seen.
+- `foreign_packages`: per device, the packages of Kiwi's Android apps its Android app
+  reported installed with another signature (device_id, package, seen_at); each report
+  replaces them.
 - `builds`: device-independent signed artifacts. id, source_id, bundle_id (original),
   version, build, release JSON, artifact_sha256, signed_bundle_id, url_scheme,
   identity_sha1, profile_uuids, expires_at, ipa_path, size, status
@@ -214,7 +225,10 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
   already had apps added keeps it on.
 - `meta`: also `owner_login` (the last owner Tailscale reported).
 - Schema 5 dropped the family's `people`, `app_access`, `registrations`, `enrollments` and
-  `builds.devices`.
+  `builds.devices`. Schema 6 added the device platform columns: detected_platform from the
+  model (`Android`, `iPhone…`/`iPad…`/`iPod…`) or an iOS OS version source, and
+  onboarded_at (= first_seen) for devices with an install, an attempt or a push
+  subscription, so devices in use are not sent through the first-run setup.
 
 ### Device identification
 
@@ -228,7 +242,23 @@ way for 15 s without running whois again. Otherwise use (and set) a `kiwi_device
 cookie (`local:<random>`); the web app sends `/api/me` first so concurrent first requests
 do not each create one, and cleanup deletes `local:` devices without installs, attempts or
 push subscriptions that were not seen for 24 h. Update `last_seen`, the Tailscale name and,
-from the User-Agent, the OS version (never downgrading the source priority).
+from the User-Agent, the OS version (never downgrading the source priority). Kiwi's
+Android app is identified the same way, so it and the phone's browser are one device;
+`Ctx.client` tells them apart by the User-Agent.
+
+### Device platforms
+
+A device's platform (`devices::platform`) is the owner's choice (`devices.platform`), else
+the first platform Tailscale (the node's OS: `iOS`, `android`) or a User-Agent
+(`kiwi_device::user_agent_platform`) reported (`detected_platform`, written only while
+empty: an iPhone never turns into an Android device, and an Android client's OS version
+is ignored on an iPhone and the other way round), else iOS. Desktop browsers report
+nothing; the owner chooses in the first-run setup. The device profile
+(`devices::device_profile`) carries the platform, so Browse, compatibility, `prepare`, the
+warnings, the scheduler's updates and notifications all follow it; an unknown OS version
+(an empty one in the profile) only checks the platform. `/api/me` also reports
+`features`, what the clients show on the device (`routes::features`), and `host`, the
+computer Kiwi runs on (`ios_signing` is `keychain` on macOS, `files` elsewhere).
 
 Device rows are changed with targeted updates of the columns each operation owns (request
 bookkeeping, rename, manual OS version, link/unlink, devicectl sync), never by writing back
@@ -256,11 +286,12 @@ Kiwi installs on Android only what Kiwi Builds made: a patched app the Android r
 to it (no `codesign`, profiles, expiry, manifest or URL scheme), and the model is kept
 small:
 
-- **Which device.** `devices.model` is `Android` (`kiwi_device::ANDROID_MODEL`) for a
-  device that Tailscale reports as Android or whose browser sends an Android User-Agent,
-  set only while no model is recorded. Chrome's User-Agent hides the OS version
-  ("Android 10; K"), so `os_version` usually stays empty; Firefox reports it (source
-  `android`, the priority of `safari`). The device profile's platform is `android`.
+- **Which device.** One whose platform is `android` (see "Device platforms").
+  `devices.model` is `Android` (`kiwi_device::ANDROID_MODEL`) for a device detected as
+  Android, set only while no model is recorded. Chrome's User-Agent hides the OS version
+  ("Android 10; K"), so a browser alone usually leaves `os_version` empty; Firefox reports
+  it (source `android`, the priority of `safari`), Kiwi's Android app the exact release
+  (source `android_app`). The device profile's platform is `android`.
 - **Which apps.** A release names its platforms; one that names none is an iOS release.
   Kiwi Builds publishes Android releases with platform `Android`, no `min_os` and the
   artifact `automation/artifacts/<sha256>.apk`. Browse leaves out the apps of the other
@@ -276,6 +307,21 @@ small:
   so the completed download is the install, as for an IPA. There is no `open_url`.
 - **Updates.** A newer revision is an `update` like any other; Android accepts it over the
   installed app because every build carries the same signature.
+- **What is installed.** Kiwi's Android app reports the phone's packages
+  (`PUT /api/me/packages`). `android::reconcile_packages` turns the report into the
+  `DeviceApp`s of a devicectl sync and reuses `devices::reconcile`: packages of Kiwi Builds'
+  Android apps signed with Kiwi's key are verified installs (or `device` installs), missing
+  ones are marked removed (after the same 10-minute grace for a fresh download), and the
+  ones signed with another key are saved in `foreign_packages` (`AppState.foreign_install`).
+  Kiwi's key is the certificate SHA-256 the Android runner writes to
+  `automation/android/signer.json` whenever it loads the key (before that, the `signer`
+  of a published build's provenance); without either only removals are recorded.
+- **Kiwi's own app.** `android::AndroidAppCache` reads `android-app/kiwi.json`, checks
+  the package, version, size and SHA-256 of `kiwi.apk` against it (again only when either
+  file's size or modification time changes) and offers it as `Me.android_app`;
+  `/android/kiwi.apk` serves it to the owner's devices with `Range` support (the OTA
+  routes' `ota::send_file`). The route wins over the web app's files, and missing `.apk`
+  paths are 404s rather than the app shell.
 
 The Android runner needs no Mac-specific tool: it downloads a pinned Java runtime, patcher
 and patch bundle, fetches the original app, verifies the publisher's signature over the

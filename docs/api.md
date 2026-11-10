@@ -6,8 +6,8 @@ RFC 3339 strings in UTC. All `/api` responses are `application/json` with
 
 ## Conventions
 
-- Mutating requests (`POST`, `PATCH`, `DELETE`) must send `X-Kiwi: 1`; requests with a
-  body must send `Content-Type: application/json`. Otherwise `403 csrf`. The web app
+- Mutating requests (`POST`, `PUT`, `PATCH`, `DELETE`) must send `X-Kiwi: 1`; requests with
+  a body must send `Content-Type: application/json`. Otherwise `403 csrf`. The web app
   sends `{}` for POST/PATCH without parameters and no body for DELETE (it still sends
   both headers); the server accepts empty and `{}` bodies alike.
 - Errors: HTTP 4xx/5xx with `{ "error": { "code": string, "message": string } }`.
@@ -32,6 +32,10 @@ RFC 3339 strings in UTC. All `/api` responses are `application/json` with
 - Path parameters are URL-encoded. `bundle_id` contains dots; it is one path segment.
 - Only the owner may use Kiwi (see "The owner" below): every endpoint but `/api/health`
   answers other people's devices `403 not_owner`.
+- Kiwi's Android app identifies itself with the User-Agent
+  `Kiwi-Android/<versionName> (<versionCode>; Android <release>; SDK <int>; <manufacturer> <model>)`
+  and is otherwise a client like the web app (same headers, same device: see "Android
+  devices").
 
 ## Kiwi Builds (automation)
 
@@ -133,14 +137,21 @@ on a page of its own.
 ```ts
 type Timestamp = string;
 
+type Platform = "ios" | "android";
+
 interface Device {
   id: string;                       // "ts:<StableID>" | "local:<random>"
   name: string;                     // user-editable; defaults to Tailscale name
   kind: "tailscale" | "browser";
   tailscale_name: string | null;    // "iphone194"
-  platform: "ios" | "android";      // what the device installs (see "Android devices")
+  platform: Platform;               // what the device installs (see "Device platforms")
+  platform_source: "chosen" | "detected" | "assumed";
+  detected_platform: Platform | null; // what Kiwi takes without a choice; null: nothing tells
+                                    // (desktop browsers)
+  client: "web" | "android_app";    // this request's client; other devices are "web"
   os_version: string | null;        // "27.0.1"; Android: "15", or null (Chrome doesn't tell)
-  os_version_source: "devicectl" | "installer" | "manual" | "safari" | "android" | null;
+  os_version_source: "devicectl" | "installer" | "manual" | "android_app" | "safari" | "android" | null;
+                                    // highest priority first; "android_app": Kiwi's Android app
   model: string | null;             // "iPhone19,4"; "Android" for an Android device
   devicectl: LinkedCoreDevice | null;
   last_seen: Timestamp;
@@ -170,15 +181,42 @@ interface Warning {
 
 interface Me {
   device: Device;
+  onboarded: boolean;               // the first-run setup was completed on this device
   server: {
     version: string;
     public_url: string;             // "https://mac-studio.example.ts.net"
     team_id: string | null;
     devicectl_available: boolean;
   };
+  host: {                           // the computer Kiwi runs on
+    os: "macos" | "linux" | "other";
+    ios_signing: "keychain" | "files"; // macOS: the login keychain; elsewhere uploaded files
+    devicectl: boolean;             // devicectl is available (as server.devicectl_available)
+  };
+  features: Feature[];              // what to show on this device
+  android_app: AndroidApp | null;   // Kiwi's Android app, when this Kiwi serves it
   push: { vapid_public_key: string; subscribed: boolean };  // subscribed: this device has >= 1 subscription
   counts: { updates: number; installed: number; sources: number; source_errors: number; preparing: number };
   warnings: Warning[];
+}
+
+// What to show on a device. ios_apps and android_apps follow Device.platform and exclude
+// each other.
+type Feature =
+  | "ios_apps"          // iOS installs, AltStore sources, apps from links, signing, expiry timers
+  | "android_apps"      // Android installs (Kiwi Builds' APKs)
+  | "home_screen_app"   // the web app on an iOS device: Add to Home Screen and Web Push
+  | "web_push"          // the web app (it can use Web Push: the iOS Home Screen app, Android
+                        // and desktop browsers); not Kiwi's Android app
+  | "android_app_offer" // the web app on an Android device, while android_app is not null
+  | "devicectl";        // an iOS device on a macOS host: linking it to a paired CoreDevice
+
+interface AndroidApp {
+  package: string;                  // "io.github.digitalpals.kiwi"
+  version_name: string;
+  version_code: number;
+  size: number;                     // bytes
+  install_url: string;              // "<public_url>/android/kiwi.apk"
 }
 
 interface Source {
@@ -247,6 +285,9 @@ interface AppState {
                                     // URL, or for an Android app the https URL of its APK
   open_url: string | null;          // "kiwi-xxxxxxxxxxxx://" when installed with Kiwi's scheme
   replaces: Replaces | null;        // installing this app replaces another source's app
+  foreign_install: boolean;         // Android: the package is installed with another signature
+                                    // (reported by Kiwi's Android app), so Kiwi's build can't be
+                                    // installed until it is removed ("Remove the other <name> first")
 }
 
 // Several sources often ship different apps with the same original bundle id (YouTubePlus,
@@ -387,7 +428,8 @@ interface Settings {
 |---|---|---|---|
 | GET | `/api/health` | | `{ ok: true, version, pid }` (`pid`: the server process, for deploy checks) |
 | GET | `/api/me` | | `Me` |
-| PATCH | `/api/me` | `{ name?, os_version? }` (`os_version: null` clears a manual value) | `Me` |
+| PATCH | `/api/me` | `{ name?, os_version?, platform?: "ios" \| "android" \| null, onboarded?: boolean }` (`os_version: null` clears a manual value; `platform: null` clears the owner's choice, back to detection; `onboarded: true` records the first time the setup was completed, `false` shows it again) | `Me` |
+| PUT | `/api/me/packages` | `{ packages: InstalledPackage[] }` (Kiwi's Android app; see "Android devices") | `204`; `400` for an iOS device |
 | GET | `/api/sources` | | `Source[]` (by position) |
 | POST | `/api/sources` | `{ url }` | `201 Source` (fetched and parsed before saving; `409 conflict` if present). `url` may be an AltStore source, a web page (the AltStore source an `altstore://` or `sidestore://source?url=` button links, else the page's first `.ipa` link) or an IPA, which is downloaded before the answer. `http://` and scheme-less URLs are fetched over HTTPS |
 | GET | `/api/icons/:file` | | `image/png`, an icon Kiwi took from an IPA (cacheable) |
@@ -425,17 +467,42 @@ OTA (no `/api` prefix, no cookies, token-authorized; see architecture.md):
 | GET | `/ota/:token/icon.png` | app icon or 404 |
 | GET, HEAD | `/ota/:token/app.apk` | an Android build's APK (`application/vnd.android.package-archive`, `Content-Disposition: attachment; filename="<Name>-<version>.apk"`), `Range` supported; the install is recorded as for `app.ipa` |
 
+Kiwi's Android app (no `/api` prefix, but the owner's devices only, like `/api`):
+
+| Method | Path | Response |
+|---|---|---|
+| GET, HEAD | `/android/kiwi.apk` | `Me.android_app`'s file (`application/vnd.android.package-archive`, `Content-Disposition: attachment; filename="Kiwi-<version_name>.apk"`), `Range` supported; `404` while Kiwi serves none |
+
 `install_url` = `itms-services://?action=download-manifest&url=` + percent-encoded
 `<public_url>/ota/<token>/manifest.plist`. For an Android build it is
 `<public_url>/ota/<token>/app.apk`: the browser downloads the file and Android's installer
 opens it. A token serves the file of its own kind only: `manifest.plist` and `app.ipa`
 answer 404 for an Android build, `app.apk` for an iOS one.
 
+## Device platforms
+
+Every device installs for one platform, `Device.platform`:
+
+1. the one the owner chose (`PATCH /api/me` `platform`, `platform_source: "chosen"`), else
+2. the one Tailscale (the node's OS: iOS or Android) or a User-Agent (iOS Safari or another
+   iOS browser, the iOS installer, an Android browser, Kiwi's Android app) reported first
+   (`"detected"`; `detected_platform` keeps it, also when a choice overrides it). The first
+   report wins, so an iPhone never turns into an Android device, and an Android client
+   never sets an iPhone's OS version (or the other way round), else
+3. iOS (`"assumed"`): a desktop browser tells nothing, so `detected_platform` is null and
+   the owner is asked, like on a phone.
+
+The platform decides what Browse lists, which releases are compatible, the warnings, and
+what the scheduler prepares and notifies. `Me.features` tells the web app (and Kiwi's
+Android app) what to show; `Me.onboarded` whether the first-run setup is done. Devices that
+were in use before Kiwi had platforms (with an install, an install attempt or a push
+subscription) count as set up.
+
 ## Android devices
 
-A device is an Android one (`platform: "android"`, `model: "Android"`) when, having no
-model recorded yet, it is reported as Android by Tailscale or sends an Android browser's
-User-Agent; an iPhone never turns into one. For such a device:
+A device is an Android one when its platform is `android` (see "Device platforms"); one
+that Tailscale or a User-Agent reported as Android also gets `model: "Android"` while it
+has no model. For such a device:
 
 - Releases are compared with platform `android`. Kiwi Builds' Android releases name the
   platform `Android` and declare no `min_os`, so they are offered whatever version the
@@ -453,6 +520,43 @@ User-Agent; an iPhone never turns into one. For such a device:
 - `Me.warnings` omits the signing warnings (`no_identity`, `no_profile`, `expiring`) and
   `unknown_os`.
 - Android apps have no App Store original (`original: null`, `original_match: "none"`).
+
+### Kiwi's Android app
+
+The native app talks to the same API (see "Conventions" for its User-Agent). The phone is
+identified through Tailscale like its browser, so Chrome and the app are one device; its
+`client` is `android_app`, its `os_version` the Android release (source `android_app`,
+above a browser's guess and below a value entered by hand).
+
+`PUT /api/me/packages` reports the packages the app can see (all user-installed ones; the
+server ignores the rest, and unknown fields of an entry):
+
+```ts
+interface InstalledPackage {
+  package: string;                  // "app.morphe.android.youtube"
+  version_name: string | null;
+  version_code: number;
+  signer_sha256: string[];          // SHA-256 (hex) of each signing certificate (DER)
+  installer: string | null;         // e.g. "com.android.vending"
+}
+```
+
+Kiwi reconciles the device's installs with it like a devicectl sync: a package of a Kiwi
+Builds Android app signed with this Kiwi's Android key is a verified install (an existing
+install stays `origin: "kiwi"`, one Kiwi had no record of becomes `origin: "device"`;
+the version is `version_name`); the same package signed with another key is foreign
+(`AppState.foreign_install`; Kiwi's download of it did not install, and installing it
+fails until the other app is removed); an install whose package is missing is marked
+removed (one whose download completed less than 10 minutes ago is kept: Android may
+still be installing it). Until the Android runner has recorded Kiwi's key (it does so
+whenever it builds), Kiwi only records removals. Each report replaces the previous
+one; at most 5000 packages (2 MiB).
+
+Kiwi offers its Android app (`Me.android_app`) when `<data>/android-app/` holds
+`kiwi.apk` and `kiwi.json` (`{package, version_name, version_code, sha256, size}`)
+describing it; whatever provides the app writes both. A description that doesn't match the
+file (size or SHA-256) is ignored. The web app offers it on Android devices
+(`android_app_offer`); `install_url` downloads it from `/android/kiwi.apk`.
 
 Static: every other GET path serves `web/dist`; unknown paths without a file extension
 fall back to `index.html`. `/sw.js` and `/index.html` use `Cache-Control: no-cache`;

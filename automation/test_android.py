@@ -1,3 +1,4 @@
+import base64
 from contextlib import redirect_stdout
 import hashlib
 import io
@@ -382,6 +383,34 @@ class AndroidTests(unittest.TestCase):
             self.android.build(app, first, 0, self.job)
         with self.assertRaisesRegex(BuildError, "Unknown app recipe"):
             self.android.app("youtube")
+
+
+    def test_loading_the_key_records_its_certificate_for_the_server(self):
+        certificate = PUBLISHER.certificate
+        pem = "-----BEGIN CERTIFICATE-----\n" + base64.encodebytes(certificate).decode() + "-----END CERTIFICATE-----\n"
+        commands = []
+
+        def command(args, **kwargs):
+            commands.append([str(a) for a in args])
+            if "-genkeypair" in args:
+                Path(args[args.index("-keystore") + 1]).write_bytes(b"keystore")
+            return pem if kwargs.get("capture") else None
+
+        self.builder.command = command
+        java = self.root / "java" / "bin" / "java"
+        store, password, signer = self.android.keystore(java)
+        self.assertEqual(signer, PUBLISHER.fingerprint)
+        self.assertEqual([c[1] for c in commands], ["-genkeypair", "-exportcert"])
+        recorded = self.android.private / "signer.json"
+        self.assertEqual(json.loads(recorded.read_text()), {"sha256": PUBLISHER.fingerprint})
+        self.assertNotIn(password, recorded.read_text())
+        self.assertEqual(sorted(p.name for p in self.android.private.iterdir()),
+                         ["keystore.p12", "keystore.pass", "originals", "signer.json"])
+        # Loading the key again records it again; the key itself is kept.
+        recorded.unlink()
+        self.assertEqual(self.android.keystore(java), (store, password, signer))
+        self.assertTrue(recorded.is_file())
+        self.assertEqual(len(commands), 3)
 
 
 class TransportTests(unittest.TestCase):

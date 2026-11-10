@@ -98,6 +98,14 @@ export interface MockAttempt {
 
 export interface MockDb {
   device: Device;
+  /** What Tailscale or the browser told about the device's platform (null: a desktop browser). */
+  detected_platform: Platform | null;
+  /** The owner's choice of platform (`PATCH /api/me`). */
+  chosen_platform: Platform | null;
+  /** The first-run setup was completed on this device. */
+  onboarded: boolean;
+  /** Android packages installed with another signature (`PUT /api/me/packages`). */
+  foreign_packages: Set<string>;
   installer_os: string;
   settings: Settings;
   sources: MockSource[];
@@ -694,6 +702,9 @@ export function createDb(now: number, platform: Platform = "ios"): MockDb {
         name: "Pixel 9a",
         kind: "tailscale",
         platform: "android",
+        platform_source: "detected",
+        detected_platform: "android",
+        client: "web",
         tailscale_name: "pixel-9a",
         // Chrome doesn't report the Android version.
         os_version: null,
@@ -707,6 +718,9 @@ export function createDb(now: number, platform: Platform = "ios"): MockDb {
         name: "Alex’s iPhone",
         kind: "tailscale",
         platform: "ios",
+        platform_source: "detected",
+        detected_platform: "ios",
+        client: "web",
         tailscale_name: "iphone194",
         os_version: "27.0.1",
         os_version_source: "installer",
@@ -846,6 +860,10 @@ export function createDb(now: number, platform: Platform = "ios"): MockDb {
 
   return {
     device,
+    detected_platform: platform,
+    chosen_platform: null,
+    onboarded: true,
+    foreign_packages: new Set(),
     installer_os: "27.0.1",
     store: { nl, us },
     settings: {

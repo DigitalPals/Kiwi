@@ -10,7 +10,7 @@ import type {
   Source,
   StoreApp,
 } from "../src/api/types.ts";
-import { compareVersions, createMockApi, shortName } from "./api.ts";
+import { MOCK_ANDROID_SIGNER, compareVersions, createMockApi, shortName } from "./api.ts";
 
 function setup() {
   let now = Date.parse("2026-10-29T12:00:00Z");
@@ -216,6 +216,71 @@ describe("mock api", () => {
     const app = request("GET", "/api/apps/kiwi-youtube/com.reddit.frontpage").json as AppDetail;
     expect(app).toMatchObject({ platform: "android", unavailable: "Made for Android devices", state: { action: "unavailable" } });
     expect((request("GET", "/api/me").json as Me).device.platform).toBe("ios");
+  });
+
+  it("reports the device's platform, features and the first-run setup", () => {
+    const { request } = setup();
+    const me = request("GET", "/api/me").json as Me;
+    expect(me.device).toMatchObject({ platform: "ios", platform_source: "detected", detected_platform: "ios", client: "web" });
+    expect(me.onboarded).toBe(true);
+    expect(me.host).toEqual({ os: "macos", ios_signing: "keychain", devicectl: true });
+    expect(me.features).toEqual(["ios_apps", "home_screen_app", "web_push", "devicectl"]);
+    expect(me.android_app).toMatchObject({ package: "io.github.digitalpals.kiwi", install_url: "http://localhost:5173/android/kiwi.apk" });
+    expect(request("GET", "/android/kiwi.apk")).toMatchObject({ status: 200, contentType: "application/vnd.android.package-archive" });
+    // The owner's choice wins; null goes back to detection.
+    const chosen = request("PATCH", "/api/me", { platform: "android" }).json as Me;
+    expect(chosen.device).toMatchObject({ platform: "android", platform_source: "chosen", detected_platform: "ios" });
+    expect(chosen.features).toEqual(["android_apps", "web_push", "android_app_offer"]);
+    expect(request("GET", "/api/apps").json).toEqual([]);
+    expect((request("PATCH", "/api/me", { platform: null }).json as Me).device.platform_source).toBe("detected");
+    expect(request("PATCH", "/api/me", { platform: "windows" }).status).toBe(400);
+    expect((request("PATCH", "/api/me", { onboarded: false }).json as Me).onboarded).toBe(false);
+    expect(request("PUT", "/api/me/packages", { packages: [] }).status).toBe(400);
+  });
+
+  it("answers as a desktop browser that has not been set up, on Linux", () => {
+    const now = Date.parse("2026-10-29T12:00:00Z");
+    const api = createMockApi(() => now, { device: "desktop", onboarded: false, host: "linux", androidApp: false });
+    const request = (method: string, path: string, body?: unknown) =>
+      api.handle({
+        method, path, query: new URLSearchParams(),
+        headers: method === "GET" ? {} : { "x-kiwi": "1", "content-type": "application/json" },
+        body: body === undefined ? "" : JSON.stringify(body),
+        origin: "http://localhost:5173",
+      });
+    const me = request("GET", "/api/me").json as Me;
+    expect(me.device).toMatchObject({ kind: "browser", platform: "ios", platform_source: "assumed", detected_platform: null });
+    expect(me).toMatchObject({ onboarded: false, android_app: null, host: { os: "linux", ios_signing: "files", devicectl: false } });
+    expect(me.features).toEqual(["ios_apps", "home_screen_app", "web_push"]);
+    expect(me.counts.installed).toBe(0);
+    expect(request("GET", "/android/kiwi.apk").status).toBe(404);
+    const android = request("PATCH", "/api/me", { platform: "android", onboarded: true }).json as Me;
+    expect(android).toMatchObject({ onboarded: true, device: { platform: "android", platform_source: "chosen" } });
+    expect(android.features).toEqual(["android_apps", "web_push"]);
+  });
+
+  it("marks Android apps installed with another signature", () => {
+    let now = Date.parse("2026-10-29T12:00:00Z");
+    const api = createMockApi(() => now, { builds: "simulated", device: "android", foreign: ["app.morphe.android.youtube"] });
+    const request = (method: string, path: string, body?: unknown) =>
+      api.handle({
+        method, path, query: new URLSearchParams(),
+        headers: method === "GET" ? {} : { "x-kiwi": "1", "content-type": "application/json" },
+        body: body === undefined ? "" : JSON.stringify(body),
+        origin: "http://localhost:5173",
+      });
+    const recipe = request("GET", "/api/automation/android-youtube").json as AutomationState;
+    request("POST", "/api/automation/android-youtube/add", recipe.preferences);
+    now += 5 * 2600;
+    const path = "/api/apps/kiwi-youtube/app.morphe.android.youtube";
+    expect((request("GET", path).json as AppDetail).state.foreign_install).toBe(true);
+    const report = (signer: string) => ({
+      packages: [{ package: "app.morphe.android.youtube", version_name: "21.30.216", version_code: 1, signer_sha256: [signer], installer: null }],
+    });
+    expect(request("PUT", "/api/me/packages", report(MOCK_ANDROID_SIGNER)).status).toBe(204);
+    expect((request("GET", path).json as AppDetail).state.foreign_install).toBe(false);
+    request("PUT", "/api/me/packages", report("d".repeat(64)));
+    expect((request("GET", path).json as AppDetail).state.foreign_install).toBe(true);
   });
 
   it("covers every action in the fixtures", () => {

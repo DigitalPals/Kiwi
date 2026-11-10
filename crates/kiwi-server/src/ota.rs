@@ -373,45 +373,17 @@ async fn package(
     let Ok(len) = file.metadata().await.map(|m| m.len()) else {
         return not_found();
     };
-    let range = parse_range(
-        headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
-        len,
-    );
-    let (status, start, end) = match range {
-        ByteRange::Unsatisfiable => {
-            return (
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                [(header::CONTENT_RANGE, format!("bytes */{len}"))],
-            )
-                .into_response();
-        }
-        ByteRange::Full if len == 0 => return not_found(),
-        ByteRange::Full => (StatusCode::OK, 0, len - 1),
-        ByteRange::Partial { start, end } => (StatusCode::PARTIAL_CONTENT, start, end),
+    let (status, start, end) = match requested_range(&headers, len) {
+        Ok(range) => range,
+        Err(response) => return *response,
     };
-    let count = end - start + 1;
-    let mut response = Response::builder()
-        .status(status)
-        .header(
-            header::CONTENT_TYPE,
-            if android {
-                "application/vnd.android.package-archive"
-            } else {
-                "application/octet-stream"
-            },
-        )
-        .header(header::CONTENT_LENGTH, count)
-        .header(header::ACCEPT_RANGES, "bytes")
-        .header(header::CACHE_CONTROL, "no-store");
-    if status == StatusCode::PARTIAL_CONTENT {
-        response = response.header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"));
-    }
-    if android {
-        response = response.header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", apk_file_name(&build)),
-        );
-    }
+    let content_type = if android {
+        "application/vnd.android.package-archive"
+    } else {
+        "application/octet-stream"
+    };
+    let file_name = android.then(|| apk_file_name(&build));
+    let response = file_head(status, start, end, len, content_type, file_name.as_deref());
     if method == Method::HEAD {
         return response.body(Body::empty()).unwrap_or_else(|_| not_found());
     }
@@ -425,7 +397,7 @@ async fn package(
     // A full response completes the download once its last byte is written; ranges only
     // once those served for this token cover the whole file (not e.g. just the zip tail).
     let full = status == StatusCode::OK;
-    let on_complete: Option<Box<dyn FnOnce() + Send>> = Some({
+    let on_complete: Box<dyn FnOnce() + Send> = {
         let kiwi = kiwi.clone();
         let ua = user_agent(&headers);
         Box::new(move || {
@@ -433,14 +405,106 @@ async fn package(
                 complete_download(&kiwi, &token, ua.as_deref());
             }
         })
-    });
-    let stream = TrackedStream {
+    };
+    response
+        .body(file_body(file, start, end, Some(on_complete)))
+        .unwrap_or_else(|_| not_found())
+}
+
+/// The status and inclusive byte positions a request's `Range` asks for in a `len`-byte
+/// file, or the response for a range that can't be served.
+fn requested_range(headers: &HeaderMap, len: u64) -> Result<(StatusCode, u64, u64), Box<Response>> {
+    let range = parse_range(
+        headers.get(header::RANGE).and_then(|v| v.to_str().ok()),
+        len,
+    );
+    match range {
+        ByteRange::Unsatisfiable => Err(Box::new(
+            (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(header::CONTENT_RANGE, format!("bytes */{len}"))],
+            )
+                .into_response(),
+        )),
+        ByteRange::Full if len == 0 => Err(Box::new(not_found())),
+        ByteRange::Full => Ok((StatusCode::OK, 0, len - 1)),
+        ByteRange::Partial { start, end } => Ok((StatusCode::PARTIAL_CONTENT, start, end)),
+    }
+}
+
+/// The headers of a file download; `file_name` makes it an attachment.
+fn file_head(
+    status: StatusCode,
+    start: u64,
+    end: u64,
+    len: u64,
+    content_type: &str,
+    file_name: Option<&str>,
+) -> axum::http::response::Builder {
+    let mut response = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, end - start + 1)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CACHE_CONTROL, "no-store");
+    if status == StatusCode::PARTIAL_CONTENT {
+        response = response.header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"));
+    }
+    if let Some(name) = file_name {
+        response = response.header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}\""),
+        );
+    }
+    response
+}
+
+/// Bytes `start..=end` of a file positioned at `start`; `on_complete` runs once the last
+/// one was handed to the server.
+fn file_body(
+    file: tokio::fs::File,
+    start: u64,
+    end: u64,
+    on_complete: Option<Box<dyn FnOnce() + Send>>,
+) -> Body {
+    let count = end - start + 1;
+    Body::from_stream(TrackedStream {
         inner: ReaderStream::with_capacity(file.take(count), 256 * 1024),
         remaining: count,
         on_complete,
+    })
+}
+
+/// Serves a whole file, or the part a `Range` asks for, as an attachment named `file_name`;
+/// 404 unless the file has `expected_len` bytes.
+pub async fn send_file(
+    path: &Path,
+    expected_len: u64,
+    method: &Method,
+    headers: &HeaderMap,
+    content_type: &str,
+    file_name: &str,
+) -> Response {
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
+        return not_found();
     };
+    let len = match file.metadata().await {
+        Ok(m) if m.is_file() && m.len() == expected_len => m.len(),
+        _ => return not_found(),
+    };
+    let (status, start, end) = match requested_range(headers, len) {
+        Ok(range) => range,
+        Err(response) => return *response,
+    };
+    let response = file_head(status, start, end, len, content_type, Some(file_name));
+    if *method == Method::HEAD {
+        return response.body(Body::empty()).unwrap_or_else(|_| not_found());
+    }
+    if start > 0 && file.seek(io::SeekFrom::Start(start)).await.is_err() {
+        return not_found();
+    }
     response
-        .body(Body::from_stream(stream))
+        .body(file_body(file, start, end, None))
         .unwrap_or_else(|_| not_found())
 }
 

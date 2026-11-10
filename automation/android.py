@@ -392,7 +392,12 @@ class Android:
         body = re.search(r"-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----", pem, re.S)
         if not body:
             raise BuildError("Kiwi's Android signing key could not be read.")
-        return store, password, hashlib.sha256(base64.b64decode(body.group(1))).hexdigest()
+        signer = hashlib.sha256(base64.b64decode(body.group(1))).hexdigest()
+        # Not a secret: Kiwi's server reads it to tell its own builds on a phone from others.
+        partial = self.private / "signer.partial"
+        partial.write_bytes(canonical({"sha256": signer}))
+        partial.replace(self.private / "signer.json")
+        return store, password, signer
 
     # --- the original app --------------------------------------------------
 

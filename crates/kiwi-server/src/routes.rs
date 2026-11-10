@@ -14,17 +14,17 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header, request::Parts},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    Kiwi, builds,
+    Kiwi, android, builds,
     catalog::SourceJson,
-    db::{BrowseMode, DeviceRow, OriginalChoice, SourceRow},
-    devices::{self, COOKIE, Requester, device_json},
+    db::{BrowseMode, DeviceRow, OriginalChoice, Platform, SourceRow},
+    devices::{self, COOKIE, Client, Requester, device_json},
     error::{ApiError, ApiResult},
     ota, owner,
     push::{self, Payload, SubscribeBody},
@@ -47,6 +47,7 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .route("/automation/{app}/check", post(automation_check))
         .route("/automation/{app}/cancel", post(automation_cancel))
         .route("/me", get(me).patch(patch_me))
+        .route("/me/packages", put(put_packages))
         .route("/sources", get(list_sources).post(add_source))
         .route("/sources/refresh", post(refresh_sources))
         .route("/sources/{id}", patch(patch_source).delete(delete_source))
@@ -88,6 +89,7 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .route("/ota/{token}/app.ipa", get(ota::ipa_handler))
         .route("/ota/{token}/app.apk", get(ota::apk_handler))
         .route("/ota/{token}/icon.png", get(ota::icon_handler))
+        .route("/android/kiwi.apk", get(android_app_apk))
         .fallback(web)
         .layer(middleware::from_fn_with_state(kiwi.clone(), host_guard))
         .layer(middleware::from_fn(log_requests))
@@ -205,6 +207,8 @@ async fn api_guard(mut req: Request, next: Next) -> Response {
 pub struct Ctx {
     pub device: DeviceRow,
     pub public_url: String,
+    /// The program that sent the request: the web app or Kiwi's Android app.
+    pub client: Client,
 }
 
 impl FromRequestParts<Arc<Kiwi>> for Ctx {
@@ -246,17 +250,20 @@ impl FromRequestParts<Arc<Kiwi>> for Ctx {
         Ok(Self {
             device,
             public_url: kiwi.public_url(&parts.headers),
+            client: Client::of(requester.user_agent.as_deref()),
         })
     }
 }
 
-/// A JSON body; empty bodies read as `{}`.
-pub struct JsonBody<T>(pub T);
+/// A JSON body of at most `LIMIT` bytes; empty bodies read as `{}`.
+pub struct JsonBody<T, const LIMIT: usize = { 64 * 1024 }>(pub T);
 
-impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for JsonBody<T> {
+impl<S: Send + Sync, T: DeserializeOwned, const LIMIT: usize> FromRequest<S>
+    for JsonBody<T, LIMIT>
+{
     type Rejection = ApiError;
     async fn from_request(req: Request, _: &S) -> ApiResult<Self> {
-        let bytes: Bytes = axum::body::to_bytes(req.into_body(), 64 * 1024)
+        let bytes: Bytes = axum::body::to_bytes(req.into_body(), LIMIT)
             .await
             .map_err(|_| ApiError::bad_request("Request body is too large."))?;
         let bytes: &[u8] = if bytes.iter().all(u8::is_ascii_whitespace) {
@@ -315,6 +322,39 @@ fn days_until(t: chrono::DateTime<Utc>, now: chrono::DateTime<Utc>) -> String {
     }
 }
 
+/// The operating system Kiwi runs on (`Me.host.os`).
+const HOST_OS: &str = if cfg!(target_os = "macos") {
+    "macos"
+} else if cfg!(target_os = "linux") {
+    "linux"
+} else {
+    "other"
+};
+
+/// What to show on a device (`Me.features` in api.md): its platform's apps, the web app's
+/// Home Screen and Web Push features in a browser, the offer of Kiwi's Android app in an
+/// Android browser, and devicectl linking for an iOS device on a Mac.
+pub fn features(
+    platform: Platform,
+    client: Client,
+    macos_host: bool,
+    android_app: bool,
+) -> Vec<&'static str> {
+    let web = client == Client::Web;
+    let ios = platform == Platform::Ios;
+    [
+        (ios, "ios_apps"),
+        (!ios, "android_apps"),
+        (web && ios, "home_screen_app"),
+        (web, "web_push"),
+        (web && !ios && android_app, "android_app_offer"),
+        (ios && macos_host, "devicectl"),
+    ]
+    .into_iter()
+    .filter_map(|(on, feature)| on.then_some(feature))
+    .collect()
+}
+
 async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
     let view = View::load(kiwi, &ctx.device, &ctx.public_url)?;
     let now = view.now;
@@ -326,7 +366,8 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
     let mut warnings = Vec::new();
     // An Android device installs what Kiwi Builds signed itself, at any Android version
     // the app supports: Apple signing and the OS version don't concern it.
-    let android = crate::devices::is_android(&ctx.device);
+    let platform = devices::effective_platform(&ctx.device);
+    let android = platform == Platform::Android;
     let signing = || {
         if view.signing.identities.is_empty() {
             let message = view.signing.error(now).unwrap_or_default();
@@ -391,14 +432,26 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
         .iter()
         .filter(|b| b.status.is_active())
         .count();
+    let devicectl = kiwi
+        .devicectl_available
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let android_app = kiwi.android_app.get(&kiwi.paths.android_app).await;
     Ok(json!({
-        "device": device_json(&ctx.device),
+        "device": device_json(&ctx.device, ctx.client),
+        "onboarded": ctx.device.onboarded_at.is_some(),
         "server": {
             "version": env!("CARGO_PKG_VERSION"),
             "public_url": ctx.public_url,
             "team_id": view.team,
-            "devicectl_available": kiwi.devicectl_available.load(std::sync::atomic::Ordering::Relaxed),
+            "devicectl_available": devicectl,
         },
+        "host": {
+            "os": HOST_OS,
+            "ios_signing": if HOST_OS == "macos" { "keychain" } else { "files" },
+            "devicectl": devicectl,
+        },
+        "features": features(platform, ctx.client, HOST_OS == "macos", android_app.is_some()),
+        "android_app": android_app.map(|app| app.json(&ctx.public_url)),
         "push": {
             "vapid_public_key": kiwi.vapid_public_key,
             "subscribed": !kiwi.db.subscriptions(&ctx.device.id)?.is_empty(),
@@ -424,6 +477,11 @@ struct MePatch {
     name: Option<String>,
     #[serde(default, deserialize_with = "nullable")]
     os_version: Option<Option<String>>,
+    /// `null` clears the owner's choice (back to detection).
+    #[serde(default, deserialize_with = "nullable")]
+    platform: Option<Option<Platform>>,
+    /// `false` shows the first-run setup again.
+    onboarded: Option<bool>,
 }
 
 fn device_name(name: &str) -> ApiResult<Option<String>> {
@@ -462,19 +520,71 @@ async fn patch_me(
     if let Some(version) = os_version {
         kiwi.db.set_manual_os(&id, version.as_deref())?;
     }
+    if let Some(platform) = body.platform {
+        kiwi.db.set_device_platform(&id, platform)?;
+        // Updates and notifications follow the platform.
+        kiwi.kick.notify_one();
+    }
+    if let Some(onboarded) = body.onboarded {
+        kiwi.db.set_device_onboarded(&id, onboarded, Utc::now())?;
+    }
     if let Some(device) = kiwi.db.device(&id)? {
         ctx.device = device;
     }
     me_json(&kiwi, &ctx).await.map(Json)
 }
 
-async fn list_devices(State(kiwi): K, _: Ctx) -> ApiResult<Json<devices::DevicesJson>> {
-    devices::devices_json(&kiwi, false).await.map(Json)
+/// The installed packages Kiwi's Android app reports (api.md "PUT /api/me/packages").
+async fn put_packages(
+    State(kiwi): K,
+    ctx: Ctx,
+    JsonBody(report): JsonBody<android::PackageReport, { 2 * 1024 * 1024 }>,
+) -> ApiResult<StatusCode> {
+    if devices::effective_platform(&ctx.device) != Platform::Android {
+        return Err(ApiError::bad_request(
+            "Only Android devices report their installed packages.",
+        ));
+    }
+    android::record_packages(&kiwi, &ctx.device.id, report)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
-async fn sync_devices(State(kiwi): K, _: Ctx) -> ApiResult<Json<devices::DevicesJson>> {
+/// Kiwi's Android app, for the owner's devices like every API (api.md "Kiwi's Android
+/// app"), with `Range` support.
+async fn android_app_apk(
+    State(kiwi): K,
+    _: Ctx,
+    method: Method,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let dir = &kiwi.paths.android_app;
+    let app = kiwi
+        .android_app
+        .get(dir)
+        .await
+        .ok_or_else(|| ApiError::not_found("Kiwi's Android app is not available here."))?;
+    Ok(ota::send_file(
+        &dir.join(android::APK_FILE),
+        app.size,
+        &method,
+        &headers,
+        "application/vnd.android.package-archive",
+        &app.file_name(),
+    )
+    .await)
+}
+
+async fn list_devices(State(kiwi): K, ctx: Ctx) -> ApiResult<Json<devices::DevicesJson>> {
+    devices::devices_json(&kiwi, false, (&ctx.device.id, ctx.client))
+        .await
+        .map(Json)
+}
+
+async fn sync_devices(State(kiwi): K, ctx: Ctx) -> ApiResult<Json<devices::DevicesJson>> {
     devices::sync(&kiwi).await?;
-    devices::devices_json(&kiwi, false).await.map(Json)
+    devices::devices_json(&kiwi, false, (&ctx.device.id, ctx.client))
+        .await
+        .map(Json)
 }
 
 #[derive(Deserialize)]
@@ -487,7 +597,7 @@ struct DevicePatch {
 
 async fn patch_device(
     State(kiwi): K,
-    _: Ctx,
+    ctx: Ctx,
     P(id): P<String>,
     JsonBody(body): JsonBody<DevicePatch>,
 ) -> ApiResult<Json<devices::DeviceJson>> {
@@ -505,7 +615,8 @@ async fn patch_device(
         kiwi.db.set_device_name(&id, name.as_deref())?;
     }
     let device = kiwi.db.device(&id)?.ok_or_else(not_found)?;
-    Ok(Json(device_json(&device)))
+    let client = devices::client_of(&device, (&ctx.device.id, ctx.client));
+    Ok(Json(device_json(&device, client)))
 }
 
 // ---- sources ----
@@ -1003,6 +1114,7 @@ async fn push_test(State(kiwi): K, ctx: Ctx) -> ApiResult<Json<Value>> {
 const ASSET_EXTENSIONS: &[&str] = &[
     "js", "mjs", "css", "map", "png", "jpg", "jpeg", "gif", "svg", "ico", "webp", "json",
     "webmanifest", "txt", "woff", "woff2", "ttf", "html", "xml", "wasm", "ipa", "plist",
+    "apk",
 ];
 
 fn content_type(path: &FsPath) -> &'static str {

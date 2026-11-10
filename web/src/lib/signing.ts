@@ -27,7 +27,9 @@ export const UPLOADS: Record<UploadKind, UploadSpec> = {
     tooLarge: "is larger than 64 KB. Export only the Apple Development certificate with its private key.",
   },
   profile: {
-    accept: ".mobileprovision",
+    // No extension filter: iOS greys out file types it doesn't know, and the server checks
+    // every upload anyway.
+    accept: "",
     maxBytes: 1024 * 1024,
     noun: "The provisioning profile",
     tooLarge: "is larger than 1 MB. Choose the .mobileprovision file from developer.apple.com.",

@@ -389,8 +389,12 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
             .signing
             .active(now)
             .filter(|a| a.expires_at - now < Duration::days(30))?;
+        let renew = match view.signing.backend {
+            kiwi_signer::Backend::Keychain => "Renew it in Xcode, then rescan.",
+            kiwi_signer::Backend::Files => "Upload a renewed one in Settings › Signing.",
+        };
         let message = format!(
-            "The signing certificate or profile expires {}. Renew it in Xcode, then rescan.",
+            "The signing certificate or profile expires {}. {renew}",
             days_until(active.expires_at, now)
         );
         Some(warning("warning", "expiring", message, "/settings"))

@@ -317,7 +317,7 @@ function UploadCell(props: { kind: UploadKind; label: string; pending: boolean; 
       <input
         type="file"
         class="visually-hidden"
-        accept={UPLOADS[props.kind].accept}
+        accept={UPLOADS[props.kind].accept || undefined}
         disabled={props.pending}
         onChange={(e) => {
           const file = e.currentTarget.files?.[0];

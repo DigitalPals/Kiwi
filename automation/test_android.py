@@ -384,6 +384,15 @@ class AndroidTests(unittest.TestCase):
             self.android.app("youtube")
 
 
+class PythonTests(unittest.TestCase):
+    def test_an_old_python_is_refused_plainly(self):
+        android.require_python((3, 12, 0, "final", 0))
+        android.require_python((3, 13, 5))
+        with self.assertRaisesRegex(BuildError, r"needs Python 3\.12 or newer, but Kiwi runs it with Python 3\.11\.2\.") as caught:
+            android.require_python((3, 11, 2, "final", 0))
+        self.assertTrue(caught.exception.blocked)
+
+
 class TransportTests(unittest.TestCase):
     def test_only_https_is_spoken(self):
         with tempfile.TemporaryDirectory() as d:

@@ -13,6 +13,7 @@ export const SETUP_HELP: Record<string, string> = {
   "Tweak toolchain": "Install the patch compiler using Kiwi's Mac setup instructions.",
   "App Store sign-in": "Sign in to Kiwi's App Store downloader on the Mac. Apple may ask for a verification code.",
   "Private decryption enrollment": "Install and open an iPhone or iPad app from the Mac App Store, then enroll the Mac.",
+  macOS: "iOS apps can only be built on a Mac. This Kiwi doesn't run on macOS, so it builds Android apps only.",
 };
 
 export function ExperimentalTag() {

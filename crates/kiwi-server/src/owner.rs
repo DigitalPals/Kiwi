@@ -55,7 +55,7 @@ pub async fn refresh(kiwi: &Kiwi, force: bool) {
         Ok(Some(user)) => {
             if kiwi.owner.login().as_ref() != Some(&user.login) {
                 tracing::info!(
-                    "the Mac belongs to {} in Tailscale: they own Kiwi",
+                    "this machine belongs to {} in Tailscale: they own Kiwi",
                     user.login
                 );
                 if let Err(e) = kiwi.db.set_meta("owner_login", &user.login) {
@@ -65,9 +65,9 @@ pub async fn refresh(kiwi: &Kiwi, force: bool) {
             }
         }
         Ok(None) => tracing::warn!(
-            "the Mac belongs to no Tailscale user (a tagged machine?): start Kiwi with --owner <login>"
+            "this machine belongs to no Tailscale user (a tagged machine?): start Kiwi with --owner <login> (KIWI_OWNER)"
         ),
-        Err(e) => tracing::warn!("could not ask Tailscale who owns the Mac: {e}"),
+        Err(e) => tracing::warn!("could not ask Tailscale who owns this machine: {e}"),
     }
 }
 
@@ -96,8 +96,9 @@ pub fn require(kiwi: &Kiwi, device: &DeviceRow) -> ApiResult<()> {
         Some(owner) => format!(
             "This Kiwi belongs to {owner}. To use it here, sign in to Tailscale as {owner} on this device."
         ),
-        None => "Kiwi doesn't know who owns this Mac yet. If the Mac is tagged in Tailscale, \
-                 install Kiwi again with ./install.sh --owner <your Tailscale login>."
+        None => "Kiwi doesn't know who owns it yet. If its computer is tagged in Tailscale, \
+                 install Kiwi again with ./install.sh --owner <your Tailscale login> (in \
+                 Docker, set KIWI_OWNER)."
             .into(),
     }))
 }

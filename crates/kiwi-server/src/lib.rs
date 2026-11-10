@@ -380,8 +380,8 @@ impl Kiwi {
         self.team.read().unwrap().clone()
     }
 
-    /// `--public-url` (or the Mac's Tailscale name), else `https://<X-Forwarded-Host>`, else
-    /// the listen address.
+    /// `--public-url` (or this machine's Tailscale name), else `https://<X-Forwarded-Host>`,
+    /// else the listen address.
     pub fn public_url(&self, headers: &HeaderMap) -> String {
         if let Some(url) = &self.config.public_url {
             return url.clone();
@@ -425,7 +425,7 @@ async fn shutdown_signal() {
     let _ = ctrl_c.await;
 }
 
-/// `--public-url`, else the listen address (reachable only from the Mac itself).
+/// `--public-url`, else the listen address (reachable only from this machine itself).
 fn fallback_url(config: &Config) -> String {
     config
         .public_url
@@ -433,19 +433,34 @@ fn fallback_url(config: &Config) -> String {
         .unwrap_or_else(|| format!("http://{}", config.listen))
 }
 
-/// `https://<this Mac's MagicDNS name>`, the address `tailscale serve` answers on.
+/// How long Kiwi waits at start for a tailscaled that is still connecting.
+const TAILSCALE_START_WAIT: Duration = Duration::from_secs(30);
+
+/// `https://<this machine's MagicDNS name>`, the address `tailscale serve` answers on. When
+/// tailscaled's socket is there but it has no name yet, or doesn't answer, it is probably
+/// still starting (a Tailscale container started next to Kiwi's, or tailscaled at boot), so
+/// Kiwi asks again for up to [`TAILSCALE_START_WAIT`].
 async fn tailscale_url(args: &Args) -> Option<String> {
     let tailscale = Tailscale::new(&args.tailscale_socket, &args.tailscale_bin).ok()?;
-    match tailscale.dns_name().await {
-        Ok(Some(name)) => Some(format!("https://{name}")),
-        Ok(None) => {
-            tracing::warn!("Tailscale has no DNS name for this Mac yet");
-            None
+    let deadline = tokio::time::Instant::now() + TAILSCALE_START_WAIT;
+    let mut waiting = false;
+    loop {
+        let result = tailscale.dns_name().await;
+        if let Ok(Some(name)) = result {
+            return Some(format!("https://{name}"));
         }
-        Err(e) => {
-            tracing::warn!("could not ask Tailscale for this Mac's name: {e}");
-            None
+        if !tailscale.uses_localapi() || tokio::time::Instant::now() >= deadline {
+            match result {
+                Ok(_) => tracing::warn!("Tailscale has no DNS name for this machine yet"),
+                Err(e) => tracing::warn!("could not ask Tailscale for this machine's name: {e}"),
+            }
+            return None;
         }
+        if !waiting {
+            tracing::info!("waiting for tailscaled to connect");
+            waiting = true;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
 

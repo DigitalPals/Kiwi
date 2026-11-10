@@ -45,10 +45,21 @@ MAX_APK = 1024**3
 BUNDLES = (".apks", ".xapk", ".apkm")
 ALIAS = "kiwi"
 SESSION_SECONDS = 1800
+# hashlib.file_digest (3.11) and tarfile's extraction filters (3.12).
+MIN_PYTHON = (3, 12)
 
 
 class SourceError(Exception):
     """One source could not supply a trustworthy original; the next is tried."""
+
+
+def require_python(version=sys.version_info):
+    """Stops plainly on a Python too old for the builder, before anything needs it."""
+    if tuple(version[:2]) < MIN_PYTHON:
+        found = ".".join(str(part) for part in version[:3])
+        raise BuildError(f"Kiwi Builds for Android needs Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer, "
+                         f"but Kiwi runs it with Python {found}. Install a newer Python and start Kiwi with "
+                         "--python (KIWI_PYTHON) naming it.", True)
 
 
 def records(data):
@@ -629,6 +640,7 @@ def main():
 
 if __name__ == "__main__":
     try:
+        require_python()
         main()
     except BuildError as error:
         emit("error", message=str(error), blocked=error.blocked)

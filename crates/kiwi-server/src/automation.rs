@@ -8,7 +8,10 @@ use std::{
     io::Read,
     path::PathBuf,
     process::Stdio,
-    sync::{Arc, LazyLock, Mutex, RwLock},
+    sync::{
+        Arc, LazyLock, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -327,6 +330,9 @@ pub struct Automation {
     pub runner: RwLock<PathBuf>,
     /// The runner of Android recipes; injectable like `runner`.
     pub android_runner: RwLock<PathBuf>,
+    /// Whether iOS apps can be built here: their runner needs macOS (Xcode's tools and
+    /// decryption on the Mac). Tests elsewhere turn it on along with a fake runner.
+    pub builds_ios: AtomicBool,
 }
 impl Automation {
     pub fn load(db: &Db, data: &std::path::Path) -> Result<Self, String> {
@@ -397,10 +403,32 @@ impl Automation {
             running: Mutex::new(None),
             runner: RwLock::new(root.join("runner.py")),
             android_runner: RwLock::new(root.join("android.py")),
+            builds_ios: AtomicBool::new(cfg!(target_os = "macos")),
         })
     }
     pub fn snapshot(&self) -> State {
         self.state.lock().unwrap().clone()
+    }
+    /// Whether this Kiwi can build the recipe's app (iOS apps only on a Mac).
+    pub fn can_build(&self, recipe: &Recipe) -> bool {
+        recipe.android() || self.builds_ios.load(Ordering::Relaxed)
+    }
+    /// `409 needs_mac` for an iOS app on a Kiwi that does not run on macOS.
+    fn require_buildable(&self, recipe: &Recipe) -> ApiResult<()> {
+        if self.can_build(recipe) {
+            Ok(())
+        } else {
+            Err(ApiError::needs_mac())
+        }
+    }
+    /// The shared iOS setup checks: what the last iOS job found, or, where iOS apps cannot
+    /// be built, only the missing Mac.
+    pub fn checks(&self, state: &State) -> Vec<Value> {
+        if self.builds_ios.load(Ordering::Relaxed) {
+            state.checks.clone()
+        } else {
+            vec![json!({"name": NEEDS_MAC_CHECK, "ready": false})]
+        }
     }
     fn change<T>(&self, db: &Db, edit: impl FnOnce(&mut State) -> ApiResult<T>) -> ApiResult<T> {
         let mut current = self.state.lock().unwrap();
@@ -454,9 +482,13 @@ impl Automation {
     }
 }
 
+/// The name of the setup check that is never ready where iOS apps cannot be built.
+pub const NEEDS_MAC_CHECK: &str = "macOS";
+
 /// Adds an app to Kiwi Builds with these preferences and queues its first build.
 pub fn add(kiwi: &Arc<Kiwi>, id: &str, mut preferences: Preferences) -> ApiResult<()> {
     let recipe = recipe(id)?;
+    kiwi.automation.require_buildable(recipe)?;
     preferences.validate(recipe)?;
     kiwi.automation.app(&kiwi.db, id, |a| {
         a.added = true;
@@ -512,6 +544,7 @@ pub fn cancel(kiwi: &Kiwi, id: &str) {
 /// Queues a check (and build, when anything changed) of an added app.
 pub fn queue(kiwi: &Arc<Kiwi>, id: &str, force: bool) -> ApiResult<()> {
     let recipe = recipe(id)?;
+    kiwi.automation.require_buildable(recipe)?;
     let mut bytes = [0u8; 12];
     getrandom::fill(&mut bytes).map_err(ApiError::internal)?;
     let job_id = hex::encode(bytes);
@@ -627,11 +660,12 @@ pub fn tick(kiwi: &Arc<Kiwi>) {
         let due = app.last_checked_at.is_none_or(|t| {
             Utc::now() - t >= chrono::Duration::minutes(i64::from(app.preferences.interval_minutes))
         });
+        // An iOS app added on a Mac whose data moved to Linux waits for a Mac quietly.
         if app.added
             && app.preferences.enabled
             && due
             && !state.jobs.iter().any(|j| &j.app == id && j.active())
-            && recipe(id).is_ok()
+            && recipe(id).is_ok_and(|r| kiwi.automation.can_build(r))
             && let Err(e) = queue(kiwi, id, false)
         {
             tracing::warn!(app = %id, "could not queue a build: {e}");
@@ -745,7 +779,8 @@ async fn runner(
     tokio::fs::write(&path, serde_json::to_vec(request).map_err(failed)?)
         .await
         .map_err(failed)?;
-    let program = if recipe(&job.app).is_ok_and(Recipe::android) {
+    let android = recipe(&job.app).is_ok_and(Recipe::android);
+    let program = if android {
         &kiwi.automation.android_runner
     } else {
         &kiwi.automation.runner
@@ -753,12 +788,12 @@ async fn runner(
     .read()
     .unwrap()
     .clone();
-    // Apple's /usr/bin/python3 is 3.9; the builder uses Python 3.13 from setup.
-    let python = if cfg!(target_os = "macos") {
-        "/opt/homebrew/bin/python3.13"
+    let builder = if android {
+        "The Android builder"
     } else {
-        "python3"
+        "The Mac builder"
     };
+    let python = &kiwi.config.python;
     let mut cmd = tokio::process::Command::new(python);
     cmd.arg(program)
         .arg(command)
@@ -781,9 +816,16 @@ async fn runner(
         use std::os::unix::process::CommandExt;
         cmd.as_std_mut().process_group(0);
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| (format!("Could not start the Mac builder: {e}"), true))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        (
+            format!(
+                "{builder} could not start Python ({}): {e}. Install Python 3.12 or newer, \
+                 or name it with --python (KIWI_PYTHON).",
+                python.display()
+            ),
+            true,
+        )
+    })?;
     let mut lines = BufReader::new(child.stdout.take().unwrap().take(2 * 1024 * 1024)).lines();
     let mut events = Vec::new();
     let mut runner_error = None;
@@ -840,16 +882,16 @@ async fn runner(
             return Err(error);
         }
         if !status.success() {
-            return Err(failed(
-                "The Mac builder stopped unexpectedly. Check its private log.",
-            ));
+            return Err(failed(format!(
+                "{builder} stopped unexpectedly. Check its private log."
+            )));
         }
         Ok(())
     };
     let result = tokio::select! {
         result = read => result,
         _ = token.cancelled() => Err(failed("Cancelled")),
-        _ = &mut deadline => Err(failed("The Mac builder exceeded its time limit")),
+        _ = &mut deadline => Err(failed(format!("{builder} exceeded its time limit"))),
     };
     if result.is_err() {
         stop(&mut child).await;

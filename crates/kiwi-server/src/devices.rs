@@ -377,7 +377,16 @@ pub fn record_user_agent(
 /// its OS version is known, for that version. Without a version (an empty one) every
 /// release of the platform is offered.
 pub fn device_profile(device: &DeviceRow) -> DeviceProfile {
-    let os_version = device.os_version.clone().unwrap_or_default();
+    // A version reported for the detected platform says nothing about the one the owner
+    // chose instead.
+    let other_platform = device.platform.is_some()
+        && device.detected_platform.is_some()
+        && device.platform != device.detected_platform
+        && device.os_version_source.as_deref() != Some("manual");
+    let os_version = match other_platform {
+        true => String::new(),
+        false => device.os_version.clone().unwrap_or_default(),
+    };
     match effective_platform(device) {
         // Android browsers rarely report the OS version, so Android releases declare no
         // minimum; the platform alone decides.
@@ -1148,11 +1157,21 @@ mod tests {
         // Also over what Tailscale or a User-Agent reported.
         let mut iphone = device();
         iphone.detected_platform = Some(Platform::Ios);
+        iphone.os_version = Some("27.0".into());
+        iphone.os_version_source = Some("safari".into());
         iphone.platform = Some(Platform::Android);
         assert_eq!(
             platform(&iphone),
             (Platform::Android, PlatformSource::Chosen)
         );
+        let profile = device_profile(&iphone);
+        assert_eq!(
+            (profile.platform.as_str(), profile.os_version.as_str()),
+            ("android", ""),
+            "iOS's version is not an Android one"
+        );
+        iphone.os_version_source = Some("manual".into());
+        assert_eq!(device_profile(&iphone).os_version, "27.0");
         let json = device_json(&iphone, Client::Web);
         assert_eq!(json.detected_platform, Some(Platform::Ios));
         assert_eq!(

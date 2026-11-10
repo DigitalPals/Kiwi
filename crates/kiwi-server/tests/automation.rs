@@ -59,6 +59,95 @@ else:
     );
     std::fs::write(&script, text).unwrap();
     *k.kiwi.automation.runner.write().unwrap() = script;
+    // The fake builds iOS apps on any system.
+    k.kiwi.automation.builds_ios.store(true, Ordering::SeqCst);
+}
+
+#[tokio::test]
+async fn ios_apps_need_a_mac_and_android_apps_build_anywhere() {
+    const PACKAGE: &str = "app.morphe.android.youtube";
+    let k = TestKiwi::start().await;
+    fake_android_runner(&k, PACKAGE);
+    // As on Linux: the iOS runner needs macOS.
+    k.kiwi.automation.builds_ios.store(false, Ordering::SeqCst);
+    let phone = k.phone();
+    phone
+        .send(
+            Method::PATCH,
+            "/api/settings",
+            Some(json!({"kiwi_builds": true})),
+        )
+        .await;
+
+    // The iOS setup checks name the missing Mac, and iOS apps can't be added or checked.
+    let overview = phone.ok("/api/automation").await;
+    assert_eq!(
+        overview["checks"],
+        json!([{"name": "macOS", "ready": false}])
+    );
+    let youtube = phone.ok("/api/automation/youtube").await;
+    assert_eq!(youtube["checks"], overview["checks"]);
+    let added = phone
+        .post(
+            "/api/automation/youtube/add",
+            youtube["preferences"].clone(),
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::CONFLICT, "{}", added.body);
+    assert_eq!(added.body["error"]["code"], "needs_mac");
+    assert!(
+        added.body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("iOS apps can only be built on a Mac."),
+        "{}",
+        added.body
+    );
+    assert_eq!(phone.ok("/api/automation/youtube").await["added"], false);
+
+    let check = phone.post("/api/automation/youtube/check", json!({})).await;
+    assert_eq!(check.body["error"]["code"], "needs_mac", "{}", check.body);
+
+    // Android apps build as usual.
+    let android = phone.ok("/api/automation/android-youtube").await;
+    let added = phone
+        .post(
+            "/api/automation/android-youtube/add",
+            android["preferences"].clone(),
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::ACCEPTED, "{}", added.body);
+    let ready = finished_app(&k, "android-youtube").await;
+    assert_eq!(ready["jobs"][0]["status"], "ready", "{ready}");
+    assert!(
+        k.kiwi
+            .automation
+            .snapshot()
+            .jobs
+            .iter()
+            .all(|j| j.app == "android-youtube")
+    );
+
+    // An iOS app added on a Mac whose data moved here waits: no schedule, no checks.
+    fake_runner(&k, true);
+    let added = phone
+        .post(
+            "/api/automation/youtube/add",
+            youtube["preferences"].clone(),
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::ACCEPTED, "{}", added.body);
+    phone
+        .post("/api/automation/youtube/cancel", json!({}))
+        .await;
+    assert_eq!(finished(&k).await["jobs"][0]["status"], "cancelled");
+    k.kiwi.automation.builds_ios.store(false, Ordering::SeqCst);
+    let waiting = phone.ok("/api/automation/youtube").await;
+    assert_eq!(waiting["added"], true);
+    assert_eq!(waiting["next_check_at"], Value::Null, "{waiting}");
+    assert_eq!(waiting["checks"], overview["checks"]);
+    let check = phone.post("/api/automation/youtube/check", json!({})).await;
+    assert_eq!(check.body["error"]["code"], "needs_mac", "{}", check.body);
 }
 
 #[tokio::test]

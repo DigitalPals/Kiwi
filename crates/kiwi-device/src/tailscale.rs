@@ -9,11 +9,11 @@ use crate::{Error, Result, process};
 const WHOIS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where the open-source tailscaled listens for its LocalAPI: Homebrew's on macOS, the
-/// distribution packages' on Linux.
+/// distribution packages' (and tailscaled's own default) on Linux.
 #[cfg(target_os = "macos")]
 pub const TAILSCALED_SOCKET: &str = "/var/run/tailscaled.socket";
 #[cfg(not(target_os = "macos"))]
-pub const TAILSCALED_SOCKET: &str = "/var/run/tailscale/tailscaled.socket";
+pub const TAILSCALED_SOCKET: &str = "/var/run/tailscale/tailscaled.sock";
 
 /// tailscaled refuses LocalAPI requests for other host names (DNS rebinding).
 const LOCALAPI: &str = "http://local-tailscaled.sock/localapi/v0";

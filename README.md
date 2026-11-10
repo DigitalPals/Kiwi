@@ -5,14 +5,14 @@
 <h1 align="center">Kiwi</h1>
 
 <p align="center">
-  <strong>Your own app store for sideloaded iPhone apps, running on your Mac.</strong><br>
+  <strong>Your own app store for sideloaded iPhone apps, running on your Mac or Linux server.</strong><br>
   Browse AltStore sources, sign apps with your own developer certificate and install them over the air on every iPhone in your tailnet.
 </p>
 
 <p align="center">
   <a href="https://github.com/DigitalPals/Kiwi/actions/workflows/ci.yml"><img src="https://github.com/DigitalPals/Kiwi/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1e6b4d" alt="MIT license"></a>
-  <img src="https://img.shields.io/badge/server-macOS-555" alt="macOS">
+  <img src="https://img.shields.io/badge/server-macOS%20%7C%20Linux-555" alt="macOS or Linux">
   <img src="https://img.shields.io/badge/phones-iOS%2016%2B-555" alt="iOS 16 or later">
   <img src="https://img.shields.io/badge/network-Tailscale-555" alt="Tailscale">
   <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20Preact-555" alt="Rust and Preact">
@@ -22,9 +22,9 @@
   <img src="docs/screenshots/hero.png" alt="Kiwi on an iPhone: Browse, an app's page, My Apps and Kiwi Builds" width="100%">
 </p>
 
-Kiwi is a small server for your Mac and a web app for your iPhone. It reads
-[AltStore](https://altstore.io)-format sources, downloads the apps you pick, re-signs them
-with your Apple Development certificate using Apple's own `codesign`, and serves them over
+Kiwi is a small server for your Mac (or a Linux computer) and a web app for your iPhone. It
+reads [AltStore](https://altstore.io)-format sources, downloads the apps you pick, re-signs
+them with your Apple Development certificate (on a Mac with Apple's own `codesign`), and serves them over
 HTTPS on your [Tailscale](https://tailscale.com) network. On the iPhone you add Kiwi to the
 Home Screen and install and update apps with one tap, with update badges and notifications.
 
@@ -152,7 +152,7 @@ More detail: [architecture](docs/architecture.md).
 
 | | |
 |---|---|
-| **Mac** | An always-on Mac you can stay logged in to (Kiwi runs in your login session so `codesign` can use your keychain). Tested on macOS 27 with Xcode 27 on Apple Silicon. |
+| **Server** | An always-on Mac you can stay logged in to (Kiwi runs in your login session so `codesign` can use your keychain). Tested on macOS 27 with Xcode 27 on Apple Silicon. Or a Linux computer or VM with systemd or Docker ([Linux](docs/install.md#linux), [Docker](docs/install.md#docker)); Kiwi Builds builds patched iOS apps on a Mac only. |
 | **Apple** | An [Apple Developer Program](https://developer.apple.com/programs/) membership, with an Apple Development certificate and a development profile that includes your iPhones. [The install guide](docs/install.md#2-signing-certificate-and-profile) walks you through it. |
 | **Tailscale** | Tailscale on the Mac and on every iPhone, with MagicDNS and HTTPS certificates turned on for your tailnet. |
 | **Build tools** | Xcode (or its command line tools), [Rust](https://rustup.rs) and Node.js 20 or later. `install.sh` checks them all. |
@@ -188,6 +188,10 @@ Plan on about half an hour, most of it in Apple's developer portal.
    an app Kiwi signed, iOS asks you to turn on **Developer Mode** (Settings › Privacy &
    Security).
 
+On Linux, `./install.sh` installs Kiwi as a systemd service the same way, and
+`compose.yaml` runs it in Docker next to a Tailscale container; see
+[the install guide](docs/install.md#linux).
+
 To update Kiwi, run `git pull && ./install.sh` in the clone: it backs up Kiwi's database
 and rolls back if the new version doesn't start. To remove it, run `./uninstall.sh` (add
 `--purge` to delete its data and logs too). Installed apps keep working until their
@@ -220,9 +224,10 @@ later, from the Home Screen app). More in [Using Kiwi](docs/using-kiwi.md).
 
 ## FAQ
 
-**Does the Mac have to stay on?** For installing and updating, yes. Installed apps keep
-working until their signature expires (when your development profile or certificate
-expires, usually after a year), and Kiwi reminds you before then.
+**Does the Mac have to stay on?** For installing and updating, yes (the same goes for a
+Linux server). Installed apps keep working until their signature expires (when your
+development profile or certificate expires, usually after a year), and Kiwi reminds you
+before then.
 
 **Does it work away from home?** Yes. Anywhere your iPhone is connected to your tailnet.
 

@@ -1,18 +1,20 @@
 #!/bin/bash
-# Install or update Kiwi on this Mac. Run it from a clone of the repository, in Terminal,
-# as the user whose keychain holds your Apple Development certificate:
+# Install or update Kiwi on this Mac or Linux computer. Run it from a clone of the repository:
+# on a Mac in Terminal, as the user whose keychain holds your Apple Development certificate;
+# on Linux as a user who may use sudo (or as root).
 #
-#   ./install.sh           check this Mac, build Kiwi, install or update it and start it
-#   ./install.sh --check   only check this Mac and show what would be installed
+#   ./install.sh           check this computer, build Kiwi, install or update it and start it
+#   ./install.sh --check   only check this computer and show what would be installed
 #
 # Options:
 #   --no-build         install the last build instead of compiling
-#   --public-url URL   the address iPhones open [default: https://<this Mac's Tailscale name>]
-#   --owner LOGIN      the owner's Tailscale login [default: the user who owns this Mac in
-#                      Tailscale; required when the Mac is tagged]
+#   --public-url URL   the address phones open [default: https://<this computer's Tailscale name>]
+#   --owner LOGIN      the owner's Tailscale login [default: the user who owns this computer
+#                      in Tailscale; required when it is tagged]
 #   --port PORT        loopback port Kiwi listens on [default: 8742]
+#   --python PATH      Linux: Python 3.12 or newer for Kiwi Builds' Android apps [default: python3]
 #
-# What it does:
+# What it does on a Mac:
 #  1. checks macOS, your login session, Xcode's command line tools, Rust, Node.js, Tailscale
 #     (connected, with HTTPS certificates) and the signing certificate;
 #  2. builds the server (cargo build --release) and the web app (npm ci && npm run build);
@@ -27,6 +29,12 @@
 #     (the database backup is never restored automatically);
 #  6. publishes Kiwi on your tailnet with `tailscale serve` (`/` -> 127.0.0.1:PORT, HTTPS,
 #     tailnet only, never Funnel), leaving other serve paths alone.
+#
+# On Linux it builds as you, then installs as root (sudo): Kiwi runs as the system service
+# kiwi.service (deploy/kiwi.service.in) under its own user "kiwi", the program in
+# /opt/kiwi/app (app.prev/ and the rest as above), data in /var/lib/kiwi, logs in the journal
+# (journalctl -u kiwi). It checks, backs up, swaps, restarts, rolls back and runs
+# `tailscale serve` as on a Mac.
 #
 # Safe to run again; ./uninstall.sh removes Kiwi. Compatible with macOS's /bin/bash 3.2.
 set -euo pipefail
@@ -43,6 +51,29 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 SERVICE="gui/$(id -u)/$LABEL"
 # Rust, Homebrew and Tailscale are often missing from the PATH of SSH sessions.
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+# Where the installed builds live (app/, app.prev/, ...), the service definition, its log,
+# and how messages name this computer and its Tailscale.
+APPS=$DATA
+SERVICE_FILE=$PLIST
+LOG_HINT="$LOGS/kiwi.log"
+MACHINE="This Mac"
+TS_INSTALL="install it from https://tailscale.com/download/mac (or brew install tailscale) and sign in"
+TS_START="open Tailscale and sign in"
+
+LINUX=0
+if [ "$(uname -s)" = Linux ]; then
+	LINUX=1
+	TAILSCALE_SOCKET=/var/run/tailscale/tailscaled.sock
+	DATA=/var/lib/kiwi
+	APPS=/opt/kiwi
+	SERVICE_USER=kiwi
+	UNIT=/etc/systemd/system/kiwi.service
+	SERVICE_FILE=$UNIT
+	LOG_HINT="journalctl -u kiwi"
+	MACHINE="This computer"
+	TS_INSTALL="install it from https://tailscale.com/download/linux and sign in (sudo tailscale up)"
+	TS_START="start it and sign in (sudo systemctl enable --now tailscaled && sudo tailscale up)"
+fi
 
 CHECK=0
 BUILD=1
@@ -53,6 +84,7 @@ TAILSCALE=
 TS_HOST=
 TMP_DIR=
 BACKUP=
+PYTHON=
 
 say() { printf '==> %s\n' "$*"; }
 good() { printf '  \342\234\223 %s\n' "$*"; }
@@ -66,11 +98,19 @@ die() {
 	exit 1
 }
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
 
-# sudo that may ask for a password in Terminal, but never blocks a script without one.
+# sudo that may ask for a password in Terminal, but never blocks a script without one. As
+# root (Linux only) it runs the command itself.
 as_root() {
-	if [ -t 0 ]; then sudo "$@"; else sudo -n "$@"; fi
+	if [ "$(id -u)" = 0 ]; then
+		"$@"
+	elif [ -t 0 ]; then sudo "$@"; else sudo -n "$@"; fi
+}
+
+# Runs a command on the data directory as its owner: you on a Mac, the kiwi user on Linux.
+as_data() {
+	if [ "$LINUX" = 1 ]; then runuser -u "$SERVICE_USER" -- "$@"; else "$@"; fi
 }
 
 # launchctl for the gui/<uid> domain. An SSH session may be refused, so retry in the GUI
@@ -165,28 +205,76 @@ check_system() {
 	fi
 }
 
+# Linux: the distribution, systemd, tools, Python for Kiwi Builds and the build tools.
+# Sets PYTHON.
+check_linux() {
+	say "Checking this computer"
+	local distro tool major version
+	distro=$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | tr -d '"')
+	good "${distro:-Linux} on $(uname -m), user $(id -un)"
+	if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
+		good "systemd (Kiwi runs as the system service kiwi.service)"
+	else
+		problem "systemd is not running here, and install.sh sets Kiwi up as a systemd service. Use Docker instead (docs/install.md)"
+	fi
+	for tool in jq sqlite3 curl; do
+		if ! command -v "$tool" >/dev/null; then
+			problem "$tool is missing (install it with your package manager, e.g. sudo apt install $tool)"
+		fi
+	done
+	if [ "$(id -u)" = 0 ]; then
+		for tool in useradd runuser; do
+			command -v "$tool" >/dev/null || problem "$tool is missing"
+		done
+	elif ! command -v sudo >/dev/null; then
+		problem "sudo is missing: run ./install.sh as root"
+	fi
+	PYTHON=${PYTHON:-$(command -v python3 2>/dev/null || true)}
+	if [ -z "$PYTHON" ]; then
+		PYTHON=python3
+		note "Optional: Python 3.12 or newer (python3) lets Kiwi Builds build Android apps"
+	elif version=$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2]); sys.exit(sys.version_info < (3, 12))' 2>/dev/null); then
+		good "Python $version ($PYTHON) for Kiwi Builds' Android apps"
+	else
+		note "Optional: $PYTHON is Python ${version:-of an unknown version}; Kiwi Builds needs 3.12 or newer for Android apps (name one with --python)"
+	fi
+	note "Kiwi Builds builds iOS apps on a Mac only; Android apps build here"
+	if [ "$BUILD" = 1 ]; then
+		if command -v cargo >/dev/null; then
+			good "Rust ($(cargo --version))"
+		else
+			problem "Rust is missing: install it from https://rustup.rs"
+		fi
+		if major=$(node_major) && [ "$major" -ge 20 ]; then
+			good "Node.js $(node --version)"
+		else
+			problem "Node.js 20 or newer is missing (https://nodejs.org, or your package manager)"
+		fi
+	fi
+}
+
 # Sets TAILSCALE, TS_HOST and PUBLIC_URL.
 check_tailscale() {
 	say "Checking Tailscale"
 	if ! find_tailscale; then
-		problem "Tailscale is missing: install it from https://tailscale.com/download/mac (or brew install tailscale) and sign in"
+		problem "Tailscale is missing: $TS_INSTALL"
 		return
 	fi
 	local status state tagged certs serve key cur
 	if ! status=$("$TAILSCALE" status --json 2>/dev/null) || [ -z "$status" ]; then
-		problem "Tailscale ($TAILSCALE) does not answer: open Tailscale and sign in"
+		problem "Tailscale ($TAILSCALE) does not answer: $TS_START"
 		return
 	fi
 	state=$(jq -r '.BackendState // empty' <<<"$status")
 	if [ "$state" != Running ]; then
-		problem "Tailscale is not connected (state: ${state:-unknown}): open Tailscale and sign in"
+		problem "Tailscale is not connected (state: ${state:-unknown}): $TS_START"
 		return
 	fi
 	# tailscale serve answers on this name; --public-url may name another address for it.
 	TS_HOST=$(jq -r '.Self.DNSName // empty' <<<"$status")
 	TS_HOST=${TS_HOST%.}
 	if [ -z "$TS_HOST" ]; then
-		problem "This Mac has no Tailscale DNS name: turn on MagicDNS (https://login.tailscale.com/admin/dns)"
+		problem "$MACHINE has no Tailscale DNS name: turn on MagicDNS (https://login.tailscale.com/admin/dns)"
 		return
 	fi
 	PUBLIC_URL=${PUBLIC_URL:-https://$TS_HOST}
@@ -199,7 +287,7 @@ check_tailscale() {
 	fi
 	tagged=$(jq -r '.Self.Tags // [] | length' <<<"$status")
 	if [ "$tagged" -gt 0 ] && [ -z "$OWNER" ]; then
-		problem "This Mac is tagged in Tailscale, so it has no owner: run again with --owner <your Tailscale login>"
+		problem "$MACHINE is tagged in Tailscale, so it has no owner: run again with --owner <your Tailscale login>"
 	fi
 	if [ -S "$TAILSCALE_SOCKET" ]; then
 		good "Kiwi asks tailscaled through $TAILSCALE_SOCKET"
@@ -222,11 +310,13 @@ check_port() {
 		good "Kiwi $(jq -r '.version // "?"' <<<"$health") is running on port $PORT; this updates it"
 	elif pid=$(lsof -nP -t -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1) && [ -n "$pid" ]; then
 		problem "Port $PORT is used by another program (pid $pid): stop it or choose --port"
+	elif [ "$LINUX" = 1 ] && ss -Hltn "sport = :$PORT" 2>/dev/null | grep -q .; then
+		problem "Port $PORT is used by another program (ss -ltnp shows which): stop it or choose --port"
 	fi
 }
 
 check_sudo() {
-	if [ -t 0 ] || sudo -n true 2>/dev/null; then
+	if [ "$(id -u)" = 0 ] || [ -t 0 ] || sudo -n true 2>/dev/null; then
 		return
 	fi
 	problem "Without a terminal, sudo must work without a password (log rotation and tailscale serve need it); run ./install.sh in Terminal instead"
@@ -258,7 +348,31 @@ render() {
 		fi
 }
 
+# A value for the unit's ExecStart, in double quotes: systemd unescapes \\ and \", and
+# reads % (specifiers) and $ (variables) unless doubled.
+unit_quote() {
+	printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g' -e 's/\$/$$/g')"
+}
+
+# Renders deploy/kiwi.service.in: @APP@, @DATA@, @PORT@, @PUBLIC_URL@, @TAILSCALE_SOCKET@,
+# @TAILSCALE_BIN@ and @PYTHON@; " @OWNER_ARGS@" becomes " --owner LOGIN" or goes.
+render_unit() {
+	local owner_args=
+	if [ -n "$OWNER" ]; then owner_args=" --owner $(unit_quote "$OWNER")"; fi
+	sed -e "s|@APP@|$(sed_escape "$APPS/app")|g" -e "s|@DATA@|$(sed_escape "$DATA")|g" \
+		-e "s|@PORT@|$PORT|g" \
+		-e "s|@PUBLIC_URL@|$(sed_escape "$(unit_quote "$PUBLIC_URL")")|g" \
+		-e "s|@TAILSCALE_SOCKET@|$(sed_escape "$TAILSCALE_SOCKET")|g" \
+		-e "s|@TAILSCALE_BIN@|$(sed_escape "$(unit_quote "$TAILSCALE")")|g" \
+		-e "s|@PYTHON@|$(sed_escape "$(unit_quote "$PYTHON")")|g" \
+		-e "s| @OWNER_ARGS@|$(sed_escape "$owner_args")|" "$REPO/deploy/kiwi.service.in"
+}
+
 service_pid() {
+	if [ "$LINUX" = 1 ]; then
+		systemctl show -p MainPID --value kiwi.service 2>/dev/null | grep -v '^0$' || true
+		return
+	fi
 	launchctl print "$SERVICE" 2>/dev/null | awk -F' = ' '$1 == "\tpid" { print $2; exit }'
 }
 
@@ -291,6 +405,12 @@ wait_healthy() {
 		fi
 		sleep 1
 	done
+	if [ "$LINUX" = 1 ]; then
+		systemctl status --no-pager --lines=0 kiwi.service >&2 || true
+		journalctl -u kiwi.service -n 40 --no-pager >&2 || true
+		say "Kiwi did not become healthy on 127.0.0.1:$PORT (service state and log above)"
+		return 1
+	fi
 	launchctl print "$SERVICE" 2>&1 | sed -n '1,40p' >&2 || true
 	tail -n 40 "$LOGS/kiwi.log" >&2 || true
 	say "Kiwi did not become healthy on 127.0.0.1:$PORT (agent state and log above)"
@@ -324,17 +444,32 @@ restart_agent() {
 	fi
 }
 
+# (Re)starts Kiwi: the LaunchAgent on a Mac; on Linux kiwi.service, after reloading systemd
+# when $1 = reload (the unit changed). Fails instead of exiting.
+restart_service() {
+	if [ "$LINUX" = 0 ]; then
+		restart_agent "$1"
+		return
+	fi
+	if [ "$1" = reload ]; then
+		systemctl daemon-reload || return 1
+	fi
+	systemctl enable --quiet kiwi.service || return 1
+	say "Restarting kiwi.service"
+	systemctl restart kiwi.service
+}
+
 # Online copy of kiwi.db (sqlite3 .backup) into the data directory; keeps the newest
 # $DB_BACKUPS. Sets BACKUP.
 backup_db() {
 	local db="$DATA/kiwi.db" dest schema backups=() f i
 	[ -f "$db" ] || return 0
 	dest="$DATA/kiwi.db.bak-$(date -u +%Y%m%dT%H%M%SZ)"
-	sqlite3 -cmd ".timeout 10000" "$db" ".backup '$dest'" || die "could not back up $db"
+	as_data sqlite3 -cmd ".timeout 10000" "$db" ".backup '$dest'" || die "could not back up $db"
 	chmod 600 "$dest"
 	# The copy is in WAL mode like kiwi.db, and macOS's sqlite3 keeps -wal/-shm files after
 	# opening it. Switch it to a rollback journal so the backup is one self-contained file.
-	schema=$(sqlite3 "$dest" 'PRAGMA journal_mode=DELETE; PRAGMA user_version;' | tail -n 1)
+	schema=$(as_data sqlite3 "$dest" 'PRAGMA journal_mode=DELETE; PRAGMA user_version;' | tail -n 1)
 	rm -f "$dest-wal" "$dest-shm"
 	BACKUP=$dest
 	say "Backed up kiwi.db (schema $schema) to $dest"
@@ -354,35 +489,35 @@ backup_db() {
 # not finish, so app/ was never confirmed healthy: it is dropped and app.prev/ stays the
 # rollback build.
 swap_in() {
-	if [ -d "$DATA/app.old" ]; then
+	if [ -d "$APPS/app.old" ]; then
 		say "An earlier install did not finish; keeping app.prev/ as the rollback build"
-		rm -rf "$DATA/app"
+		rm -rf "$APPS/app"
 	else
-		if [ -d "$DATA/app.prev" ]; then mv "$DATA/app.prev" "$DATA/app.old"; fi
-		if [ -d "$DATA/app" ]; then mv "$DATA/app" "$DATA/app.prev"; fi
+		if [ -d "$APPS/app.prev" ]; then mv "$APPS/app.prev" "$APPS/app.old"; fi
+		if [ -d "$APPS/app" ]; then mv "$APPS/app" "$APPS/app.prev"; fi
 	fi
-	mv "$DATA/app.new" "$DATA/app"
+	mv "$APPS/app.new" "$APPS/app"
 }
 
-# Restores app.prev/ and the previous plist ($2), restarts and exits with the reason $1.
-# The database is not restored (see docs/operations.md, "Roll back").
+# Restores app.prev/ and the previous plist or unit ($2), restarts and exits with the reason
+# $1. The database is not restored (see docs/operations.md, "Roll back").
 rollback() {
 	local reason=$1 previous_plist=$2 mode=kickstart failed_pid backup_note
 	backup_note="Database backup: ${BACKUP:-none (no database yet)}; it was not restored"
-	if [ ! -d "$DATA/app.prev" ]; then
-		die "$reason. There is no previous build to roll back to. $backup_note. See $LOGS/kiwi.log."
+	if [ ! -d "$APPS/app.prev" ]; then
+		die "$reason. There is no previous build to roll back to. $backup_note. See $LOG_HINT."
 	fi
 	say "Install failed ($reason); rolling back to the previous build"
 	failed_pid=$(service_pid)
-	rm -rf "$DATA/app.bad"
-	mv "$DATA/app" "$DATA/app.bad"
-	mv "$DATA/app.prev" "$DATA/app"
-	if [ -d "$DATA/app.old" ]; then mv "$DATA/app.old" "$DATA/app.prev"; fi
-	if [ -f "$previous_plist" ] && ! cmp -s "$previous_plist" "$PLIST"; then
-		install -m 644 "$previous_plist" "$PLIST"
+	rm -rf "$APPS/app.bad"
+	mv "$APPS/app" "$APPS/app.bad"
+	mv "$APPS/app.prev" "$APPS/app"
+	if [ -d "$APPS/app.old" ]; then mv "$APPS/app.old" "$APPS/app.prev"; fi
+	if [ -f "$previous_plist" ] && ! cmp -s "$previous_plist" "$SERVICE_FILE"; then
+		install -m 644 "$previous_plist" "$SERVICE_FILE"
 		mode=reload
 	fi
-	if restart_agent "$mode" && wait_healthy "$failed_pid" ""; then
+	if restart_service "$mode" && wait_healthy "$failed_pid" ""; then
 		die "$reason. Rolled back: the previous build is running again and the failed one is in app.bad/. $backup_note."
 	fi
 	die "$reason. The rollback to the previous build did not become healthy either (the failed build is in app.bad/). $backup_note. If the log says the database schema is newer than this Kiwi, restore the backup (docs/operations.md, \"Roll back\")."
@@ -465,6 +600,69 @@ install_kiwi() {
 	say "Kiwi $version is running at $PUBLIC_URL/ (tailnet only)"
 }
 
+# Linux, as root: the kiwi user, /opt/kiwi/app, /var/lib/kiwi and kiwi.service.
+install_kiwi_linux() {
+	local mode=restart old_pid version nologin group=--user-group
+	[ -x "$REPO/target/release/kiwi" ] || die "$REPO/target/release/kiwi is missing; run without --no-build"
+	[ -f "$REPO/web/dist/index.html" ] || die "$REPO/web/dist is missing; run without --no-build"
+
+	if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+		nologin=$(command -v nologin || echo /bin/false)
+		if getent group "$SERVICE_USER" >/dev/null; then group="--gid=$SERVICE_USER"; fi
+		useradd --system "$group" --home-dir "$DATA" --no-create-home --shell "$nologin" \
+			"$SERVICE_USER" || die "could not create the user $SERVICE_USER"
+		say "Created the system user $SERVICE_USER"
+	fi
+	install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 700 "$DATA"
+	install -d -m 755 "$APPS"
+
+	say "Installing into $APPS/app"
+	rm -rf "$APPS/app.new"
+	install -d -m 755 "$APPS/app.new"
+	install -m 755 "$REPO/target/release/kiwi" "$APPS/app.new/kiwi"
+	cp -R "$REPO/web/dist" "$APPS/app.new/web"
+	# Owned by root and readable by kiwi: the service can't change its own program.
+	chown -R root:root "$APPS/app.new"
+	chmod -R u=rwX,go=rX "$APPS/app.new"
+	version=$("$APPS/app.new/kiwi" --version) || die "the new binary does not run"
+	version=${version##* } # "kiwi 0.2.0" -> "0.2.0"
+	render_unit >"$TMP_DIR/unit"
+
+	backup_db
+	swap_in
+	if [ -f "$UNIT" ]; then cp "$UNIT" "$TMP_DIR/unit.prev"; fi
+	if ! cmp -s "$TMP_DIR/unit" "$UNIT"; then
+		install -m 644 "$TMP_DIR/unit" "$UNIT"
+		mode=reload
+		say "Installed $UNIT"
+	fi
+
+	old_pid=$(service_pid)
+	if ! restart_service "$mode"; then
+		rollback "systemctl could not (re)start kiwi.service" "$TMP_DIR/unit.prev"
+	fi
+	if ! wait_healthy "$old_pid" "$version"; then
+		rollback "Kiwi $version did not become healthy" "$TMP_DIR/unit.prev"
+	fi
+	rm -rf "$APPS/app.old"
+	ensure_serve
+	say "Kiwi $version is running at $PUBLIC_URL/ (tailnet only)"
+}
+
+next_steps_linux() {
+	cat <<EOF
+
+Next:
+  1. On your phone, install Tailscale and sign in to the same tailnet.
+  2. Open $PUBLIC_URL/ in the browser (Safari on an iPhone, then Share › Add to Home Screen).
+  3. On an iPhone, upload your signing identity and profiles in Settings › Signing, then add
+     an AltStore source under Sources. On Android, see Kiwi Builds under Sources.
+
+Logs: journalctl -u kiwi -f · Data: $DATA
+Docs: $REPO/docs/install.md · Update: git pull && ./install.sh · Remove: ./uninstall.sh
+EOF
+}
+
 next_steps() {
 	cat <<EOF
 
@@ -501,6 +699,12 @@ main() {
 			PORT=$2
 			shift
 			;;
+		--python)
+			[ $# -ge 2 ] || die "--python needs the path of a Python 3.12 or newer"
+			[ "$LINUX" = 1 ] || die "--python is for Linux; on a Mac, Kiwi Builds uses Homebrew's python3.13"
+			PYTHON=$2
+			shift
+			;;
 		-h | --help)
 			usage
 			return 0
@@ -518,12 +722,25 @@ main() {
 	esac
 	[ -f "$REPO/crates/kiwi-server/Cargo.toml" ] || die "$REPO is not the Kiwi repository"
 
-	check_system
+	if [ "$LINUX" = 1 ]; then
+		check_linux
+	else
+		check_system
+	fi
 	check_tailscale
 	check_port
 	if [ "$CHECK" = 0 ]; then check_sudo; fi
-	TMP_DIR=$(mktemp -d -t kiwi-install)
+	if [ "$LINUX" = 1 ]; then
+		TMP_DIR=$(mktemp -d -t kiwi-install.XXXXXX)
+	else
+		TMP_DIR=$(mktemp -d -t kiwi-install)
+	fi
 	trap 'rm -rf "$TMP_DIR"' EXIT
+
+	if [ "$LINUX" = 1 ]; then
+		linux_main
+		return
+	fi
 
 	if [ "$CHECK" = 1 ]; then
 		say "Plan"
@@ -556,6 +773,46 @@ main() {
 	if [ "$BUILD" = 1 ]; then build; fi
 	install_kiwi
 	next_steps
+}
+
+# Linux, after the checks: show the plan, or build as you and install as root.
+linux_main() {
+	if [ "$CHECK" = 1 ]; then
+		say "Plan"
+		note "Kiwi: $APPS/app as the user $SERVICE_USER, listening on 127.0.0.1:$PORT"
+		note "Data: $DATA · Logs: journalctl -u kiwi"
+		note "Address: ${PUBLIC_URL:-unknown} (tailscale serve, tailnet only)"
+		note "Service: $UNIT"
+		if [ -n "$TAILSCALE" ]; then
+			render_unit >"$TMP_DIR/unit"
+			if [ ! -f "$UNIT" ]; then
+				note "The service will be created"
+			elif cmp -s "$TMP_DIR/unit" "$UNIT"; then
+				note "The installed service stays as it is"
+			else
+				note "The installed service will change:"
+				diff -u "$UNIT" "$TMP_DIR/unit" | sed 's/^/      /' || true
+			fi
+		fi
+		if [ "$PROBLEMS" -gt 0 ]; then
+			say "$PROBLEMS problem(s) to fix before installing"
+			return 1
+		fi
+		say "Ready to install: run ./install.sh"
+		return 0
+	fi
+	[ "$PROBLEMS" = 0 ] || die "fix the $PROBLEMS problem(s) above, then run ./install.sh again"
+	if [ "$BUILD" = 1 ]; then build; fi
+	if [ "$(id -u)" != 0 ]; then
+		local args=(--no-build --port "$PORT" --python "$PYTHON")
+		if [ -n "$PUBLIC_URL" ]; then args+=(--public-url "$PUBLIC_URL"); fi
+		if [ -n "$OWNER" ]; then args+=(--owner "$OWNER"); fi
+		say "Installing as root (sudo)"
+		as_root "$BASH" "$REPO/install.sh" "${args[@]}"
+		return
+	fi
+	install_kiwi_linux
+	next_steps_linux
 }
 
 main "$@"

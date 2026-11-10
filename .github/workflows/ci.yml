@@ -63,3 +63,20 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: shellcheck install.sh uninstall.sh deploy/deploy.sh
+
+  docker:
+    name: Docker image
+    # Builds the image without publishing it, and checks compose.yaml. GitHub-hosted on
+    # purpose: the Beast runner VMs may not provide a Docker daemon.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          tags: kiwi:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: docker compose config --quiet

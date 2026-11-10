@@ -7,7 +7,9 @@ Kiwi Builds patches App Store apps with open-source tweaks and signs them on you
 
 It also builds **Android** apps: YouTube, YouTube Music and Reddit, patched with
 [Morphe](https://morphe.software)'s open-source patches and signed with a key of your own.
-They need no Apple account, Xcode or Mac setup; see [Android apps](#android-apps).
+They need no Apple account, Xcode or Mac setup; see [Android apps](#android-apps). On a Kiwi
+that runs on Linux or in Docker, Kiwi Builds builds these Android apps only: iOS apps need a
+Mac, and the page shows a **macOS** setup check that is never ready.
 
 It is optional and off by default. Kiwi itself works without it; see the
 [README](../README.md) and [installation guide](install.md) first.
@@ -208,8 +210,11 @@ and Kiwi's signing warnings don't apply to them.
 
 ### Requirements and limits
 
-- Python 3.13 on the Mac (`brew install python@3.13`). Nothing else: the setup below, the
+- Python 3.13 on the Mac (`brew install python@3.13`); on Linux Python 3.12 or newer
+  (`python3`, or the one `--python`/`KIWI_PYTHON` names; the Docker image has 3.13). An older
+  Python fails the build with a message saying so. Nothing else: the setup below, the
   Apple account, Xcode and enrollment are for iPhone apps only.
+- Linux on x86-64 or ARM64, or a Mac: the pinned Java runtime exists for those.
 - About 1 GB of disk for the tools and cached originals, plus 75 to 180 MB for each
   retained release (the newest 5 per app), and network access to GitHub, `auroraoss.com`,
   Google Play and APKPure.

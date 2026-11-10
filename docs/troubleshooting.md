@@ -1,7 +1,8 @@
 # Troubleshooting
 
-Start with the log, `~/Library/Logs/Kiwi/kiwi.log` on the Mac, and with
-`./install.sh --check`, which checks the whole setup without changing anything.
+Start with the log (`~/Library/Logs/Kiwi/kiwi.log` on a Mac, `journalctl -u kiwi` on Linux,
+`docker compose logs kiwi` in Docker) and with `./install.sh --check`, which checks the whole
+setup without changing anything.
 
 ## Installing Kiwi
 
@@ -29,6 +30,12 @@ in the same Terminal. Rust's first build downloads crates and takes a few minute
 **"Kiwi … did not become healthy"**: the installer rolled back to the previous build. The
 end of the log printed above says why. Fix it and run `./install.sh` again.
 
+**"systemd is not running here"** (Linux): `install.sh` sets Kiwi up as a systemd service.
+In a container or on a system without systemd, run Kiwi with [Docker](install.md#docker).
+
+**"This computer is tagged in Tailscale, so it has no owner"** (Linux): as for a tagged Mac,
+run `./install.sh --owner you@example.com`.
+
 ## Reaching Kiwi
 
 **"Can't reach Kiwi" on the iPhone**: check that Tailscale is connected on the iPhone,
@@ -42,7 +49,15 @@ tailscale serve status
 
 **"Couldn't identify this device through Tailscale"**: Kiwi couldn't ask tailscaled
 who's connecting. Make sure Tailscale is running on the Mac; the log says whether Kiwi uses
-the LocalAPI socket or the CLI, and why it failed.
+the LocalAPI socket or the CLI, and why it failed. In Docker, Kiwi asks the Tailscale
+container through the socket in the `tailscale-socket` volume: check that both containers
+run (`docker compose ps`).
+
+**"This host name is not served by Kiwi"** (`421 bad_host`) in Docker: Kiwi started before
+the Tailscale container had its name, so it only answers on its listen address. The log
+says "no public URL" at start. Make sure the Tailscale container is logged in
+(`docker compose logs tailscale`), then `docker compose restart kiwi`. Setting
+`KIWI_PUBLIC_URL` to the address avoids the lookup.
 
 **Kiwi works in Safari but not from the Home Screen** (or the other way around): the
 Home Screen app and Safari are the same device for Kiwi when Tailscale identifies them.
@@ -67,6 +82,12 @@ unlocked, which logging in to the desktop does.
 someone other than the Mac's owner. Kiwi is only for the owner: sign in to Tailscale on the
 device as them. When nobody owns the Mac (a tagged machine), run
 `./install.sh --owner you@example.com`.
+
+**"Kiwi doesn't know who owns it yet"**: its computer, or in Docker its Tailscale container,
+is tagged, so it belongs to no Tailscale user. Run `./install.sh --owner you@example.com`,
+or in Docker set `KIWI_OWNER` in `.env` and run `docker compose up -d`. A Tailscale container
+that joined with a key without tags belongs to the key's creator, and Kiwi finds the owner
+by itself.
 
 ## Installing apps
 
@@ -107,8 +128,15 @@ before the upgrade, as described in [Operations](operations.md#roll-back).
 See [Kiwi Builds](kiwi-builds.md). **Mac Setup** on the Kiwi Builds page shows what's
 missing, and `runner.py doctor` checks the toolchain, the App Store sign-in and enrollment.
 
+**"iOS apps can only be built on a Mac"** (`409 needs_mac`): Kiwi runs on Linux or in
+Docker. Patched iOS apps are decrypted and built with Apple's tools on a Mac; Android apps
+build anywhere. The Mac setup shows a single **macOS** check that is never ready.
+
+**"Kiwi Builds for Android needs Python 3.12 or newer"**: Kiwi runs the Android builder with
+an older Python. Install a newer one and point Kiwi at it: `./install.sh --python
+/usr/bin/python3.13`, or `KIWI_PYTHON`. The Docker image has Python 3.13.
+
 ## Still stuck?
 
 Open an issue with what you tried, the output of `./install.sh --check` and the relevant
-lines of `~/Library/Logs/Kiwi/kiwi.log`. Remove addresses, logins and UDIDs you don't want
-to share.
+lines of Kiwi's log. Remove addresses, logins and UDIDs you don't want to share.

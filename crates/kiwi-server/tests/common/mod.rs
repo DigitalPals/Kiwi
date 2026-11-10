@@ -745,6 +745,7 @@ impl TestKiwi {
                 allow_simulators,
                 owner: None,
                 country: None,
+                python: kiwi_server::config::PYTHON.into(),
             },
             source_client: ClientOptions {
                 read_timeout: Duration::from_secs(10),

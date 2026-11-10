@@ -1,0 +1,83 @@
+# Kiwi with a Tailscale sidecar. docs/install.md ("Docker") has the details. In short:
+#
+#   cp .env.example .env      # set TS_AUTHKEY, and KIWI_OWNER for a tagged auth key
+#   docker compose up -d --build
+#
+# The tailscale container joins your tailnet as TS_HOSTNAME and publishes
+# https://<TS_HOSTNAME>.<your tailnet>.ts.net with `tailscale serve` (HTTPS, tailnet only,
+# never Funnel). Kiwi shares its network namespace and listens on 127.0.0.1:8742 there, so
+# nothing is published on the host. Kiwi asks the sidecar's tailscaled who each device is
+# through its LocalAPI socket, shared in the tailscale-socket volume, and takes its address
+# (the sidecar's MagicDNS name) from there too.
+name: kiwi
+
+services:
+  tailscale:
+    image: tailscale/tailscale:v1.104.4
+    hostname: ${TS_HOSTNAME:-kiwi}
+    environment:
+      # Needed only until the node has logged in once (its state is kept). Without a key the
+      # log shows a login link: `docker compose logs tailscale`.
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_AUTH_ONCE: "true"
+      TS_HOSTNAME: ${TS_HOSTNAME:-kiwi}
+      TS_STATE_DIR: /var/lib/tailscale
+      # Where Kiwi looks for tailscaled's LocalAPI on Linux.
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_USERSPACE: "true"
+    configs:
+      - source: serve
+        target: /config/serve.json
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - tailscale-socket:/var/run/tailscale
+    # Healthy once the node has a tailnet address; Kiwi starts after that.
+    healthcheck:
+      test: ["CMD", "tailscale", "--socket=/var/run/tailscale/tailscaled.sock", "ip", "-4"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+
+  kiwi:
+    build: .
+    image: kiwi:local
+    network_mode: service:tailscale
+    depends_on:
+      tailscale:
+        condition: service_healthy
+        restart: true
+    environment:
+      # The owner's Tailscale login. Required when TS_AUTHKEY is a tagged key: a tagged node
+      # belongs to no user, so Kiwi can't tell whose it is.
+      KIWI_OWNER: ${KIWI_OWNER:-}
+    volumes:
+      - kiwi-data:/data
+      - tailscale-socket:/var/run/tailscale:ro
+    # Kiwi waits up to 10 s for open connections, then stops running builds.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+configs:
+  # `tailscale serve`: / -> Kiwi. The sidecar fills in its own name for ${TS_CERT_DOMAIN}
+  # ($$ keeps Compose from substituting it).
+  serve:
+    content: |
+      {
+        "TCP": {"443": {"HTTPS": true}},
+        "Web": {
+          "$${TS_CERT_DOMAIN}:443": {
+            "Handlers": {"/": {"Proxy": "http://127.0.0.1:8742"}}
+          }
+        },
+        "AllowFunnel": {"$${TS_CERT_DOMAIN}:443": false}
+      }
+
+volumes:
+  # Kiwi's data: back it up (docs/operations.md, "Backups").
+  kiwi-data:
+  # The sidecar's node key and state: without it the node logs in again as a new machine.
+  tailscale-state:
+  tailscale-socket:

@@ -384,7 +384,6 @@ class AndroidTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "Unknown app recipe"):
             self.android.app("youtube")
 
-
     def test_loading_the_key_records_its_certificate_for_the_server(self):
         certificate = PUBLISHER.certificate
         pem = "-----BEGIN CERTIFICATE-----\n" + base64.encodebytes(certificate).decode() + "-----END CERTIFICATE-----\n"
@@ -411,6 +410,15 @@ class AndroidTests(unittest.TestCase):
         self.assertEqual(self.android.keystore(java), (store, password, signer))
         self.assertTrue(recorded.is_file())
         self.assertEqual(len(commands), 3)
+
+
+class PythonTests(unittest.TestCase):
+    def test_an_old_python_is_refused_plainly(self):
+        android.require_python((3, 12, 0, "final", 0))
+        android.require_python((3, 13, 5))
+        with self.assertRaisesRegex(BuildError, r"needs Python 3\.12 or newer, but Kiwi runs it with Python 3\.11\.2\.") as caught:
+            android.require_python((3, 11, 2, "final", 0))
+        self.assertTrue(caught.exception.blocked)
 
 
 class TransportTests(unittest.TestCase):

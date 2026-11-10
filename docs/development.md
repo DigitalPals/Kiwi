@@ -6,7 +6,7 @@ Python build runner for Kiwi Builds in `automation/`. How the parts fit together
 [api.md](api.md).
 
 Everything builds and its platform-neutral tests run on Linux as well as macOS. Signing,
-devicectl and Kiwi Builds need a Mac.
+devicectl and Kiwi Builds' iOS apps need a Mac.
 
 ## Requirements
 
@@ -109,9 +109,12 @@ cargo run -p kiwi-server -- \
   --public-url http://localhost:5173
 ```
 
-On Linux, signing reports "only available on macOS" and Tailscale lookups fail, but sources,
-the catalogue, settings and the API work. Every flag is also an environment variable
-(`KIWI_LISTEN`, `KIWI_DATA_DIR`, `KIWI_PUBLIC_URL`, ...; see `kiwi --help`).
+On Linux without tailscaled, Tailscale lookups fail, but sources, the catalogue, settings
+and the API work. Every flag is also an environment variable (`KIWI_LISTEN`,
+`KIWI_DATA_DIR`, `KIWI_PUBLIC_URL`, ...; see `kiwi --help`).
+
+To try the container image: `docker build -t kiwi .`, and `docker compose config` checks
+`compose.yaml`. CI builds the image on every push without publishing it.
 
 Requests must name the public URL's host or the listen address (see "Security" in
 [architecture.md](architecture.md)), so when the Vite dev server proxies to a real Kiwi, pass
@@ -148,8 +151,9 @@ crates/kiwi-push       VAPID and Web Push
 crates/kiwi-server     the `kiwi` binary: HTTP API, SQLite, jobs, scheduler
 web/                   the PWA (src/), its mock API (mock/) and tests
 automation/            Kiwi Builds runner and pinned recipes
-deploy/                LaunchAgent and log rotation templates, deploy.sh
-install.sh             installer for the Mac; uninstall.sh removes Kiwi
+deploy/                LaunchAgent, log rotation and systemd templates, deploy.sh
+install.sh             installer for a Mac or Linux; uninstall.sh removes Kiwi
+Dockerfile             the container image; compose.yaml runs it with a Tailscale sidecar
 ```
 
 ## Conventions

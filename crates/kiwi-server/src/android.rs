@@ -2,9 +2,10 @@
 //! Android app, which Kiwi serves to them, and the installed packages that app reports.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::Read,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::SystemTime,
 };
 
@@ -15,7 +16,7 @@ use crate::{
     Kiwi,
     catalog::CatalogApp,
     db::{InstallRow, Time},
-    devices::reconcile,
+    devices::{INSTALL_GRACE, reconcile},
     error::{ApiError, ApiResult},
 };
 
@@ -228,25 +229,30 @@ pub fn signer_file(data: &Path) -> PathBuf {
     data.join("automation/android/signer.json")
 }
 
-/// The SHA-256 (hex) of the certificate Kiwi signs Android apps with: from the runner's
-/// `signer.json`, else from the provenance of a published Android build (Kiwis that built
-/// before the runner wrote the file). `None` before the first Android build.
-pub fn kiwi_signer(kiwi: &Kiwi, android_apps: &[CatalogApp]) -> Option<String> {
+/// The certificate SHA-256 (hex, lowercase) in the runner's `signer.json`, if any.
+pub fn recorded_signer(data: &Path) -> Option<String> {
     #[derive(Deserialize)]
     struct Signer {
         sha256: String,
     }
+    std::fs::read(signer_file(data))
+        .ok()
+        .and_then(|text| serde_json::from_slice::<Signer>(&text).ok())
+        .map(|s| s.sha256.to_ascii_lowercase())
+        .filter(|s| valid_sha256(s))
+}
+
+/// The SHA-256 (hex) of the certificate Kiwi signs Android apps with: from the runner's
+/// `signer.json`, else from the provenance of a published Android build (Kiwis that built
+/// before the runner wrote the file). `None` before the first Android build.
+pub fn kiwi_signer(kiwi: &Kiwi, android_apps: &[CatalogApp]) -> Option<String> {
     #[derive(Deserialize)]
     struct Provenance {
         signer: String,
     }
     let data = &kiwi.config.data_dir;
     let normal = |s: String| Some(s.to_ascii_lowercase()).filter(|s| valid_sha256(s));
-    let from_file = std::fs::read(signer_file(data))
-        .ok()
-        .and_then(|text| serde_json::from_slice::<Signer>(&text).ok())
-        .and_then(|s| normal(s.sha256));
-    from_file.or_else(|| {
+    recorded_signer(data).or_else(|| {
         android_apps
             .iter()
             .flat_map(|app| &app.app().releases)
@@ -330,6 +336,98 @@ pub fn reconcile_packages(
     }
 }
 
+/// Installs whose download completed in the grace period before a package report that did
+/// not list their package: once the grace period is over, the report counts for them too
+/// (Android's install can fail after the download, and the app reports at once). Returns
+/// the rows to save; [`reconcile_packages`] decides what changes.
+pub fn settle_report(
+    device_id: &str,
+    installs: &[InstallRow],
+    reported_at: Time,
+    packages: &[Package],
+    android_apps: &[CatalogApp],
+    signer: Option<&str>,
+    now: Time,
+) -> Vec<InstallRow> {
+    let waiting: Vec<InstallRow> = installs
+        .iter()
+        .filter(|i| {
+            i.origin == "kiwi"
+                && !i.verified
+                && i.removed_at.is_none()
+                && i.installed_at <= reported_at
+                && now - i.installed_at > INSTALL_GRACE
+        })
+        .cloned()
+        .collect();
+    if waiting.is_empty() {
+        return Vec::new();
+    }
+    let ids: HashSet<&str> = waiting
+        .iter()
+        .map(|i| i.signed_bundle_id.as_str())
+        .collect();
+    reconcile_packages(device_id, &waiting, packages, android_apps, signer, now)
+        .installs
+        .into_iter()
+        .filter(|row| ids.contains(row.signed_bundle_id.as_str()))
+        .collect()
+}
+
+/// The last package report of each device, in memory, for [`settle_reports`].
+#[derive(Default)]
+pub struct PackageReports(Mutex<HashMap<String, (Time, Vec<Package>)>>);
+
+/// Applies each device's last package report to the installs whose grace period ended since
+/// (see [`settle_report`]). The scheduler runs it every minute.
+pub fn settle_reports(kiwi: &Kiwi, now: Time) -> ApiResult<()> {
+    let reports: Vec<(String, Time, Vec<Package>)> = kiwi
+        .package_reports
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(device, (at, packages))| (device.clone(), *at, packages.clone()))
+        .collect();
+    let mut android_apps = None;
+    let mut changed = false;
+    for (device_id, reported_at, packages) in reports {
+        let installs = kiwi.db.installs(&device_id, false)?;
+        if !installs.iter().any(|i| i.origin == "kiwi" && !i.verified) {
+            continue;
+        }
+        let apps = android_apps.get_or_insert_with(|| kiwi_android_apps(kiwi));
+        let signer = kiwi_signer(kiwi, apps);
+        let rows = settle_report(
+            &device_id,
+            &installs,
+            reported_at,
+            &packages,
+            apps,
+            signer.as_deref(),
+            now,
+        );
+        for row in &rows {
+            tracing::info!(device = %device_id, package = %row.signed_bundle_id, removed = row.removed_at.is_some(), "settled an install with the last package report");
+            kiwi.db.save_install(row)?;
+            changed = true;
+        }
+    }
+    if changed {
+        kiwi.kick.notify_one();
+    }
+    Ok(())
+}
+
+/// The catalogue's Android apps (Kiwi Builds' Android releases).
+fn kiwi_android_apps(kiwi: &Kiwi) -> Vec<CatalogApp> {
+    kiwi.catalog
+        .apps(None, None)
+        .into_iter()
+        .filter(|a| crate::builds::android_app(a.app()))
+        .collect()
+}
+
 /// Saves a package report of an Android device (`PUT /api/me/packages`).
 pub fn record_packages(kiwi: &Kiwi, device_id: &str, report: PackageReport) -> ApiResult<()> {
     if report.packages.len() > MAX_PACKAGES {
@@ -347,12 +445,7 @@ pub fn record_packages(kiwi: &Kiwi, device_id: &str, report: PackageReport) -> A
             p
         })
         .collect();
-    let android_apps: Vec<CatalogApp> = kiwi
-        .catalog
-        .apps(None, None)
-        .into_iter()
-        .filter(|a| crate::builds::android_app(a.app()))
-        .collect();
+    let android_apps = kiwi_android_apps(kiwi);
     let signer = kiwi_signer(kiwi, &android_apps);
     let installs = kiwi.db.installs(device_id, true)?;
     let result = reconcile_packages(
@@ -365,6 +458,11 @@ pub fn record_packages(kiwi: &Kiwi, device_id: &str, report: PackageReport) -> A
     );
     kiwi.db
         .save_package_report(device_id, &result.installs, &result.foreign, now)?;
+    kiwi.package_reports
+        .0
+        .lock()
+        .unwrap()
+        .insert(device_id.to_owned(), (now, packages));
     if !result.installs.is_empty() {
         kiwi.kick.notify_one();
     }
@@ -518,6 +616,104 @@ mod tests {
         );
         assert_eq!(r.installs[0].removed_at, None);
         assert!(r.installs[0].verified);
+    }
+
+    #[test]
+    fn a_completed_download_missing_from_a_report_is_removed_after_the_grace_period() {
+        let now = Utc::now();
+        let catalog = android_catalog();
+        let others = [package("com.example.other", OTHER)];
+        for signer in [Some(SIGNER), None] {
+            // Android's install failed after the download: the report lacks the package.
+            let r = reconcile_packages(
+                "ts:test",
+                &[kiwi_install(11)],
+                &others,
+                &catalog,
+                signer,
+                now,
+            );
+            assert_eq!(r.installs.len(), 1, "{signer:?}");
+            let row = &r.installs[0];
+            assert_eq!(row.removed_at, Some(now));
+            assert!(!row.verified);
+            // Within the grace period Android may still be installing it.
+            let r = reconcile_packages(
+                "ts:test",
+                &[kiwi_install(9)],
+                &others,
+                &catalog,
+                signer,
+                now,
+            );
+            assert!(r.installs.is_empty(), "{signer:?}");
+        }
+    }
+
+    #[test]
+    fn a_report_inside_the_grace_period_counts_once_it_is_over() {
+        let reported = Utc::now();
+        let catalog = android_catalog();
+        let install = kiwi_install(3); // completed 3 minutes before the report
+        let others = [package("com.example.other", OTHER)];
+        let settle = |installs: &[InstallRow], packages: &[Package], minutes: i64| {
+            settle_report(
+                "ts:test",
+                installs,
+                reported,
+                packages,
+                &catalog,
+                Some(SIGNER),
+                reported + chrono::Duration::minutes(minutes),
+            )
+        };
+        // The report itself changed nothing...
+        let r = reconcile_packages(
+            "ts:test",
+            std::slice::from_ref(&install),
+            &others,
+            &catalog,
+            Some(SIGNER),
+            reported,
+        );
+        assert!(r.installs.is_empty());
+        // ...and still doesn't while the grace period runs.
+        assert!(settle(std::slice::from_ref(&install), &others, 6).is_empty());
+        // Once it is over, the package the report lacked counts as not installed.
+        let rows = settle(std::slice::from_ref(&install), &others, 8);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].signed_bundle_id, PACKAGE);
+        assert!(rows[0].removed_at.is_some() && !rows[0].verified);
+        // A copy with another signature does not make it installed either.
+        let foreign = [package(PACKAGE, OTHER)];
+        assert!(
+            settle(std::slice::from_ref(&install), &foreign, 8)[0]
+                .removed_at
+                .is_some()
+        );
+        // An older version of Kiwi's build that stayed installed is what the phone has.
+        let mut older = package(PACKAGE, SIGNER);
+        older.version_name = Some("21.29.0".into());
+        let rows = settle(std::slice::from_ref(&install), &[older], 8);
+        assert!(rows[0].verified && rows[0].removed_at.is_none());
+        assert_eq!(rows[0].version, "21.29.0");
+        // A report from before the download says nothing about it.
+        let later = InstallRow {
+            installed_at: reported + chrono::Duration::minutes(1),
+            ..install.clone()
+        };
+        assert!(settle(&[later], &others, 30).is_empty());
+        // Verified and removed installs are left to the next report.
+        let verified = InstallRow {
+            verified: true,
+            ..install.clone()
+        };
+        assert!(settle(&[verified], &others, 30).is_empty());
+        let removed = InstallRow {
+            removed_at: Some(reported),
+            ..install
+        };
+        assert!(settle(&[removed], &others, 30).is_empty());
     }
 
     #[test]

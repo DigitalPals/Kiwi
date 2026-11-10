@@ -59,6 +59,16 @@ KIWI_SIGN_BUNDLE_ID=com.example.app.<TEAMID> \
   cargo test -p kiwi-signer --test real_sign -- --ignored --nocapture
 ```
 
+One more needs internet access (it downloads the pinned Java runtime and Android build-tools)
+and an unsigned release APK of Kiwi's Android app; it runs anywhere. It signs the APK with
+the real Android runner through the server's own job and checks what Kiwi then serves:
+
+```sh
+android/scripts/build-in-docker.sh assembleRelease
+KIWI_TEST_UNSIGNED_APK=$PWD/android/app/build/outputs/apk/release/app-release-unsigned.apk \
+  cargo test -p kiwi-server --test automation -- --ignored --nocapture real_kiwi_app
+```
+
 `live_mac` only compiles on macOS. Everything else uses fixtures (recorded `devicectl` and
 Tailscale JSON in `crates/kiwi-device/tests/fixtures`, AltStore feeds in
 `crates/kiwi-source/tests/fixtures`) and fakes (signer, devices, push, App Store and App Store

@@ -333,6 +333,8 @@ pub struct Automation {
     /// Whether iOS apps can be built here: their runner needs macOS (Xcode's tools and
     /// decryption on the Mac). Tests elsewhere turn it on along with a fake runner.
     pub builds_ios: AtomicBool,
+    /// Signing Kiwi's own Android app, which shares the worker with the builds.
+    pub kiwi_app: Mutex<crate::kiwi_app::Status>,
 }
 impl Automation {
     pub fn load(db: &Db, data: &std::path::Path) -> Result<Self, String> {
@@ -385,6 +387,7 @@ impl Automation {
             ("android.py", ANDROID_RUNNER),
             ("apk.py", APK_READER),
             ("android.json", ANDROID_RECIPES),
+            ("kiwi-app.json", crate::kiwi_app::PIN),
         ] {
             let path = root.join(name);
             if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
@@ -404,6 +407,7 @@ impl Automation {
             runner: RwLock::new(root.join("runner.py")),
             android_runner: RwLock::new(root.join("android.py")),
             builds_ios: AtomicBool::new(cfg!(target_os = "macos")),
+            kiwi_app: Mutex::default(),
         })
     }
     pub fn snapshot(&self) -> State {
@@ -605,10 +609,19 @@ pub fn queue(kiwi: &Arc<Kiwi>, id: &str, force: bool) -> ApiResult<()> {
     Ok(())
 }
 
-/// Starts the oldest queued job unless one is running.
-fn start_next(kiwi: &Arc<Kiwi>) {
+/// Starts the oldest queued job unless one is running. Signing Kiwi's own Android app,
+/// when it is due, goes first: it takes seconds.
+pub(crate) fn start_next(kiwi: &Arc<Kiwi>) {
     let mut running = kiwi.automation.running.lock().unwrap();
     if running.is_some() {
+        return;
+    }
+    if let Some(key) = crate::kiwi_app::take_pending(kiwi) {
+        let token = kiwi.cancel.child_token();
+        *running = Some((crate::kiwi_app::JOB_ID.into(), token.clone()));
+        kiwi.jobs
+            .tracker
+            .spawn(crate::kiwi_app::work(kiwi.clone(), key, token));
         return;
     }
     let next = kiwi.automation.change(&kiwi.db, |s| {
@@ -648,6 +661,25 @@ pub fn require_on(kiwi: &Kiwi) -> ApiResult<()> {
 pub fn cancel_all(kiwi: &Kiwi) {
     for recipe in recipes() {
         cancel(kiwi, &recipe.id);
+    }
+    crate::kiwi_app::cancel(kiwi);
+}
+
+/// Cancels the job the worker runs, if it is `id`.
+pub(crate) fn cancel_running(kiwi: &Kiwi, id: &str) {
+    let running = kiwi.automation.running.lock().unwrap();
+    if let Some((job, token)) = running.as_ref()
+        && job == id
+    {
+        token.cancel();
+    }
+}
+
+/// Frees the worker after the job `id` ended.
+pub(crate) fn finish_running(kiwi: &Kiwi, id: &str) {
+    let mut running = kiwi.automation.running.lock().unwrap();
+    if running.as_ref().is_some_and(|(job, _)| job == id) {
+        *running = None;
     }
 }
 
@@ -727,12 +759,7 @@ async fn work(kiwi: Arc<Kiwi>, job: Job, token: CancellationToken) {
             .join(format!("{}.request.json", job.id)),
     )
     .await;
-    {
-        let mut running = kiwi.automation.running.lock().unwrap();
-        if running.as_ref().is_some_and(|(id, _)| id == &job.id) {
-            *running = None;
-        }
-    }
+    finish_running(&kiwi, &job.id);
     kiwi.kick.notify_one();
     start_next(&kiwi);
 }
@@ -773,12 +800,6 @@ async fn runner(
     request: &Value,
     token: &CancellationToken,
 ) -> Result<Vec<Value>, Failure> {
-    let id = &job.id;
-    let root = kiwi.config.data_dir.join("automation");
-    let path = root.join(format!("{id}.request.json"));
-    tokio::fs::write(&path, serde_json::to_vec(request).map_err(failed)?)
-        .await
-        .map_err(failed)?;
     let android = recipe(&job.app).is_ok_and(Recipe::android);
     let program = if android {
         &kiwi.automation.android_runner
@@ -788,24 +809,82 @@ async fn runner(
     .read()
     .unwrap()
     .clone();
-    let builder = if android {
-        "The Android builder"
-    } else {
-        "The Mac builder"
+    let call = Invocation {
+        program,
+        command,
+        id: &job.id,
+        recipe: Some(&job.app),
+        builder: if android {
+            "The Android builder"
+        } else {
+            "The Mac builder"
+        },
+        timeout: Duration::from_secs(if command == "plan" { 600 } else { 7200 }),
     };
+    invoke(kiwi, call, request, token, |stage| {
+        kiwi.automation
+            .job(&kiwi.db, &job.id, |j| j.stage = stage.into())
+            .map_err(failed)
+    })
+    .await
+}
+
+/// One run of a builder script.
+pub(crate) struct Invocation<'a> {
+    pub program: PathBuf,
+    pub command: &'a str,
+    /// Names the request file and is passed as `--job-id`.
+    pub id: &'a str,
+    pub recipe: Option<&'a str>,
+    /// How messages name the builder: "The Android builder".
+    pub builder: &'static str,
+    pub timeout: Duration,
+}
+
+/// Runs a builder script with `request` and returns its `plan`, `artifact` and `kiwi_app`
+/// events; `on_stage` receives its progress. The request file is removed afterwards.
+pub(crate) async fn invoke(
+    kiwi: &Kiwi,
+    call: Invocation<'_>,
+    request: &Value,
+    token: &CancellationToken,
+    on_stage: impl FnMut(&str) -> Result<(), Failure>,
+) -> Result<Vec<Value>, Failure> {
+    let path = kiwi
+        .config
+        .data_dir
+        .join("automation")
+        .join(format!("{}.request.json", call.id));
+    tokio::fs::write(&path, serde_json::to_vec(request).map_err(failed)?)
+        .await
+        .map_err(failed)?;
+    let result = invoke_with(kiwi, &call, &path, token, on_stage).await;
+    let _ = tokio::fs::remove_file(&path).await;
+    result
+}
+
+async fn invoke_with(
+    kiwi: &Kiwi,
+    call: &Invocation<'_>,
+    request: &std::path::Path,
+    token: &CancellationToken,
+    mut on_stage: impl FnMut(&str) -> Result<(), Failure>,
+) -> Result<Vec<Value>, Failure> {
+    let builder = call.builder;
     let python = &kiwi.config.python;
     let mut cmd = tokio::process::Command::new(python);
-    cmd.arg(program)
-        .arg(command)
+    cmd.arg(&call.program)
+        .arg(call.command)
         .arg("--data-dir")
         .arg(&kiwi.config.data_dir)
         .arg("--request")
-        .arg(&path)
+        .arg(request)
         .arg("--job-id")
-        .arg(id)
-        .arg("--recipe")
-        .arg(&job.app)
-        .arg("--supervisor-pid")
+        .arg(call.id);
+    if let Some(recipe) = call.recipe {
+        cmd.arg("--recipe").arg(recipe);
+    }
+    cmd.arg("--supervisor-pid")
         .arg(std::process::id().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -829,11 +908,7 @@ async fn runner(
     let mut lines = BufReader::new(child.stdout.take().unwrap().take(2 * 1024 * 1024)).lines();
     let mut events = Vec::new();
     let mut runner_error = None;
-    let deadline = tokio::time::sleep(Duration::from_secs(if command == "plan" {
-        600
-    } else {
-        7200
-    }));
+    let deadline = tokio::time::sleep(call.timeout);
     tokio::pin!(deadline);
     let read = async {
         while let Some(line) = lines.next_line().await.map_err(failed)? {
@@ -846,9 +921,7 @@ async fn runner(
                     if stage.len() > 256 {
                         return Err(failed("Build stage exceeds its limit"));
                     }
-                    kiwi.automation
-                        .job(&kiwi.db, id, |j| j.stage = stage.into())
-                        .map_err(failed)?;
+                    on_stage(stage)?;
                 }
                 Some("health") => {
                     let checks = event["checks"]
@@ -873,7 +946,7 @@ async fn runner(
                         event["blocked"].as_bool().unwrap_or(false),
                     ))
                 }
-                Some("plan" | "artifact") => events.push(event),
+                Some("plan" | "artifact" | "kiwi_app") => events.push(event),
                 _ => return Err(failed("Unknown builder event")),
             }
         }

@@ -70,7 +70,7 @@ const CORE_DEVICES_TTL: Duration = Duration::from_secs(60);
 /// devicectl may not list a Kiwi install completed less than this long ago yet, or still
 /// list the version it replaces: such installs are neither marked removed nor given the
 /// listed version.
-const INSTALL_GRACE: chrono::Duration = chrono::Duration::minutes(10);
+pub(crate) const INSTALL_GRACE: chrono::Duration = chrono::Duration::minutes(10);
 
 #[derive(Default)]
 pub struct DeviceCaches {

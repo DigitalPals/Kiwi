@@ -4,6 +4,18 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+// The app's version. The release workflow passes it as Gradle properties derived from the
+// release tag (`-PkiwiVersionName=1.2.3 -PkiwiVersionCode=1002003`); local builds use the
+// defaults, which every release outranks.
+val kiwiVersionName: String = providers.gradleProperty("kiwiVersionName").orNull ?: "0.1.0"
+val kiwiVersionCode: Int = providers.gradleProperty("kiwiVersionCode").orNull?.let { code ->
+    code.toIntOrNull()?.takeIf { it in 1..2_100_000_000 }
+        ?: throw GradleException("kiwiVersionCode must be a whole number from 1 to 2100000000, not \"$code\".")
+} ?: 1
+if (!Regex("[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}").matches(kiwiVersionName)) {
+    throw GradleException("kiwiVersionName must be a version like 1.2.3, not \"$kiwiVersionName\".")
+}
+
 android {
     namespace = "io.github.digitalpals.kiwi"
     compileSdk = 37
@@ -12,8 +24,8 @@ android {
         applicationId = "io.github.digitalpals.kiwi"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = kiwiVersionCode
+        versionName = kiwiVersionName
     }
 
     buildTypes {

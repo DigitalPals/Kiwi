@@ -186,7 +186,9 @@ The first Android build creates a 4096-bit RSA key in
 mode 0600). It never leaves the Mac and no API returns it. Android installs an update over
 an app only when both carry the same signature, so **back these two files up** with the
 rest of the data directory: without them, every Android app Kiwi built has to be
-uninstalled before a build signed with a new key can be installed.
+uninstalled before a build signed with a new key can be installed. The same key signs
+[Kiwi's own Android app](android-app.md), which Kiwi offers to Android phones while Kiwi
+Builds is on.
 
 The patcher takes the keystore password as a command-line argument, so it is visible to
 other processes of the same user on the Mac while a build runs.
@@ -336,10 +338,11 @@ Paths under `automation/` are in the data directory, `~/Library/Application Supp
 | `kiwi.db` meta `automation_v2` | Per-app preferences, revisions and health, and job history. Migrated once from `youtube_automation_v1`, which is left in place for a rollback |
 | `automation/runner.py`, `automation/recipes.json` | The runner and pinned recipes built into Kiwi, rewritten at every start |
 | `automation/android.py`, `automation/apk.py`, `automation/android.json` | The Android runner, its APK signature verifier and the pinned Android recipes, rewritten at every start |
+| `automation/kiwi-app.json`, `automation/kiwi-app.log` | The pinned release of [Kiwi's Android app](android-app.md), and the private log of signing it |
 | `automation/android/keystore.p12`, `keystore.pass` | This Kiwi's Android signing key and its password, mode 0600. Back them up |
 | `automation/android/originals/` | Original Android apps you supply by hand (optional) |
 | `automation/android/play-session.json` | The anonymous Google Play session, mode 0600 |
-| `automation/tools/android/` | The pinned Java runtime, patcher and patch bundle, and verified originals |
+| `automation/tools/android/` | The pinned Java runtime, patcher, patch bundle and `apksigner`, and verified originals |
 | `~/.kiwi-builder-tools` | Space-free private toolchain and transient build workspaces; `automation/tools` links here |
 | `~/.kiwi-builder-tools/sources/<owner>__<repo>/<commit>` | Pinned source cache (a `.complete` file marks a finished fetch) |
 | `~/.kiwi-builder-tools/cache/ffmpeg-kit/<key>` | NeoFreeBird's compiled FFmpeg stack, keyed by its inputs and the SDK |

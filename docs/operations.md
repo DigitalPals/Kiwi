@@ -59,6 +59,7 @@ Signing uses an identity and profiles uploaded to Kiwi, kept in the data directo
 | `vapid.json` | The Web Push key pair (0600). If it's lost, every device has to turn notifications on again. An unreadable one is moved to `vapid.json.corrupt-<time>` and replaced |
 | `downloads/`, `builds/`, `icons/` | Downloaded IPAs, signed builds and icons; caches that Kiwi cleans up |
 | `automation/` | Kiwi Builds' runner, recipes, jobs and artifacts (see [Kiwi Builds](kiwi-builds.md)) |
+| `android-app/` | Kiwi's Android app as this Kiwi signed it, and unsigned builds you place in `unsigned/` (see [Kiwi's Android app](android-app.md)) |
 | `work/` | Temporary files, emptied at every start |
 | `kiwi.lock` | Held by the running Kiwi; a second instance on the same data stops |
 
@@ -182,7 +183,7 @@ Back up these files from the data directory, to another disk:
 |---|---|
 | `kiwi.db` | Sources, devices, installs and settings. Use `sqlite3 kiwi.db ".backup kiwi.db.bak"` for a consistent copy while Kiwi runs |
 | `vapid.json` | The Web Push key: without it every device has to turn notifications on again |
-| `automation/android/keystore.p12` and `automation/android/keystore.pass` | Kiwi Builds' Android signing key and its password. **Android only accepts an update signed with the same key** as the installed app: without these two files, every Android app Kiwi installed has to be removed from each phone before Kiwi can install it again, losing the app's data |
+| `automation/android/keystore.p12` and `automation/android/keystore.pass` | Kiwi's Android signing key and its password: it signs Kiwi Builds' Android apps and [Kiwi's own Android app](android-app.md). **Android only accepts an update signed with the same key** as the installed app: without these two files, every Android app Kiwi installed, Kiwi's app included, has to be removed from each phone before Kiwi can install it again, losing the app's data |
 | `signing/` | On Linux and in Docker: the uploaded Apple Development identity (`.p12`) and profiles. You can upload them again from your own copies |
 
 The `kiwi.db.bak-*` copies the installer keeps are on the same disk, so they don't count as

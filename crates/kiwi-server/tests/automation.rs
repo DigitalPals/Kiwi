@@ -1100,3 +1100,287 @@ async fn kiwis_android_app_reports_which_packages_are_installed() {
     assert!(app.ok("/api/library").await.as_array().unwrap().is_empty());
     assert_eq!(app.ok("/api/me").await["counts"]["installed"], 0);
 }
+
+#[tokio::test]
+async fn an_android_install_missing_after_the_grace_period_is_removed() {
+    const PACKAGE: &str = "app.morphe.android.youtube";
+    let k = TestKiwi::start_building().await;
+    fake_runner(&k, false);
+    fake_android_runner(&k, PACKAGE);
+    k.devices.add_android(ANDROID_IP);
+    let phone = k.phone();
+    let initial = phone.ok("/api/automation/android-youtube").await;
+    phone
+        .post(
+            "/api/automation/android-youtube/add",
+            initial["preferences"].clone(),
+        )
+        .await;
+    assert_eq!(
+        finished_app(&k, "android-youtube").await["jobs"][0]["status"],
+        "ready"
+    );
+    let signer = k.dir.path().join("data/automation/android/signer.json");
+    std::fs::create_dir_all(signer.parent().unwrap()).unwrap();
+    std::fs::write(&signer, json!({ "sha256": "c".repeat(64) }).to_string()).unwrap();
+    let app = Api {
+        user_agent: Some("Kiwi-Android/1.0.0 (1; Android 15; SDK 35; Google Pixel 9a)".into()),
+        ..k.android(ANDROID_IP)
+    };
+    let path = format!("/api/apps/kiwi-youtube/{PACKAGE}");
+    let prepared = app.post(&format!("{path}/prepare"), json!({})).await;
+    let url = prepared.body["install_url"].as_str().unwrap();
+    let ota = url.strip_prefix("https://kiwi.test").unwrap();
+    let response = app.request(Method::GET, ota).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.bytes().await.unwrap();
+    let mut state = Value::Null;
+    for _ in 0..100 {
+        state = app.ok(&path).await["state"].clone();
+        if state["installed"].is_object() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(state["installed"]["origin"], "kiwi", "{state}");
+
+    // Android's install fails after the download; the app reports at once, without the
+    // package. Android may still be installing it, so it stays recorded for now...
+    let r = app
+        .send(
+            Method::PUT,
+            "/api/me/packages",
+            Some(json!({ "packages": [] })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{}", r.body);
+    let now = chrono::Utc::now();
+    kiwi_server::android::settle_reports(&k.kiwi, now).unwrap();
+    assert!(app.ok(&path).await["state"]["installed"].is_object());
+    // ...until the grace period is over: then that report counts, without another one.
+    kiwi_server::android::settle_reports(&k.kiwi, now + chrono::Duration::minutes(11)).unwrap();
+    let state = app.ok(&path).await["state"].clone();
+    assert!(state["installed"].is_null(), "{state}");
+    assert_eq!(state["action"], "install");
+    assert_eq!(app.ok("/api/me").await["counts"]["installed"], 0);
+}
+
+/// The Android runner's `kiwi-app` command, as far as Kiwi sees it: writes the signed app
+/// and its description for the input it is given, or fails. Counts its runs.
+fn fake_kiwi_app_runner(k: &TestKiwi, fail: bool) {
+    let script = k.dir.path().join("fake-kiwi-app.py");
+    let fail = if fail { "True" } else { "False" };
+    let text = format!(
+        r#"
+import sys,json,pathlib,hashlib
+assert sys.argv[1]=='kiwi-app' and '--recipe' not in sys.argv
+data=pathlib.Path(sys.argv[sys.argv.index('--data-dir')+1])
+request=json.loads(pathlib.Path(sys.argv[sys.argv.index('--request')+1]).read_text())
+def emit(kind,**d):print(json.dumps(dict(event=kind,**d)),flush=True)
+runs=data/'kiwi-app-runs'
+runs.write_text(str(int(runs.read_text())+1 if runs.exists() else 1))
+if {fail}:
+ emit('error',message="Kiwi could not fetch its Android app 1.2.0: it could not be reached.",blocked=False)
+ sys.exit(1)
+emit('stage',stage='Signing Kiwi for Android 1.2.0')
+apk=b'PK signed '+request['input'].encode()
+sha=hashlib.sha256(apk).hexdigest()
+out=data/'android-app'
+out.mkdir(exist_ok=True)
+(out/'kiwi.apk').write_bytes(apk)
+info=dict(package='io.github.digitalpals.kiwi',version_name='1.2.0',version_code=1002000,sha256=sha,size=len(apk))
+(out/'kiwi.json').write_text(json.dumps(dict(info,signer='c'*64,source='local',input=request['input'])))
+emit('kiwi_app',source='local',**info)
+"#
+    );
+    std::fs::write(&script, text).unwrap();
+    *k.kiwi.automation.android_runner.write().unwrap() = script;
+}
+
+#[tokio::test]
+async fn kiwi_signs_and_offers_its_own_android_app() {
+    let k = TestKiwi::start_building().await;
+    k.devices.add_android(ANDROID_IP);
+    fake_kiwi_app_runner(&k, false);
+    let data = k.dir.path().join("data");
+    let runs = || {
+        std::fs::read_to_string(data.join("kiwi-app-runs"))
+            .map_or(0, |n| n.trim().parse::<u32>().unwrap())
+    };
+    let settle = || async {
+        // The job runs on Kiwi Builds' worker; wait until it is free again.
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            if k.kiwi.automation.kiwi_app.lock().unwrap().is_idle() {
+                return;
+            }
+        }
+        panic!("the kiwi-app job did not finish");
+    };
+    let unsigned = data.join("android-app/unsigned");
+    std::fs::create_dir_all(&unsigned).unwrap();
+    std::fs::write(unsigned.join("kiwi-1.2.0.apk"), "PK unsigned").unwrap();
+
+    // Without an Android device or Android build, Kiwi has no one to offer its app to.
+    kiwi_server::kiwi_app::tick(&k.kiwi).await;
+    settle().await;
+    assert_eq!(runs(), 0);
+
+    // The Android phone appears: Kiwi signs the app and offers it.
+    let android = k.android(ANDROID_IP);
+    assert!(android.ok("/api/me").await["android_app"].is_null());
+    kiwi_server::kiwi_app::tick(&k.kiwi).await;
+    settle().await;
+    assert_eq!(runs(), 1);
+    let me = android.ok("/api/me").await;
+    assert_eq!(me["android_app"]["version_name"], "1.2.0", "{me}");
+    assert_eq!(me["android_app"]["package"], "io.github.digitalpals.kiwi");
+    assert!(
+        me["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("android_app_offer"))
+    );
+    let apk = android.get("/android/kiwi.apk").await;
+    assert_eq!(apk.status, StatusCode::OK);
+    assert!(!data.join("automation/kiwi-app.request.json").exists());
+
+    // Nothing changed: nothing runs.
+    kiwi_server::kiwi_app::tick(&k.kiwi).await;
+    settle().await;
+    assert_eq!(runs(), 1);
+
+    // A new unsigned build in the folder is signed and offered.
+    std::fs::write(unsigned.join("kiwi-1.2.1.apk"), "PK newer").unwrap();
+    kiwi_server::kiwi_app::tick(&k.kiwi).await;
+    settle().await;
+    assert_eq!(runs(), 2);
+
+    // A failure is logged and shown on Android devices; it is not retried at once, and the
+    // app that was signed before stays offered.
+    fake_kiwi_app_runner(&k, true);
+    std::fs::write(unsigned.join("kiwi-1.2.2.apk"), "PK newest").unwrap();
+    kiwi_server::kiwi_app::tick(&k.kiwi).await;
+    settle().await;
+    assert_eq!(runs(), 3);
+    let me = android.ok("/api/me").await;
+    let warning = me["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["code"] == "android_app")
+        .unwrap_or_else(|| panic!("{me}"))
+        .clone();
+    assert_eq!(
+        warning["message"],
+        "Kiwi couldn't prepare its Android app: Kiwi could not fetch its Android app 1.2.0: it could not be reached."
+    );
+    assert_eq!(warning["level"], "warning");
+    assert!(!me["android_app"].is_null());
+    let phone = k.phone();
+    assert!(
+        !phone.ok("/api/me").await["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["code"] == "android_app"),
+        "an iPhone has no use for Kiwi's Android app"
+    );
+    kiwi_server::kiwi_app::tick(&k.kiwi).await;
+    settle().await;
+    assert_eq!(runs(), 3);
+
+    // With Kiwi Builds off nothing runs, and the warning is gone.
+    let r = phone
+        .send(
+            Method::PATCH,
+            "/api/settings",
+            Some(json!({"kiwi_builds": false})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(
+        !android.ok("/api/me").await["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["code"] == "android_app")
+    );
+    std::fs::write(unsigned.join("kiwi-1.2.3.apk"), "PK even newer").unwrap();
+    kiwi_server::kiwi_app::tick(&k.kiwi).await;
+    settle().await;
+    assert_eq!(runs(), 3);
+}
+
+/// The whole delivery with the real Android runner: Kiwi notices an unsigned APK of its app,
+/// runs `android.py kiwi-app` on the worker (which fetches the pinned Java runtime and
+/// build-tools and creates Kiwi's key), checks the result and serves it. Run by hand; it
+/// needs internet access and an unsigned release APK:
+///
+/// ```sh
+/// KIWI_TEST_UNSIGNED_APK=$PWD/android/app/build/outputs/apk/release/app-release-unsigned.apk \
+///   cargo test -p kiwi-server --test automation -- --ignored --nocapture real_kiwi_app
+/// ```
+///
+/// `KIWI_TEST_SIGNED_APK=<path>` keeps a copy of the signed app.
+#[tokio::test]
+#[ignore = "needs internet access and KIWI_TEST_UNSIGNED_APK"]
+async fn real_kiwi_app_runner_signs_and_serves_an_unsigned_apk() {
+    use sha2::{Digest, Sha256};
+    let source = std::env::var("KIWI_TEST_UNSIGNED_APK").expect("KIWI_TEST_UNSIGNED_APK");
+    let k = TestKiwi::start_building().await;
+    k.devices.add_android(ANDROID_IP);
+    let android = k.android(ANDROID_IP);
+    assert!(android.ok("/api/me").await["android_app"].is_null());
+    let data = k.dir.path().join("data");
+    let unsigned = data.join("android-app/unsigned");
+    std::fs::create_dir_all(&unsigned).unwrap();
+    std::fs::copy(&source, unsigned.join("kiwi.apk")).unwrap();
+
+    kiwi_server::kiwi_app::tick(&k.kiwi).await;
+    for _ in 0..1200 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if k.kiwi.automation.kiwi_app.lock().unwrap().is_idle() {
+            break;
+        }
+    }
+    let log = std::fs::read_to_string(data.join("automation/kiwi-app.log")).unwrap_or_default();
+    if let Some(failure) = kiwi_server::kiwi_app::failure(&k.kiwi) {
+        panic!("{}\n{log}", failure.message);
+    }
+    let me = android.ok("/api/me").await;
+    let offered = &me["android_app"];
+    assert_eq!(offered["package"], "io.github.digitalpals.kiwi", "{me}");
+    println!("offered: {offered}");
+
+    let meta: Value =
+        serde_json::from_slice(&std::fs::read(data.join("android-app/kiwi.json")).unwrap())
+            .unwrap();
+    let response = android
+        .request(Method::GET, "/android/kiwi.apk")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.bytes().await.unwrap();
+    assert_eq!(bytes.len() as u64, meta["size"].as_u64().unwrap());
+    assert_eq!(hex::encode(Sha256::digest(&bytes)), meta["sha256"]);
+    assert_eq!(meta["source"], "local");
+    let signer: Value = serde_json::from_slice(
+        &std::fs::read(data.join("automation/android/signer.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(meta["signer"], signer["sha256"]);
+    // Up to date now: the next check runs nothing.
+    let log_size = log.len();
+    kiwi_server::kiwi_app::tick(&k.kiwi).await;
+    assert!(k.kiwi.automation.kiwi_app.lock().unwrap().is_idle());
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let log = std::fs::read_to_string(data.join("automation/kiwi-app.log")).unwrap();
+    assert_eq!(log.len(), log_size);
+    println!("kiwi.json: {meta}\nrunner log:\n{log}");
+    if let Ok(keep) = std::env::var("KIWI_TEST_SIGNED_APK") {
+        std::fs::write(&keep, &bytes).unwrap();
+        println!("signed app kept at {keep}");
+    }
+}

@@ -3,6 +3,7 @@ import { useContext, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api } from "../api/client";
 import type { Me } from "../api/types";
 import { useOnForeground } from "./hooks";
+import { createMeLoader } from "./me-loader";
 import { syncBadge } from "./pwa";
 
 interface MeContextValue {
@@ -10,6 +11,7 @@ interface MeContextValue {
   error: Error | null;
   /** Coalesced reload; call after anything that may change counts. */
   reload: () => void;
+  /** Replaces Me with a newer answer (`PATCH /api/me`); a reload already on its way is dropped. */
   setMe: (me: Me) => void;
 }
 
@@ -21,35 +23,19 @@ const MeContext = createContext<MeContextValue>({
 });
 
 export function MeProvider({ children }: { children: ComponentChildren }) {
-  const [me, setMe] = useState<Me | null>(null);
+  const [me, showMe] = useState<Me | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const timer = useRef<number | null>(null);
-  const inFlight = useRef(false);
-  const again = useRef(false);
 
-  const { reload, start } = useMemo(() => {
-    const run = async () => {
+  const { reload, start, setMe } = useMemo(() => {
+    const loader = createMeLoader(() => api.me(), { me: showMe, error: setError });
+    const run = () => {
       timer.current = null;
-      if (inFlight.current) {
-        again.current = true;
-        return;
-      }
-      inFlight.current = true;
-      try {
-        setMe(await api.me());
-        setError(null);
-      } catch (e) {
-        setError(e instanceof Error ? e : new Error(String(e)));
-      } finally {
-        inFlight.current = false;
-        if (again.current) {
-          again.current = false;
-          void run();
-        }
-      }
+      return loader.load();
     };
     return {
       start: run,
+      setMe: loader.set,
       reload: () => {
         if (timer.current === null) timer.current = window.setTimeout(() => void run(), 150);
       },
@@ -73,7 +59,7 @@ export function MeProvider({ children }: { children: ComponentChildren }) {
     if (updates !== undefined) void syncBadge(updates);
   }, [updates, me]);
 
-  const value = useMemo(() => ({ me, error, reload, setMe }), [me, error, reload]);
+  const value = useMemo(() => ({ me, error, reload, setMe }), [me, error, reload, setMe]);
   return <MeContext.Provider value={value}>{children}</MeContext.Provider>;
 }
 

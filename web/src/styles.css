@@ -1628,6 +1628,12 @@ a.cell-link:active,
   cursor: default;
 }
 
+/* An action waiting for another one, e.g. an upload while a removal runs (no spinner of its own). */
+.upload-cell:has(input:disabled) .cell-action,
+.cell-button:disabled .cell-action {
+  opacity: 0.45;
+}
+
 /* A command in an error message ("convert it with: openssl …"), on its own line. */
 .error-command {
   display: block;

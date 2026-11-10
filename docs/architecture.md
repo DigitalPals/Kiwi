@@ -627,9 +627,11 @@ not checks of the platform scattered through the screens:
   Kiwi app), "Android Signing Key" (the certificate's fingerprint, `Me.host.android_signer_sha256`,
   and where to back the key up; the key itself never leaves the server), Kiwi Builds' switch
   and Notify About Updates.
-- `android_app_offer`: a slim "Get the Kiwi app" card on top of Browse (dismissed for good in
-  `localStorage`) and a Kiwi App row in Settings, both downloading `android_app.install_url`.
-  The router and the service worker leave `/android/` to the server, like `/api` and `/ota`.
+- `android_app_offer` (a browser on a device detected as Android; not a desktop browser or an
+  iPhone whose owner chose Android, which can't install an APK): a slim "Get the Kiwi app" card
+  on top of Browse (dismissed for good in `localStorage`) and a Kiwi App row in Settings, both
+  downloading `android_app.install_url`. The router and the service worker leave `/android/`
+  to the server, like `/api` and `/ota`.
 - `devicectl`: the Linked Mac Device and Sync rows and Sync with devicectl in This iPhone.
 - `home_screen_app`: Browse's Add to Home Screen hint. `web_push`: the Notifications row and
   re-registering a lost push subscription.
@@ -651,21 +653,33 @@ choice. Then, by platform:
   they need the Home Screen app) and whether this Kiwi can sign, from the signing warnings and
   `/api/signing` ("Signing ready … until <date>", or in amber "Signing isn't set up on this
   Kiwi yet"). "Continue in Safari", or "Done" in the Home Screen app.
-- Android with `android_app`: "Set Up This Phone": the Kiwi app card with the one filled
-  button (Download Kiwi for Android), three steps, and "Continue in the Browser". Downloading
-  completes the setup too, in the background.
-- Android without `android_app`, or a desktop browser: nothing to set up; Continue sends the
-  platform with `onboarded: true`.
+- Android with `android_app`, on a device detected as Android: "Set Up This Phone": the Kiwi
+  app card with the one filled button (Download Kiwi for Android), three steps, and "Continue
+  in the Browser". Downloading completes the setup too, in the background.
+- Android without `android_app` or on another device, or a desktop browser: nothing to set up;
+  Continue sends the platform with `onboarded: true`. The Android card only promises the Kiwi
+  app where it is offered.
+
+The setup page is a history entry of its own at the same address (`pushStep` in
+`web/src/lib/router.ts`), so the system Back returns to the question instead of leaving Kiwi
+and Forward opens the page again; the in-page Back pops it too. When the setup ends, the entry
+is popped, and a step left in the current entry (a reload) is forgotten when the setup starts,
+so Back from the tabs never lands on a setup page.
 
 Finishing sends `PATCH /api/me {onboarded: true}` and the tabs appear. Settings has "Show
 Setup Again" (`onboarded: false`) and This iPhone/This Phone a Device Type picker
-(`platform`).
+(`platform`). `MeProvider` counts every change to Me (a `PATCH /api/me` answer or a reload)
+and drops a reload's answer when Me changed while it was on its way, so a reload that left
+before a choice can't undo it (`web/src/lib/me-loader.ts`).
 
 Warnings appear where they are fixed rather than as banners on every screen: an expiring
 app in My Apps (its re-sign is an update, so the badge counts it), a failed source in Sources,
 signing problems and an unknown iOS version in Settings. Sources and Settings get a dot on
-their tab (amber, or red when signing is impossible); only warnings that stop every install
-(no identity or profile) also show on Browse.
+their tab (amber, or red when signing is impossible), and the tab shows why: a Settings
+warning without a row of its own (on Android, Kiwi's Android app that couldn't be prepared,
+`android_app`) is listed in This Phone with its message, in amber, and Android's Kiwi card
+says "Kiwi app not ready" (`listedSettingsWarnings`, `web/src/lib/warnings.ts`). Only
+warnings that stop every install (no identity or profile) also show on Browse.
 
 - Browse: the large title, search, then "Fresh This Week": a shelf of cards in each app's
   colour with its button, for releases from the last week that still need something (updates
@@ -677,7 +691,10 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
   re-sign, the version change of an update, "Replaces <name> (<source>)", why it is
   unavailable, "Based on <App Store name>", or the subtitle. The button shows the rest of the
   state. Under the list, "N apps hidden · Show" lists the hidden apps dimmed, each with a Show
-  button; searches list hidden matches in a "Hidden" group after the others.
+  button; searches list hidden matches in a "Hidden" group after the others. Browse always
+  asks for hidden apps and counts them from the list kept to this device's platform (a
+  source's own counts include other platforms' apps). A search on Android with every source
+  off says "No Results", not the iPhone's "Add a Source" welcome.
 - App page: the top takes the app's colour and fades into the page: a centred icon, name,
   subtitle, developer and source, a wide action button with the version change
   ("21.43.5 → 21.44.0") and its status (step, error, what it replaces, why it is
@@ -723,10 +740,12 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
   server's message replaces the tabs.
 - Settings is a short index: Kiwi's card (deep green with a slowly turning kiwi slice, the
   version, public host, and whether signing is ready, with a pulse, or expiring; on Android
-  whether Android builds are ready), this iPhone (iOS version, amber when unknown) and Notifications (on or
+  whether Android builds are ready, or a listed warning), this iPhone (iOS version, amber when unknown) and Notifications (on or
   off), the Mac (Signing with its expiry, App Store country),
   Updates (source refresh interval, auto-prepare updates, notify on updates/expiry, remove
-  watch apps), Kiwi Builds (a switch that asks for confirmation before turning it on) and
+  watch apps), Kiwi Builds (a switch that asks for confirmation before turning it on; on a
+  Kiwi that doesn't run on macOS its footer and confirmation say plainly that iPhone apps can
+  only be built on a Mac and that Kiwi Builds makes Android apps there) and
   Show Setup Again; Android's sections are above. Sub-pages: Signing (ready or why not, the certificates, the profiles named by
   App ID with expiry and entitlements, Rescan; "Upload Profile…" and Remove for uploaded
   profiles. On a Kiwi that signs with uploaded files (`Signing.backend: "files"`): "Signing
@@ -738,7 +757,9 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
   hidden file inputs; the browser checks the size (64 KB for a `.p12`, 1 MB for a profile),
   reads the file as base64, asks the `.p12`'s password in a sheet, and shows the server's
   message (wrong password, AES-encrypted `.p12` with the command to convert it) in place.
-  Every upload, removal and rescan reloads `/api/me` for the warnings), This iPhone (device type, name, iOS version and where it
+  One upload, removal or rescan runs at a time (the other actions wait, dimmed), because each
+  answers with the whole `Signing`. Every upload, removal and rescan reloads `/api/me` for
+  the warnings), This iPhone (device type, name, iOS version and where it
   came from, model, Tailscale name, linked Mac device, Sync Now, devicectl sync, device ID;
   "This Phone" on Android, "This Device" in a desktop browser) and Notifications (enable, test, disable).
 - PWA: `manifest.webmanifest` (`display: standalone`, scope `/`), apple-touch-icon and

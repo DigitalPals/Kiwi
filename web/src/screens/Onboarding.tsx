@@ -9,9 +9,10 @@ import { BackBar, Cell, CellIcon, Section, Spinner } from "../components/ui";
 import { formatBytes } from "../lib/format";
 import { useResource, useTask } from "../lib/hooks";
 import { useMe } from "../lib/me";
-import { initialChoice, isUndetected, setupPage, signingRow, type SetupPage } from "../lib/onboarding";
+import { initialChoice, isUndetected, offersKiwiApp, setupPage, signingRow, type SetupPage } from "../lib/onboarding";
 import { blockedMessage, pushSupport, subscribe, subscriptionBody, type PushSupport } from "../lib/push";
 import { isStandalone } from "../lib/pwa";
+import { currentStep, forgetStep, leaveStep, pushStep } from "../lib/router";
 
 const host = (me: Me) => me.server.public_url.replace(/^https?:\/\//, "").replace(/\/$/, "");
 
@@ -56,7 +57,7 @@ function ChooseDevice(props: { me: Me; pending: boolean; error: string | null; o
   if (undetected) question = ["Which device do you use Kiwi on?", "Kiwi can’t tell from this browser. It shows the apps for the device you pick."];
   else if (me.device.platform_source === "chosen") question = ["Which device is this?", "Kiwi shows the apps that work on it."];
   else question = [detected === "android" ? "This looks like an Android device" : "This looks like an iPhone", "Kiwi shows the apps that work on it."];
-  const kiwiApp = me.android_app !== null;
+  const kiwiApp = offersKiwiApp(me);
 
   return (
     <main class={undetected ? "page page-glow onboarding welcome welcome-wide" : "page page-glow onboarding welcome"}>
@@ -85,13 +86,7 @@ function ChooseDevice(props: { me: Me; pending: boolean; error: string | null; o
           icon="android"
           color="#2f9e5e"
           title="Android phone or tablet"
-          sub={
-            !kiwiApp
-              ? "Android apps from Kiwi Builds"
-              : undetected
-                ? "Android apps and the Kiwi app"
-                : "Android apps from Kiwi Builds and the Kiwi app"
-          }
+          sub={kiwiApp ? "Android apps from Kiwi Builds and the Kiwi app" : "Android apps from Kiwi Builds"}
           onSelect={() => setChoice("android")}
         />
       </div>
@@ -279,6 +274,10 @@ function AndroidSetup(props: {
  * The first-run setup, shown instead of the tabs until this device is set up: which
  * platform it is (saved on the server for the device, so the Home Screen app and Kiwi's
  * Android app know it too), then that platform's setup.
+ *
+ * The setup page is a history entry of its own at the same address, so the system Back
+ * returns to the question instead of leaving Kiwi (and Forward opens the page again). The
+ * entry goes when the setup ends, so Back from the tabs doesn't land on it.
  */
 export function Onboarding({ me }: { me: Me }) {
   const { setMe } = useMe();
@@ -289,7 +288,10 @@ export function Onboarding({ me }: { me: Me }) {
     const next = setupPage(platform, me);
     const updated = await api.updateMe(next ? { platform } : { platform, onboarded: true });
     setMe(updated);
-    setPage(next);
+    if (next) {
+      pushStep(next);
+      setPage(next);
+    }
   });
   const finish = useTask(async () => setMe(await api.updateMe({ onboarded: true })));
   // Downloading the Kiwi app completes the setup; the page stays for its steps.
@@ -297,9 +299,27 @@ export function Onboarding({ me }: { me: Me }) {
 
   useEffect(() => window.scrollTo(0, 0), [page]);
 
+  // The setup starts at the question, also after a reload on its page; when it ends (the
+  // tabs replace it), its page's entry goes.
+  useEffect(() => {
+    forgetStep();
+    return () => void leaveStep();
+  }, []);
+
+  // Back and Forward: the page of the entry, while it still fits the chosen platform.
+  const expected = setupPage(me.device.platform, me);
+  useEffect(() => {
+    const onPop = () => {
+      finish.setError(null);
+      setPage(currentStep() === expected ? expected : null);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [expected, finish.setError]);
+
   const back = () => {
     finish.setError(null);
-    setPage(null);
+    if (!leaveStep()) setPage(null);
   };
   if (page === "iphone") {
     return <IphoneSetup me={me} onBack={back} onDone={() => void finish.run()} pending={finish.pending} error={finish.error} />;

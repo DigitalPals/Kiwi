@@ -119,8 +119,7 @@ const SORTS = [
 
 export function Browse() {
   const { me } = useMe();
-  // Android apps all come from Kiwi Builds: no source to pick, and the sources' counts of
-  // hidden apps include iPhone apps.
+  // Android apps all come from Kiwi Builds: no source to pick.
   const android = hasFeature(me, "android_apps");
   const [query, setQuery] = useState(savedQuery);
   const [savedPick, setSource] = useState(savedSource);
@@ -128,14 +127,14 @@ export function Browse() {
   const [showHidden, setShowHidden] = useState(savedShowHidden);
   const [recent, setRecent] = useStoredFlag("kiwi.browseSortRecent");
   const q = useDebounced(query.trim(), 250);
-  // Searches find hidden apps too, listed after the others. Android counts its hidden apps
-  // from the list, so it always asks for them.
+  // Searches find hidden apps too, listed after the others. Browse always asks for the hidden
+  // apps and counts them from the list: a source's own count includes other platforms' apps
+  // (Kiwi Builds' source has both), so an iPhone would count hidden Android apps it never lists.
   const listHidden = showHidden || !!q;
-  const withHidden = listHidden || android;
 
   const sources = useResource("sources", api.sources);
-  const apps = useResource(`apps?q=${q}&source=${source ?? ""}&hidden=${withHidden}`, () =>
-    api.apps({ q, ...(source ? { source } : {}), hidden: withHidden }),
+  const apps = useResource(`apps?q=${q}&source=${source ?? ""}&hidden=true`, () =>
+    api.apps({ q, ...(source ? { source } : {}), hidden: true }),
   );
   const { mutate } = apps;
   const onState = useCallback(
@@ -144,9 +143,6 @@ export function Browse() {
   );
 
   const enabledSources = sources.data?.filter((s) => s.enabled) ?? [];
-  const hiddenInSources = enabledSources
-    .filter((s) => source === null || s.id === source)
-    .reduce((sum, s) => sum + s.app_count - s.shown_count, 0);
   const chooseSource = (id: string | null) => {
     savedSource = id;
     setSource(id);
@@ -177,11 +173,10 @@ export function Browse() {
     }
     return { shown, hidden };
   }, [apps.data, recent, platform]);
-  const hiddenCount = android ? hidden.length : hiddenInSources;
   const hiddenToggle =
-    !q && hiddenCount > 0 ? (
+    !q && hidden.length > 0 ? (
       <button type="button" class="hidden-toggle" onClick={toggleHidden} aria-expanded={showHidden}>
-        {plural(hiddenCount, "app")} hidden · <b>{showHidden ? "Hide" : "Show"}</b>
+        {plural(hidden.length, "app")} hidden · <b>{showHidden ? "Hide" : "Show"}</b>
       </button>
     ) : null;
   // Reuse the list while the search input is changing but its debounced results have
@@ -212,7 +207,7 @@ export function Browse() {
     ) : null;
   if (!apps.data) {
     content = apps.error ? <ErrorState error={apps.error} onRetry={apps.reload} /> : <SkeletonRows />;
-  } else if (shown.length === 0 && (hidden.length > 0 || hiddenCount > 0)) {
+  } else if (shown.length === 0 && hidden.length > 0) {
     content = (
       <>
         {q ? (
@@ -247,7 +242,7 @@ export function Browse() {
           </a>
         </Empty>
       );
-    } else if (sources.data && enabledSources.length === 0) {
+    } else if (!android && sources.data && enabledSources.length === 0) {
       content = (
         <Empty
           icon="sources"
@@ -296,7 +291,7 @@ export function Browse() {
         }}
       />
       {!q && <FreshShelf key={source ?? ""} apps={shown} onState={onState} />}
-      {apps.data && (shown.length + hidden.length > 0 || source !== null || q) && (
+      {apps.data && (shown.length > 0 || (listHidden && hidden.length > 0) || source !== null || q) && (
         <div class="list-header">
           <h2 class="list-title">
             {q ? "Results" : "All Apps"}

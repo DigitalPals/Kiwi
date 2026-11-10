@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { api, errorMessage } from "../api/client";
-import type { CoreDevice, Host, Identity, Me, Platform, PlatformSource, Profile, Settings as SettingsData, Signing } from "../api/types";
+import type { CoreDevice, Host, Identity, Me, Platform, PlatformSource, Profile, Settings as SettingsData, Signing, Warning } from "../api/types";
 import { KiwiAppIcon } from "../components/AppIcon";
 import { Icon } from "../components/Icon";
 import { KiwiLogo } from "../components/KiwiLogo";
@@ -16,7 +16,7 @@ import {
   Spinner,
   Toggle,
 } from "../components/ui";
-import { buildsNotice } from "../lib/automation";
+import { buildsIos, buildsNotice } from "../lib/automation";
 import { hasFeature } from "../lib/features";
 import {
   expiryInfo,
@@ -38,6 +38,7 @@ import { blockedMessage, pushSupport, subscribe, subscriptionBody, usableSubscri
 import { BUILDS_PATH, DEVICE_PATH, NOTIFICATIONS_PATH, SIGNING_PATH } from "../lib/routes";
 import { checkUploadSize, readBase64, signingSummary, splitCommand, uploadErrorMessage, UPLOADS, type UploadKind } from "../lib/signing";
 import { countryName } from "../lib/store";
+import { listedSettingsWarnings } from "../lib/warnings";
 
 /** Text field that saves on blur or Return when changed. */
 function InlineField(props: {
@@ -338,15 +339,22 @@ const EXPORT_HINT =
 const REMOVE_IDENTITY =
   "Remove the signing identity?\n\nKiwi can't sign apps until you upload one again. Apps already installed keep working until they expire.";
 
+/**
+ * Sends one change to the signing files and shows the `Signing` it answers. Uploads, removals
+ * and rescans each answer with the whole `Signing`, so only one runs at a time (the others
+ * wait, disabled): answers that crossed could show an older state last.
+ */
+type SigningChange = (request: () => Promise<Signing>) => Promise<void>;
+
 /** "Upload .p12…": a row round a hidden file input, so a tap opens the file picker. */
-function UploadCell(props: { kind: UploadKind; label: string; pending: boolean; onFile: (file: File) => void }) {
+function UploadCell(props: { kind: UploadKind; label: string; pending: boolean; disabled?: boolean; onFile: (file: File) => void }) {
   return (
     <label class="cell cell-button center upload-cell" aria-busy={props.pending}>
       <input
         type="file"
         class="visually-hidden"
         accept={UPLOADS[props.kind].accept || undefined}
-        disabled={props.pending}
+        disabled={props.pending || props.disabled}
         onChange={(e) => {
           const file = e.currentTarget.files?.[0];
           // Choosing the same file again (after fixing the password) fires change again.
@@ -407,7 +415,7 @@ function IdentityCell({ identity, inUse, files }: { identity: Identity; inUse: b
   );
 }
 
-function ProfileCell({ profile, active, details, onRemove, removing }: {
+function ProfileCell({ profile, active, details, onRemove, removing, disabled }: {
   profile: Profile;
   active: boolean;
   /** The profile's name, UUID and entitlements, folded (among Xcode's many look-alike profiles). */
@@ -415,6 +423,8 @@ function ProfileCell({ profile, active, details, onRemove, removing }: {
   /** Uploaded profiles only: Xcode's are not Kiwi's to delete. */
   onRemove?: () => void;
   removing?: boolean;
+  /** Another signing change is on its way. */
+  disabled?: boolean;
 }) {
   const expiry = expiryInfo(profile.expires_at);
   // An expired profile's reason only repeats the date.
@@ -460,7 +470,7 @@ function ProfileCell({ profile, active, details, onRemove, removing }: {
           type="button"
           class="text-button small danger"
           onClick={onRemove}
-          disabled={removing}
+          disabled={removing || disabled}
           aria-label={`Remove ${profileLabel(profile)}`}
         >
           {removing ? <Spinner /> : "Remove"}
@@ -487,16 +497,15 @@ function SigningStatus({ data, os }: { data: Signing; os: Host["os"] | undefined
 }
 
 /** Asks the password of the chosen .p12, then uploads both; the server checks them. */
-function IdentitySheet({ file, onUploaded, onClose }: { file: File; onUploaded: (next: Signing) => void; onClose: () => void }) {
+function IdentitySheet({ file, change, busy, onClose }: { file: File; change: SigningChange; busy: boolean; onClose: () => void }) {
   const [password, setPassword] = useState("");
   const upload = useTask(async () => {
-    let next: Signing;
     try {
-      next = await api.uploadIdentity({ p12: await readBase64(file), password });
+      await change(async () => api.uploadIdentity({ p12: await readBase64(file), password }));
     } catch (e) {
       throw new Error(uploadErrorMessage("identity", e));
     }
-    onUploaded(next);
+    onClose();
   });
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -518,7 +527,7 @@ function IdentitySheet({ file, onUploaded, onClose }: { file: File; onUploaded: 
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            if (!upload.pending) void upload.run();
+            if (!upload.pending && !busy) void upload.run();
           }}
         >
           <label class="sheet-field">
@@ -550,7 +559,7 @@ function IdentitySheet({ file, onUploaded, onClose }: { file: File; onUploaded: 
                 : "Kiwi keeps the identity and its password on the computer it runs on, readable only by Kiwi, and never sends them back."}
             </p>
           )}
-          <button type="submit" class="button button-block" disabled={upload.pending}>
+          <button type="submit" class="button button-block" disabled={upload.pending || busy}>
             {upload.pending ? <Spinner /> : "Upload"}
           </button>
         </form>
@@ -560,10 +569,10 @@ function IdentitySheet({ file, onUploaded, onClose }: { file: File; onUploaded: 
 }
 
 /** Files backend: the uploaded .p12 (one at a time), or how to get one. */
-function IdentitySection({ data, onChange }: { data: Signing; onChange: (next: Signing) => void }) {
+function IdentitySection({ data, change, busy }: { data: Signing; change: SigningChange; busy: boolean }) {
   const [file, setFile] = useState<File | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
-  const remove = useTask(async () => onChange(await api.removeIdentity()));
+  const remove = useTask(() => change(api.removeIdentity));
   const { identities } = data;
   // An upload replaces the identity, so an expiring one can be renewed in place.
   const renew = identities.some((i) => {
@@ -605,10 +614,16 @@ function IdentitySection({ data, onChange }: { data: Signing; onChange: (next: S
           <IdentityCell key={identity.sha1} identity={identity} inUse={identity.sha1 === data.active?.identity_sha1} files />
         ))}
         {(identities.length === 0 || renew) && (
-          <UploadCell kind="identity" label={identities.length ? "Upload a New .p12…" : "Upload .p12…"} pending={false} onFile={choose} />
+          <UploadCell
+            kind="identity"
+            label={identities.length ? "Upload a New .p12…" : "Upload .p12…"}
+            pending={false}
+            disabled={busy}
+            onFile={choose}
+          />
         )}
         {identities.length > 0 && (
-          <button type="button" class="cell cell-button center" onClick={confirmRemove} disabled={remove.pending}>
+          <button type="button" class="cell cell-button center" onClick={confirmRemove} disabled={remove.pending || busy}>
             {remove.pending ? <Spinner /> : <span class="cell-action danger">Remove Identity</span>}
           </button>
         )}
@@ -618,28 +633,20 @@ function IdentitySection({ data, onChange }: { data: Signing; onChange: (next: S
           </div>
         )}
       </Section>
-      {file && (
-        <IdentitySheet
-          file={file}
-          onUploaded={(next) => {
-            setFile(null);
-            onChange(next);
-          }}
-          onClose={() => setFile(null)}
-        />
-      )}
+      {file && <IdentitySheet file={file} change={change} busy={busy} onClose={() => setFile(null)} />}
     </>
   );
 }
 
 /** Every backend: the profiles Kiwi found, removing uploaded ones, and uploading more. */
-function ProfilesSection({ data, onChange }: { data: Signing; onChange: (next: Signing) => void }) {
+function ProfilesSection({ data, change, busy }: { data: Signing; change: SigningChange; busy: boolean }) {
   const files = data.backend === "files";
   const [problem, setProblem] = useState<string | null>(null);
+  // One change runs at a time, so at most one profile is being removed.
   const [removing, setRemoving] = useState<string | null>(null);
   const upload = useTask(async (file: File) => {
     try {
-      onChange(await api.uploadProfile({ profile: await readBase64(file) }));
+      await change(async () => api.uploadProfile({ profile: await readBase64(file) }));
     } catch (e) {
       throw new Error(uploadErrorMessage("profile", e));
     }
@@ -647,7 +654,7 @@ function ProfilesSection({ data, onChange }: { data: Signing; onChange: (next: S
   const remove = useTask(async (uuid: string) => {
     setRemoving(uuid);
     try {
-      onChange(await api.removeProfile(uuid));
+      await change(() => api.removeProfile(uuid));
     } finally {
       setRemoving(null);
     }
@@ -689,9 +696,10 @@ function ProfilesSection({ data, onChange }: { data: Signing; onChange: (next: S
           details={!files}
           onRemove={p.uploaded ? () => confirmRemove(p) : undefined}
           removing={removing === p.uuid}
+          disabled={busy}
         />
       ))}
-      <UploadCell kind="profile" label="Upload Profile…" pending={upload.pending} onFile={choose} />
+      <UploadCell kind="profile" label="Upload Profile…" pending={upload.pending} disabled={busy} onFile={choose} />
       {error && (
         <div class="cell">
           <UploadError message={error} />
@@ -705,12 +713,18 @@ function ProfilesSection({ data, onChange }: { data: Signing; onChange: (next: S
 export function SigningScreen() {
   const signing = useResource<Signing>("signing", api.signing);
   const { me, reload: reloadMe } = useMe();
-  // Signing decides Me's warnings (and the Settings tab's dot), so refresh them too.
-  const apply = (next: Signing) => {
-    signing.mutate(next);
-    reloadMe();
+  const [busy, setBusy] = useState(false);
+  const change: SigningChange = async (request) => {
+    setBusy(true);
+    try {
+      signing.mutate(await request());
+      // Signing decides Me's warnings (and the Settings tab's dot), so refresh them too.
+      reloadMe();
+    } finally {
+      setBusy(false);
+    }
   };
-  const rescan = useTask(async () => apply(await api.rescanSigning()));
+  const rescan = useTask(() => change(api.rescanSigning));
   const data = signing.data;
 
   let content;
@@ -720,8 +734,8 @@ export function SigningScreen() {
     content = (
       <>
         <SigningStatus data={data} os={me?.host.os} />
-        <IdentitySection data={data} onChange={apply} />
-        <ProfilesSection data={data} onChange={apply} />
+        <IdentitySection data={data} change={change} busy={busy} />
+        <ProfilesSection data={data} change={change} busy={busy} />
       </>
     );
   } else {
@@ -741,9 +755,9 @@ export function SigningScreen() {
             />
           ))}
         </Section>
-        <ProfilesSection data={data} onChange={apply} />
+        <ProfilesSection data={data} change={change} busy={busy} />
         <Section footer={rescan.error ? <span class="danger">{rescan.error}</span> : "After renewing in Xcode, rescan to use the new files."}>
-          <button type="button" class="cell cell-button center" onClick={() => void rescan.run()} disabled={rescan.pending}>
+          <button type="button" class="cell cell-button center" onClick={() => void rescan.run()} disabled={rescan.pending || busy}>
             {rescan.pending ? <Spinner /> : <span class="cell-action">Rescan Profiles and Identities</span>}
           </button>
         </Section>
@@ -836,6 +850,13 @@ function usePreferences() {
   return { settings, data, update, error };
 }
 
+/** What Kiwi Builds does for this device, under its switch. */
+function buildsFooter(android: boolean, host: Host): string {
+  if (android) return "Patch Android apps with open-source patches and sign them with this Kiwi's own key.";
+  if (buildsIos(host)) return "Patch App Store apps with open-source tweaks and sign them on this Mac.";
+  return "iPhone apps can only be built on a Mac, and this Kiwi doesn't run on macOS. Here Kiwi Builds patches Android apps.";
+}
+
 /**
  * Kiwi Builds: off until the owner turns it on and confirms what it does. On Android it is a
  * tab, so only the switch is here.
@@ -843,20 +864,16 @@ function usePreferences() {
 function BuildsSection(props: {
   data: SettingsData;
   update: (patch: Partial<SettingsData>) => Promise<void>;
+  host: Host;
   android?: boolean;
 }) {
-  const { data, update, android = false } = props;
+  const { data, update, host, android = false } = props;
   const toggle = (on: boolean) => {
-    if (on && !window.confirm(buildsNotice(android))) return;
+    if (on && !window.confirm(buildsNotice(android, host))) return;
     void update({ kiwi_builds: on });
   };
   return (
-    <Section
-      title="Kiwi Builds"
-      footer={android
-        ? "Patch Android apps with open-source patches and sign them with this Kiwi's own key."
-        : "Patch App Store apps with open-source tweaks and sign them on this Mac."}
-    >
+    <Section title="Kiwi Builds" footer={buildsFooter(android, host)}>
       <Cell label="Kiwi Builds" icon="wrench" sub={data.kiwi_builds ? undefined : "Off"}>
         <Toggle label="Kiwi Builds" checked={data.kiwi_builds} onChange={toggle} />
       </Cell>
@@ -927,7 +944,7 @@ function MacSections({ me }: { me: Me }) {
           </Cell>
         </Section>
       )}
-      {data && <BuildsSection data={data} update={update} />}
+      {data && <BuildsSection data={data} update={update} host={me.host} />}
     </>
   );
 }
@@ -985,7 +1002,30 @@ function KiwiAppCell({ app }: { app: NonNullable<Me["android_app"]> }) {
   );
 }
 
-/** This iPhone (name and iOS version), its notifications and, on Android, the Kiwi app. */
+/** A short name for a warning Settings lists, above its message. */
+const WARNING_TITLES: Record<string, string> = { android_app: "Kiwi App" };
+
+/**
+ * A warning without a row of its own (see `listedSettingsWarnings`), in amber (red for an
+ * error) with its message: the reason for the dot on the Settings tab.
+ */
+function WarningCell({ warning }: { warning: Warning }) {
+  const error = warning.level === "error";
+  return (
+    <div class="cell has-icon">
+      <CellIcon name="warning" color={error ? "#ff3b30" : "#ff9500"} />
+      <div class="cell-main">
+        <div class={error ? "cell-label tone-danger" : "cell-label tone-warn"}>{WARNING_TITLES[warning.code] ?? "Needs Attention"}</div>
+        <div class="cell-sub">{warning.message}</div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * This iPhone (name and iOS version), its notifications and, on Android, the Kiwi app; then
+ * the warnings that have no row of their own.
+ */
 function DeviceRows({ me }: { me: Me }) {
   const { device } = me;
   return (
@@ -1004,6 +1044,9 @@ function DeviceRows({ me }: { me: Me }) {
         <LinkCell href={NOTIFICATIONS_PATH} icon="bell" label="Notifications" value={me.push.subscribed ? "On" : "Off"} />
       )}
       {hasFeature(me, "android_app_offer") && me.android_app && <KiwiAppCell app={me.android_app} />}
+      {listedSettingsWarnings(me).map((w) => (
+        <WarningCell key={`${w.code}:${w.message}`} warning={w} />
+      ))}
     </>
   );
 }
@@ -1060,7 +1103,7 @@ function AndroidSections({ me }: { me: Me }) {
       <AndroidKeySection me={me} />
       {data ? (
         <>
-          <BuildsSection data={data} update={update} android />
+          <BuildsSection data={data} update={update} host={me.host} android />
           <Section title="Updates" footer={error ? <span class="danger">{error}</span> : undefined}>
             <Cell label="Notify About Updates">
               <Toggle label="Notify about updates" checked={data.notify_updates} onChange={(v) => void update({ notify_updates: v })} />
@@ -1111,9 +1154,18 @@ function useSigningStatus(): CardStatus {
   return { dot: "live", text: "Ready to sign" };
 }
 
-/** On Android: whether Kiwi Builds is on and has its signing key. */
+/**
+ * On Android: a problem first (its message is in This Phone), else whether Kiwi Builds is on
+ * and has its signing key.
+ */
 function useAndroidStatus(me: Me): CardStatus {
   const settings = useResource<SettingsData>("settings", api.settings);
+  const problems = listedSettingsWarnings(me).filter((w) => w.level !== "info");
+  const problem = problems.find((w) => w.level === "error") ?? problems[0];
+  if (problem) {
+    const what = problem.code === "android_app" ? "Kiwi app not ready" : "Needs attention";
+    return { dot: problem.level === "error" ? "error" : "warn", text: what };
+  }
   if (!settings.data) return { dot: "off", text: settings.error ? "Kiwi Builds status unknown" : "Checking Kiwi Builds…" };
   if (!settings.data.kiwi_builds) return { dot: "off", text: "Kiwi Builds is off" };
   if (!me.host.android_signer_sha256) return { dot: "off", text: "No Android builds yet" };

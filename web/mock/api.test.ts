@@ -11,11 +11,11 @@ import type {
   Source,
   StoreApp,
 } from "../src/api/types.ts";
-import { MOCK_ANDROID_SIGNER, compareVersions, createMockApi, shortName } from "./api.ts";
+import { MOCK_ANDROID_SIGNER, compareVersions, createMockApi, shortName, type MockOptions } from "./api.ts";
 
-function setup() {
+function setup(options: MockOptions = {}) {
   let now = Date.parse("2026-10-29T12:00:00Z");
-  const api = createMockApi(() => now);
+  const api = createMockApi(() => now, options);
   const request = (method: string, path: string, body?: unknown) => {
     const url = new URL(path, "http://localhost:5173");
     return api.handle({
@@ -231,7 +231,8 @@ describe("mock api", () => {
     // The owner's choice wins; null goes back to detection.
     const chosen = request("PATCH", "/api/me", { platform: "android" }).json as Me;
     expect(chosen.device).toMatchObject({ platform: "android", platform_source: "chosen", detected_platform: "ios" });
-    expect(chosen.features).toEqual(["android_apps", "web_push", "android_app_offer"]);
+    // Kiwi's Android app is offered only where it installs: a device detected as Android.
+    expect(chosen.features).toEqual(["android_apps", "web_push"]);
     expect(request("GET", "/api/apps").json).toEqual([]);
     expect((request("PATCH", "/api/me", { platform: null }).json as Me).device.platform_source).toBe("detected");
     expect(request("PATCH", "/api/me", { platform: "windows" }).status).toBe(400);
@@ -258,6 +259,47 @@ describe("mock api", () => {
     const android = request("PATCH", "/api/me", { platform: "android", onboarded: true }).json as Me;
     expect(android).toMatchObject({ onboarded: true, device: { platform: "android", platform_source: "chosen" } });
     expect(android.features).toEqual(["android_apps", "web_push"]);
+  });
+
+  it("offers Kiwi's Android app only to devices detected as Android", () => {
+    const phone = setup({ device: "android" }).request("GET", "/api/me").json as Me;
+    expect(phone.features).toEqual(["android_apps", "web_push", "android_app_offer"]);
+    const { request } = setup({ device: "desktop" });
+    const desktop = request("PATCH", "/api/me", { platform: "android" }).json as Me;
+    expect(desktop.android_app).not.toBeNull();
+    expect(desktop.features).toEqual(["android_apps", "web_push"]);
+  });
+
+  it("warns Android devices when Kiwi couldn't prepare its Android app", () => {
+    const { request } = setup({ device: "android", androidApp: "failed" });
+    const me = request("GET", "/api/me").json as Me;
+    expect(me.android_app).toBeNull();
+    expect(me.features).toEqual(["android_apps", "web_push"]);
+    const settings = me.warnings.filter((w) => w.link === "/settings");
+    expect(settings).toEqual([expect.objectContaining({ level: "warning", code: "android_app" })]);
+    expect(settings[0]?.message).toMatch(/^Kiwi couldn't prepare its Android app: /);
+    expect(request("GET", "/android/kiwi.apk").status).toBe(404);
+    // An iPhone isn't told.
+    const iphone = request("PATCH", "/api/me", { platform: "ios" }).json as Me;
+    expect(iphone.warnings.some((w) => w.code === "android_app")).toBe(false);
+  });
+
+  it("builds iOS apps only on a Mac, as the server does on Linux", () => {
+    const { request } = setup({ host: "linux" });
+    const overview = request("GET", "/api/automation").json as AutomationOverview;
+    expect(overview.checks).toEqual([{ name: "macOS", ready: false }]);
+    const youtube = request("GET", "/api/automation/youtube").json as AutomationState;
+    expect(youtube.checks).toEqual(overview.checks);
+    const check = request("POST", "/api/automation/youtube/check", {});
+    expect(check.status).toBe(409);
+    expect((check.json as { error: { code: string; message: string } }).error).toMatchObject({
+      code: "needs_mac",
+      message: expect.stringMatching(/^iOS apps can only be built on a Mac\./),
+    });
+    const twitch = request("GET", "/api/automation/twitch").json as AutomationState;
+    expect(request("POST", "/api/automation/twitch/add", twitch.preferences).status).toBe(409);
+    const android = request("GET", "/api/automation/android-reddit").json as AutomationState;
+    expect(request("POST", "/api/automation/android-reddit/add", android.preferences).status).toBe(202);
   });
 
   it("marks Android apps installed with another signature", () => {

@@ -52,7 +52,8 @@ can only be reached from your own tailnet.
   when the App Store is ahead.
 - **Kiwi Builds (optional, off by default).** Build patched YouTube, YouTube Music, Twitch,
   X and Reddit apps on your Mac from pinned open-source tweaks, on a schedule. It can also
-  build patched YouTube, YouTube Music and Reddit for your Android devices.
+  build patched YouTube, YouTube Music and Reddit for your Android devices, and signs
+  [Kiwi's Android app](docs/android-app.md) for them with the same key.
 - **Private by design.** Kiwi listens on `127.0.0.1` only. `tailscale serve` publishes it to
   your tailnet over HTTPS, never to the internet, and only your own Tailscale user can use it.
 

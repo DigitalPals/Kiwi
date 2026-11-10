@@ -136,6 +136,13 @@ build anywhere. The Mac setup shows a single **macOS** check that is never ready
 an older Python. Install a newer one and point Kiwi at it: `./install.sh --python
 /usr/bin/python3.13`, or `KIWI_PYTHON`. The Docker image has Python 3.13.
 
+**"Kiwi couldn't prepare its Android app"** (Settings on an Android device): signing
+[Kiwi's Android app](android-app.md) failed; the message says why, and
+`automation/kiwi-app.log` in the data directory has the details. Kiwi keeps offering the
+app it signed before and tries again within an hour. An APK in `android-app/unsigned/`
+that is already signed (a debug build) is refused: place the unsigned release APK, or
+remove the file to use the released app.
+
 ## Still stuck?
 
 Open an issue with what you tried, the output of `./install.sh --check` and the relevant

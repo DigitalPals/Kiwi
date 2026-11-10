@@ -1,5 +1,5 @@
 //! The minute scheduler: source refresh, App Store lookups, update detection, auto-prepare,
-//! notifications, devicectl sync and cleanup.
+//! notifications, devicectl sync, Kiwi's Android app, package reports and cleanup.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -77,7 +77,11 @@ pub async fn run(kiwi: Arc<Kiwi>) {
 
 pub async fn tick(kiwi: &Arc<Kiwi>, timers: &mut Timers) {
     crate::automation::tick(kiwi);
+    crate::kiwi_app::tick(kiwi).await;
     crate::owner::tick(kiwi).await;
+    if let Err(e) = crate::android::settle_reports(kiwi, Utc::now()) {
+        tracing::warn!("settling package reports failed: {e}");
+    }
     let settings = kiwi.settings();
     refresh_due_sources(kiwi, &settings).await;
     if let Err(e) = store::refresh(kiwi).await {

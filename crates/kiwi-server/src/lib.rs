@@ -10,6 +10,7 @@ pub mod config;
 pub mod db;
 pub mod devices;
 pub mod error;
+pub mod kiwi_app;
 pub mod linked;
 pub mod ota;
 pub mod owner;
@@ -42,7 +43,7 @@ pub use config::{Args, Config};
 pub use routes::router;
 
 use crate::{
-    android::AndroidAppCache,
+    android::{AndroidAppCache, PackageReports},
     builds::Jobs,
     catalog::Catalog,
     config::{AllowedHosts, valid_forwarded_host},
@@ -149,6 +150,8 @@ pub struct Kiwi {
     pub served: ServedRanges,
     /// Kiwi's Android app, checked when its files change.
     pub android_app: AndroidAppCache,
+    /// The last package report of each Android device.
+    pub package_reports: PackageReports,
     /// Cancelled on shutdown.
     pub cancel: CancellationToken,
     /// Wakes the scheduler (a build finished, a source changed, ...).
@@ -327,6 +330,7 @@ impl Kiwi {
             owner,
             served: ServedRanges::default(),
             android_app: AndroidAppCache::default(),
+            package_reports: PackageReports::default(),
             cancel: CancellationToken::new(),
             kick: Notify::new(),
             config,

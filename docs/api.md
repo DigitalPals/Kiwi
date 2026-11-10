@@ -180,7 +180,7 @@ interface CoreDevice {              // a device known to devicectl on the Mac
 
 interface Warning {
   level: "info" | "warning" | "error";
-  code: string;                     // e.g. "no_identity", "no_profile", "expiring", "source_errors"
+  code: string;                     // e.g. "no_identity", "no_profile", "expiring", "source_errors", "android_app"
   message: string;
   link: string | null;              // in-app route to fix it, e.g. "/settings", "/sources"
 }
@@ -524,7 +524,8 @@ has no model. For such a device:
   `Installed.expires_at` is null and `AppState.open_url` is null, since Kiwi cannot open
   or see apps on Android.
 - `Me.warnings` omits the signing warnings (`no_identity`, `no_profile`, `expiring`) and
-  `unknown_os`.
+  `unknown_os`. While signing Kiwi's Android app fails (see "Kiwi's Android app"), it has
+  `{level: "warning", code: "android_app", link: "/settings"}` with the reason.
 - Android apps have no App Store original (`original: null`, `original_match: "none"`).
 
 ### Kiwi's Android app
@@ -554,15 +555,21 @@ the version is `version_name`); the same package signed with another key is fore
 (`AppState.foreign_install`; Kiwi's download of it did not install, and installing it
 fails until the other app is removed); an install whose package is missing is marked
 removed (one whose download completed less than 10 minutes ago is kept: Android may
-still be installing it). Until the Android runner has recorded Kiwi's key (it does so
-whenever it builds), Kiwi only records removals. Each report replaces the previous
-one; at most 5000 packages (2 MiB).
+still be installing it). Android's install can fail after the download, and the app
+reports right after it: such a report counts for that install once the 10 minutes are
+over, without another report (Kiwi keeps each device's last report in memory and checks
+every minute). Until the Android runner has recorded Kiwi's key (it does so
+whenever it builds or signs Kiwi's app), Kiwi only records removals. Each report replaces
+the previous one; at most 5000 packages (2 MiB).
 
 Kiwi offers its Android app (`Me.android_app`) when `<data>/android-app/` holds
-`kiwi.apk` and `kiwi.json` (`{package, version_name, version_code, sha256, size}`)
-describing it; whatever provides the app writes both. A description that doesn't match the
-file (size or SHA-256) is ignored. The web app offers it on Android devices
-(`android_app_offer`); `install_url` downloads it from `/android/kiwi.apk`.
+`kiwi.apk` and `kiwi.json` (`{package, version_name, version_code, sha256, size}`, other
+fields are ignored) describing it. A description that doesn't match the file (size or
+SHA-256) is ignored. The web app offers it on Android devices (`android_app_offer`);
+`install_url` downloads it from `/android/kiwi.apk`. While Kiwi Builds is on and Kiwi has an
+Android device or Android build, Kiwi writes both itself: it signs the unsigned release
+pinned in `automation/kiwi-app.json` (or an unsigned APK the owner placed in
+`android-app/unsigned/`) with its Android key ([android-app.md](android-app.md)).
 
 Static: every other GET path serves `web/dist`; unknown paths without a file extension
 fall back to `index.html`. `/sw.js` and `/index.html` use `Cache-Control: no-cache`;

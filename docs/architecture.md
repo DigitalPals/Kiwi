@@ -54,7 +54,8 @@ crates/kiwi-push        VAPID keys + Web Push (RFC 8030/8291/8292) sender
 crates/kiwi-server      axum HTTP server, SQLite state, jobs, scheduler; binary `kiwi`
 web/                    Vite + Preact + TypeScript PWA (built to web/dist, served by kiwi-server)
 android/                native Android client (Kotlin, Jetpack Compose); see android/README.md
-automation/             Kiwi Builds: the build runner (Python) and pinned app recipes
+automation/             Kiwi Builds: the build runners (Python), pinned app recipes and the pinned
+                        release of Kiwi's Android app (kiwi-app.json)
 install.sh              installs or updates Kiwi on a Mac (build, LaunchAgent, tailscale serve)
                         or on Linux (build, systemd service, tailscale serve)
 uninstall.sh            removes it again
@@ -62,6 +63,7 @@ deploy/                 LaunchAgent, log rotation and systemd unit templates; de
                         a checkout to a Mac from another machine over SSH
 Dockerfile, compose.yaml  the container image, and Kiwi with a Tailscale sidecar
 docs/                   this file, the HTTP API (api.md) and the guides
+.github/workflows/      CI, and the release of Kiwi's unsigned Android app (android-release.yml)
 ```
 
 Library crates do not depend on each other; only `kiwi-server` depends on them. All crates
@@ -188,8 +190,9 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
 - Data layout: `downloads/<sha256>.ipa` (content addressed), `builds/<build_id>/<Name>.ipa`,
   `work/` (temporary, cleared at start), `icons/<sha256(url)>.png`, `vapid.json` (0600),
   `automation/` (Kiwi Builds; `automation/android/signer.json` names the certificate of the
-  Android signing key), `android-app/` (Kiwi's Android app, `kiwi.apk` + `kiwi.json`, put
-  there by whatever provides it), `kiwi.lock`.
+  Android signing key), `android-app/` (Kiwi's Android app, `kiwi.apk` + `kiwi.json`, written
+  by the Android runner's `kiwi-app` command; `unsigned/` holds the owner's own builds),
+  `kiwi.lock`.
 - At start Kiwi takes an exclusive lock on `<data>/kiwi.lock` before any startup cleanup
   (clearing `work/`, failing interrupted builds); a second instance exits with an error
   instead of damaging the running one.
@@ -331,6 +334,12 @@ small:
   Android apps signed with Kiwi's key are verified installs (or `device` installs), missing
   ones are marked removed (after the same 10-minute grace for a fresh download), and the
   ones signed with another key are saved in `foreign_packages` (`AppState.foreign_install`).
+  Android's install can fail after the download, and the app reports at once, inside the
+  grace period. So Kiwi keeps each device's last report in memory
+  (`android::PackageReports`) and, every minute, applies it to the unverified `kiwi`
+  installs that completed before it and whose grace period has ended since
+  (`android::settle_reports`): a package the report lacked is removed then, without
+  waiting for the next report.
   Kiwi's key is the certificate SHA-256 the Android runner writes to
   `automation/android/signer.json` whenever it loads the key (before that, the `signer`
   of a published build's provenance); without either only removals are recorded.
@@ -340,6 +349,19 @@ small:
   `/android/kiwi.apk` serves it to the owner's devices with `Range` support (the OTA
   routes' `ota::send_file`). The route wins over the web app's files, and missing `.apk`
   paths are 404s rather than the app shell.
+- **Delivering it.** The project publishes the app unsigned (`android-release.yml`);
+  `automation/kiwi-app.json` pins a release (URL, SHA-256, size; `null` before the first).
+  `kiwi_app::tick` (at startup and every minute, while Kiwi Builds is on and Kiwi has an
+  Android device or an added Android recipe) computes an input key over the pinned
+  release's digest and the name, size and time of each APK in `android-app/unsigned/`.
+  When `kiwi.json` does not carry that key (its `input`) or another signer than
+  `signer.json`, it queues the Android runner's `kiwi-app` command on Kiwi Builds' worker
+  (`automation::start_next` runs it before the next build; one job at a time). The runner
+  signs the newest local APK, else the downloaded and checked pinned one, with the Kiwi
+  Builds key (`apksigner` from pinned build-tools, v2 + v3), verifies it and replaces
+  `kiwi.apk` and `kiwi.json`. A failure is logged, kept in memory as the `android_app`
+  warning of Android devices and retried after an hour or when the key changes. See
+  [android-app.md](android-app.md).
 
 The Android runner needs no Mac-specific tool: it downloads a pinned Java runtime, patcher
 and patch bundle, fetches the original app, verifies the publisher's signature over the
@@ -455,7 +477,9 @@ without one, the same bundle id).
   reported unavailable, keeping the known profiles).
 - Scheduler tick every minute:
   - when Kiwi Builds is on, queue the added apps whose check is due (see
-    [kiwi-builds.md](kiwi-builds.md));
+    [kiwi-builds.md](kiwi-builds.md)), and sign Kiwi's Android app again when its input
+    changed (see "Android devices");
+  - apply Android devices' last package reports to installs whose grace period ended;
   - refresh enabled sources older than `refresh_interval_minutes` (conditional requests;
     `last_attempt_at` is written before the fetch, so a fetch that crashes the server is
     not repeated right after the restart);

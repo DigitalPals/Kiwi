@@ -418,6 +418,15 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
             warnings.push(warning("warning", "expiring", message, "/apps"));
         }
     }
+    // Signing Kiwi's own Android app failed: it is offered to Android devices only.
+    if android && let Some(failure) = crate::kiwi_app::failure(kiwi) {
+        warnings.push(warning(
+            "warning",
+            "android_app",
+            format!("Kiwi couldn't prepare its Android app: {}", failure.message),
+            "/settings",
+        ));
+    }
     if ctx.device.os_version.is_none() && !android {
         warnings.push(warning(
             "info",

@@ -16,8 +16,9 @@
 #
 # On Linux (as root, through sudo) it stops and removes kiwi.service, the `tailscale serve`
 # mapping of / (only when it points at Kiwi) and the program in /opt/kiwi. The data in
-# /var/lib/kiwi and the user "kiwi" that owns it stay unless --purge is given. Back up the
-# data first: it holds Kiwi Builds' Android signing key (docs/operations.md, "Backups").
+# /var/lib/kiwi and the user "kiwi" that owns it stay unless --purge is given (which removes
+# that user only when it is the system account install.sh makes). Back up the data first:
+# it holds Kiwi Builds' Android signing key (docs/operations.md, "Backups").
 set -euo pipefail
 
 LABEL=local.kiwi
@@ -150,8 +151,23 @@ on_mac() {
 	fi
 }
 
+# Linux: whether the account $SERVICE_USER is the one install.sh makes: a system account
+# with the home $LINUX_DATA and no login shell. Another account of that name is not Kiwi's.
+kiwi_service_user() {
+	local entry uid home shell uid_min
+	entry=$(getent passwd "$SERVICE_USER") || return 1
+	IFS=: read -r _ _ uid _ _ home shell <<<"$entry"
+	uid_min=$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null || true)
+	case "$uid_min" in "" | *[!0-9]*) uid_min=1000 ;; esac
+	[ "$uid" != 0 ] && [ "$uid" -lt "$uid_min" ] && [ "$home" = "$LINUX_DATA" ] || return 1
+	case "$shell" in
+	*/nologin | */false) return 0 ;;
+	esac
+	return 1
+}
+
 # Linux, as root: kiwi.service, the serve mapping and /opt/kiwi; with --purge also
-# /var/lib/kiwi and the kiwi user.
+# /var/lib/kiwi and the kiwi user (when install.sh made it).
 on_linux() {
 	local purge=0 port
 	case "${1:-}" in
@@ -179,9 +195,14 @@ on_linux() {
 	rmdir "$APPS" 2>/dev/null || true
 
 	if [ "$purge" = 1 ]; then
-		say "Purging $LINUX_DATA and the user $SERVICE_USER"
+		say "Purging $LINUX_DATA"
 		rm -rf "$LINUX_DATA"
-		if id -u "$SERVICE_USER" >/dev/null 2>&1; then userdel "$SERVICE_USER" || true; fi
+		if kiwi_service_user; then
+			say "Removing the user $SERVICE_USER"
+			userdel "$SERVICE_USER" || true
+		elif id -u "$SERVICE_USER" >/dev/null 2>&1; then
+			say "Kept the user $SERVICE_USER: it is not the system account install.sh makes (home $LINUX_DATA, no login shell)"
+		fi
 	else
 		say "Kept data in $LINUX_DATA, owned by the user $SERVICE_USER (use --purge to delete both); logs stay in the journal"
 	fi

@@ -133,8 +133,9 @@ Docker. Patched iOS apps are decrypted and built with Apple's tools on a Mac; An
 build anywhere. The Mac setup shows a single **macOS** check that is never ready.
 
 **"Kiwi Builds for Android needs Python 3.12 or newer"**: Kiwi runs the Android builder with
-an older Python. Install a newer one and point Kiwi at it: `./install.sh --python
-/usr/bin/python3.13`, or `KIWI_PYTHON`. The Docker image has Python 3.13.
+an older Python. Install a newer one for the whole system and point Kiwi at it:
+`./install.sh --python /usr/bin/python3.13`, or `KIWI_PYTHON`. The service can't use a
+Python in a home directory (pyenv, uv, conda and the like). The Docker image has Python 3.13.
 
 **"Kiwi couldn't prepare its Android app"** (Settings on an Android device): signing
 [Kiwi's Android app](android-app.md) failed; the message says why, and

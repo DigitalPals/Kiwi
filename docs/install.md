@@ -197,8 +197,13 @@ source and installs it as a system service, much as on a Mac.
 - **Tools**: `jq`, `sqlite3`, `curl`, `git` and a C compiler. On Debian and Ubuntu:
   `sudo apt install jq sqlite3 curl git build-essential`.
 - **Rust** from [rustup.rs](https://rustup.rs) and **Node.js** 20 or later.
-- **Python** 3.12 or newer, only for building Android apps with Kiwi Builds (Debian 13 and
-  Ubuntu 24.04 have it as `python3`; elsewhere pass `--python /path/to/python3.13`).
+- **Python** 3.12 or newer, only for building Android apps with Kiwi Builds. Kiwi's service
+  can't see home directories, so it must be a Python installed for the whole system: Debian
+  13 and Ubuntu 24.04 have it as `/usr/bin/python3`, which the installer finds by itself.
+  Elsewhere install one with your package manager (or build it into `/usr/local`) and pass
+  it, e.g. `--python /usr/local/bin/python3.13`. A Python from pyenv, uv, mise, conda,
+  Linuxbrew or a virtualenv in your home directory doesn't work, and the installer refuses
+  it.
 
 ### Install
 
@@ -221,9 +226,15 @@ The installer builds Kiwi as you, then installs it as root:
 - `tailscale serve`: `/` of `https://<this computer>.<your tailnet>.ts.net` to Kiwi,
   tailnet only.
 
-It takes the options of the [Mac installer](#5-install-kiwi), plus `--python PATH`. Servers
-are often [tagged](https://tailscale.com/kb/1068/tags) in Tailscale, and then have no
-owner: pass `--owner you@example.com`.
+It takes the options of the [Mac installer](#5-install-kiwi), plus `--python PATH` (see
+above; the installer checks that the service can run it). Servers are often
+[tagged](https://tailscale.com/kb/1068/tags) in Tailscale, and then have no owner: pass
+`--owner you@example.com`.
+
+The installer creates the system user `kiwi` itself. If a user of that name already exists
+but isn't such an account (a system account with the home `/var/lib/kiwi` and no login
+shell), it stops rather than run Kiwi as someone else's account; `./install.sh --check`
+says so too.
 
 ### Signing iOS apps on Linux
 
@@ -241,8 +252,8 @@ each step, including how to make the `.p12` with OpenSSL. Without a Mac there is
 The same commands as on a Mac: `git pull && ./install.sh` updates Kiwi (backing up
 `kiwi.db` and rolling back if the new build doesn't start), `./uninstall.sh` removes the
 service, the program and the serve mapping, and keeps `/var/lib/kiwi` and the `kiwi` user.
-`./uninstall.sh --purge` deletes both, including Kiwi Builds' Android signing key: back it
-up first ([Operations](operations.md#backups)).
+`./uninstall.sh --purge` deletes both (the user only when the installer made it), including
+Kiwi Builds' Android signing key: back it up first ([Operations](operations.md#backups)).
 
 ## Docker
 
@@ -254,37 +265,61 @@ tailscaled who each device is and what Kiwi's own address is.
 
 1. Turn on MagicDNS and HTTPS Certificates for your tailnet ([Tailscale](#3-tailscale)).
 2. Create an auth key in the Tailscale admin console under
-   [Settings › Keys](https://login.tailscale.com/admin/settings/keys). It decides who owns
-   Kiwi:
+   [Settings › Keys](https://login.tailscale.com/admin/settings/keys). Make it a one-off key
+   (leave **Reusable** off) and not **Ephemeral**: the container uses it once, and an
+   ephemeral machine is removed from your tailnet when it goes offline, taking Kiwi's
+   address with it. The key decides who owns Kiwi:
    - a key **without tags** makes the new machine yours, and Kiwi takes you as its owner;
    - a **tagged** key makes a machine that belongs to no user: then set `KIWI_OWNER` to your
      Tailscale login.
 
-   You can also leave the key out and log in with the link that
-   `docker compose logs tailscale` shows on the first start.
+   You can also leave the key out and log in with a link instead (below).
 3. Clone Kiwi, fill in `.env` and start it:
 
    ```sh
    git clone https://github.com/DigitalPals/Kiwi.git kiwi && cd kiwi
-   cp .env.example .env        # TS_AUTHKEY, TS_HOSTNAME (default kiwi), KIWI_OWNER
+   install -m 600 .env.example .env   # private to you: TS_AUTHKEY, TS_HOSTNAME (default kiwi), KIWI_OWNER
    docker compose up -d --build
-   docker compose logs -f kiwi # "public URL from Tailscale: https://kiwi.<your tailnet>.ts.net"
+   docker compose logs -f kiwi        # "public URL from Tailscale: https://kiwi.<your tailnet>.ts.net"
    ```
 
-4. Open that address on your phone ([section 6](#6-set-up-your-iphone)). iOS apps are signed
-   as on [Linux](#signing-ios-apps-on-linux): upload your certificate and profile in
+   Without an auth key, start the Tailscale container on its own first and log in with the
+   link it prints, then start the rest:
+
+   ```sh
+   docker compose up -d tailscale
+   docker compose logs -f tailscale   # open the https://login.tailscale.com/... link, then Ctrl-C
+   docker compose up -d --build
+   ```
+
+   Kiwi starts once the Tailscale container is on your tailnet. If `docker compose up -d`
+   stops with `dependency failed to start: container kiwi-tailscale-1 is unhealthy`, the
+   login wasn't finished in time (5 minutes): log in with the link from
+   `docker compose logs tailscale`, then run `docker compose up -d` again.
+
+4. Once Kiwi answers, clear `TS_AUTHKEY` in `.env` and run `docker compose up -d`, which
+   recreates the containers without the key in their environment. The Tailscale container
+   uses the key only while it has no Tailscale state of its own (`TS_AUTH_ONCE`); from then
+   on its machine key in the `tailscale-state` volume is enough. If you remove that volume,
+   create a new key or use the login link.
+5. Open Kiwi's address on your phone ([section 6](#6-set-up-your-iphone)). iOS apps are
+   signed as on [Linux](#signing-ios-apps-on-linux): upload your certificate and profile in
    **Settings › Signing** ([Signing on Linux](signing-on-linux.md)).
 
 Kiwi's data is in the volume `kiwi-data` (`/data` in the container) and the Tailscale
 machine's identity in `tailscale-state`. Keep both: without `tailscale-state` the container
 joins the tailnet as a new machine, under a new name if the old one still exists, and
-Kiwi's address changes with it. `.env` holds your auth key and is not committed.
+Kiwi's address changes with it. `.env` is not committed (see `.gitignore`).
 
 To update: `git pull && docker compose up -d --build`. The container has no automatic
 rollback like `install.sh`, so back up first ([Operations](operations.md#backups)).
 
-- The image runs Kiwi as the user `kiwi` (uid 10001). For a host directory instead of the
-  `kiwi-data` volume, give it to that user first: `sudo chown -R 10001:10001 ./data`.
+- The image runs Kiwi as the user `kiwi` (uid 10001) with umask 077, so what it writes
+  (the database, builds, downloads, signing keys) is private to it. For a host directory
+  instead of the `kiwi-data` volume (`- ./data:/data` under the `kiwi` service's
+  `volumes:`), create it for that user first: `sudo install -d -o 10001 -g 10001 -m 700
+  ./data` (for one that already has Kiwi's data: `sudo chown -R 10001:10001 ./data && sudo
+  chmod 700 ./data`). `.gitignore` keeps `/data/` out of git.
 - The App Store country starts as the region of `LANG` (`LANG=nl_NL.UTF-8`: the
   Netherlands), else the United States; Settings changes it.
 - The image's healthcheck asks `/api/health`; `docker compose ps` shows it.

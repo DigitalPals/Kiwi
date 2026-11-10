@@ -218,6 +218,22 @@ def download(url, target, *, limit=MAX_APK, headers=None, sha256=None):
     return hasher.hexdigest()
 
 
+def argument_file(path, arguments):
+    """Writes arguments to an @-file that only this user can read and returns "@<path>". The
+    patcher (picocli) reads its arguments from such a file, so secrets stay off its command
+    line, which every local user can read in /proc. Quoted as picocli parses @-files
+    (java.io.StreamTokenizer): in double quotes, with backslashes and quotes escaped."""
+    def quoted(value):
+        value = str(value)
+        if "\n" in value or "\r" in value:
+            raise BuildError("An argument for the patcher contains a line break")
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        out.write(" ".join(quoted(a) for a in arguments) + "\n")
+    return f"@{path}"
+
+
 def unpack_bundle(path, target):
     """The APKs of a split-APK bundle (.apks, .xapk, .apkm), extracted flat."""
     target.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -637,15 +653,21 @@ class Android:
             for name in package.get("patches", []) if package.get("optional") else []:
                 selection += ["--enable" if package["id"] in tweaks else "--disable", name]
         candidate, result = job_dir / "candidate.apk", job_dir / "result.json"
-        self.builder.command(
-            [java, "-jar", patcher, "patch", "--patches", patches, "--out", candidate,
-             "--temporary-files-path", job_dir / "work", "--result-file", result,
-             "--keystore", store, "--keystore-password", password, "--keystore-entry-alias", ALIAS,
-             "--keystore-entry-password", password, "--signer", "Kiwi", "--striplibs", self.toolchain["abi"],
-             *selection, original], cwd=job_dir, timeout=3600,
-            # The patcher records every app it patches; keep that inside the job.
-            env=dict(self.builder.env, MORPHE_DATA_DIR=str(job_dir / "patcher"), HOME=str(job_dir / "home")),
-            message=f"Patching failed. {app['name']} {plan['version']} may need an updated patch recipe.")
+        # The keystore password reaches the patcher in a private @-file, never its arguments.
+        passwords = job_dir / "keystore.args"
+        try:
+            self.builder.command(
+                [java, "-jar", patcher, "patch", "--patches", patches, "--out", candidate,
+                 "--temporary-files-path", job_dir / "work", "--result-file", result,
+                 "--keystore", store, "--keystore-entry-alias", ALIAS,
+                 argument_file(passwords, ["--keystore-password", password, "--keystore-entry-password", password]),
+                 "--signer", "Kiwi", "--striplibs", self.toolchain["abi"], *selection, original],
+                cwd=job_dir, timeout=3600,
+                # The patcher records every app it patches; keep that inside the job.
+                env=dict(self.builder.env, MORPHE_DATA_DIR=str(job_dir / "patcher"), HOME=str(job_dir / "home")),
+                message=f"Patching failed. {app['name']} {plan['version']} may need an updated patch recipe.")
+        finally:
+            passwords.unlink(missing_ok=True)
         try:
             outcome = json.loads(result.read_text())
         except (OSError, ValueError) as error:

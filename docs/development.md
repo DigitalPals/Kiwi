@@ -35,7 +35,12 @@ cd ..
 python3 -m pytest automation/test_runner.py automation/test_android.py
 
 # Scripts
-shellcheck install.sh uninstall.sh deploy/deploy.sh
+shellcheck install.sh uninstall.sh deploy/deploy.sh android/scripts/build-in-docker.sh
+
+# Android app (JDK 17+ and an Android SDK; without them, android/scripts/build-in-docker.sh)
+cd android
+./gradlew test assembleRelease
+cd ..
 ```
 
 The same checks run in CI (`.github/workflows/ci.yml`). Keep them passing.

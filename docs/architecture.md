@@ -47,6 +47,7 @@ crates/kiwi-device      devicectl wrapper, Tailscale (LocalAPI or CLI), user-age
 crates/kiwi-push        VAPID keys + Web Push (RFC 8030/8291/8292) sender
 crates/kiwi-server      axum HTTP server, SQLite state, jobs, scheduler; binary `kiwi`
 web/                    Vite + Preact + TypeScript PWA (built to web/dist, served by kiwi-server)
+android/                native Android client (Kotlin, Jetpack Compose); see android/README.md
 automation/             Kiwi Builds: the build runner (Python) and pinned app recipes
 install.sh              installs or updates Kiwi on the Mac (build, LaunchAgent, tailscale serve)
 uninstall.sh            removes it again
@@ -273,7 +274,8 @@ small:
   are refused.
 - **The install.** `install_url` is `<public>/ota/<token>/app.apk`. The browser downloads
   the APK and the owner opens it with Android's installer. Kiwi cannot observe that step,
-  so the completed download is the install, as for an IPA. There is no `open_url`.
+  so the completed download is the install, as for an IPA. There is no `open_url`. The
+  Android app (see "Android app") installs the APK itself and reports the installed packages.
 - **Updates.** A newer revision is an `update` like any other; Android accepts it over the
   installed app because every build carries the same signature.
 
@@ -547,6 +549,36 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
 - Requests time out (30 s, 2 min for refreshes, syncs and signing scans) so a stuck request
   cannot leave a screen loading forever.
 - Badge: on load and focus, set `navigator.setAppBadge(updates)` or clear it.
+
+## Android app (android/)
+
+A native client for Android phones, next to the web app. It uses the same JSON API, with no
+login: Kiwi identifies the phone by its Tailscale node exactly as for the browser, so Chrome
+and the app on one phone are one device. It sends the User-Agent
+`Kiwi-Android/<versionName> (<versionCode>; Android <release>; SDK <int>; <manufacturer> <model>)`,
+which marks the device Android and carries the Android release Chrome hides. What the web app
+cannot do, it adds:
+
+- **Packages.** It reads the installed packages with PackageManager (`QUERY_ALL_PACKAGES`;
+  the app is not distributed through Google Play) and reports them with their version,
+  signer certificate digests and installer to `PUT /api/me/packages` at start, after an
+  install and when a package changes, so Kiwi knows what is really installed and which
+  apps are installed with another signature (`AppState.foreign_install`).
+- **Installs.** It downloads the APK from `install_url` (only from Kiwi's own host, resuming
+  with `Range`), checks the package name, version and signer against an installed copy, and
+  installs it with a PackageInstaller session. Sessions ask for `USER_ACTION_NOT_REQUIRED`
+  (Android 12+), which Android grants for updates of apps whose installer of record is the
+  app; other installs show Android's confirmation. Because the phone reports what is
+  installed, the app trusts the phone over Kiwi's download-based guess ("open" with the
+  package missing offers Install again).
+- **Background.** A WorkManager job checks `GET /api/updates` about every two hours,
+  notifies each update once and installs those Android allows without a tap.
+- **Itself.** When `Me.android_app` is newer than the running app, it offers that APK.
+
+Connecting checks `/api/health` and `/api/me` before saving the address; a
+`kiwi://connect?url=<https address>` link only fills it in. The app stores the address and
+its own switches in DataStore and nothing else. Builds and tests run with Gradle (JVM unit
+tests only); `android/scripts/build-in-docker.sh` builds in a pinned Android SDK container.
 
 ## Not in scope yet
 

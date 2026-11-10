@@ -198,6 +198,8 @@ interface Me {
     os: "macos" | "linux" | "other";
     ios_signing: "keychain" | "files"; // macOS: the login keychain; elsewhere uploaded files
     devicectl: boolean;             // devicectl is available (as server.devicectl_available)
+    android_signer_sha256: string | null; // SHA-256 (hex) of the certificate of the key Kiwi signs
+                                    // Android apps with; null until Kiwi Builds has loaded it
   };
   features: Feature[];              // what to show on this device
   android_app: AndroidApp | null;   // Kiwi's Android app, when this Kiwi serves it

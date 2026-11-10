@@ -223,7 +223,7 @@ describe("mock api", () => {
     const me = request("GET", "/api/me").json as Me;
     expect(me.device).toMatchObject({ platform: "ios", platform_source: "detected", detected_platform: "ios", client: "web" });
     expect(me.onboarded).toBe(true);
-    expect(me.host).toEqual({ os: "macos", ios_signing: "keychain", devicectl: true });
+    expect(me.host).toEqual({ os: "macos", ios_signing: "keychain", devicectl: true, android_signer_sha256: MOCK_ANDROID_SIGNER });
     expect(me.features).toEqual(["ios_apps", "home_screen_app", "web_push", "devicectl"]);
     expect(me.android_app).toMatchObject({ package: "io.github.digitalpals.kiwi", install_url: "http://localhost:5173/android/kiwi.apk" });
     expect(request("GET", "/android/kiwi.apk")).toMatchObject({ status: 200, contentType: "application/vnd.android.package-archive" });

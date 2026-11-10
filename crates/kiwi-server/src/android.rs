@@ -260,6 +260,15 @@ pub fn kiwi_signer(kiwi: &Kiwi, android_apps: &[CatalogApp]) -> Option<String> {
     })
 }
 
+/// The Android apps in Kiwi's catalog (Kiwi Builds' Android releases).
+pub fn catalog_apps(kiwi: &Kiwi) -> Vec<CatalogApp> {
+    kiwi.catalog
+        .apps(None, None)
+        .into_iter()
+        .filter(|a| crate::builds::android_app(a.app()))
+        .collect()
+}
+
 /// What a package report changes: install rows to save, and the packages of Kiwi's
 /// Android apps installed with another signature.
 #[derive(Debug, Default, PartialEq)]
@@ -347,12 +356,7 @@ pub fn record_packages(kiwi: &Kiwi, device_id: &str, report: PackageReport) -> A
             p
         })
         .collect();
-    let android_apps: Vec<CatalogApp> = kiwi
-        .catalog
-        .apps(None, None)
-        .into_iter()
-        .filter(|a| crate::builds::android_app(a.app()))
-        .collect();
+    let android_apps = catalog_apps(kiwi);
     let signer = kiwi_signer(kiwi, &android_apps);
     let installs = kiwi.db.installs(device_id, true)?;
     let result = reconcile_packages(

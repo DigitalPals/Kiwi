@@ -52,6 +52,7 @@ async fn devices_have_a_platform_and_a_first_run_setup() {
             "os": if MACOS { "macos" } else { "linux" },
             "ios_signing": if MACOS { "keychain" } else { "files" },
             "devicectl": true,
+            "android_signer_sha256": null,
         })
     );
     assert!(me["android_app"].is_null());

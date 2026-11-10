@@ -178,14 +178,23 @@ on_linux() {
 	[ "$(uname -s)" = Linux ] || die "must run on Linux"
 	[ "$(id -u)" = 0 ] || die "must run as root"
 
-	# The port install.sh chose, for recognising Kiwi's serve mapping.
-	port=$(sed -n 's/.*--listen 127\.0\.0\.1:\([0-9][0-9]*\).*/\1/p' "$UNIT" 2>/dev/null | head -n 1)
-	PORT=${port:-$PORT}
 	if [ -f "$UNIT" ]; then
+		# The port install.sh chose, for recognising Kiwi's serve mapping.
+		port=$(sed -n 's/.*--listen 127\.0\.0\.1:\([0-9][0-9]*\).*/\1/p' "$UNIT" | head -n 1)
+		PORT=${port:-$PORT}
 		say "Stopping and removing kiwi.service"
 		systemctl disable --now kiwi.service || true
+		# Its files are deleted next; never while it still runs.
+		if systemctl is-active --quiet kiwi.service; then
+			die "kiwi.service is still running; stop it (systemctl stop kiwi) and run this again"
+		fi
 		rm -f "$UNIT"
 		systemctl daemon-reload
+	fi
+	# A kiwi.service from elsewhere (a unit file moved or edited by hand) must not be left
+	# running on files that are about to go.
+	if systemctl is-active --quiet kiwi.service 2>/dev/null; then
+		die "kiwi.service is still running; stop it (systemctl stop kiwi) and run this again"
 	fi
 
 	remove_serve

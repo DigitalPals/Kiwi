@@ -1,3 +1,6 @@
 [toolchain]
-channel = "stable"
+# Pinned, so a new Rust release can't turn clippy's warnings (errors in CI) red overnight.
+# Update it together with the toolchain in .github/workflows/ci.yml and the Dockerfile's
+# rust image.
+channel = "1.99.1"
 components = ["clippy", "rustfmt"]

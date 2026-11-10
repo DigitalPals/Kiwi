@@ -5,11 +5,12 @@ import type { AppDetail, AppPatch, AppState, AppSummary, Platform, Release, Stor
 import { ActionButton, ReinstallButton, VersionButton } from "../components/ActionButton";
 import { AppIcon } from "../components/AppIcon";
 import { Icon } from "../components/Icon";
-import { Empty, ErrorState, ExpandableText, LinkCell, Loading, Spinner, VersionChange } from "../components/ui";
+import { Banner, Empty, ErrorState, ExpandableText, LinkCell, Loading, Spinner, VersionChange } from "../components/ui";
 import { canReinstall, foreignInstallWarning, replacesLabel, versionChange, type ButtonView } from "../lib/action";
 import { BUILD_SOURCE_ID } from "../lib/automation";
 import {
   deviceName,
+  unconfirmedNote,
   expiryInfo,
   formatBytes,
   formatDate,
@@ -417,6 +418,7 @@ function InstalledCard({ app }: { app: AppDetail }) {
   const installed = app.state.installed;
   if (!installed) return null;
   const expiry = expiryInfo(installed.expires_at);
+  const unconfirmed = unconfirmedNote(installed, app.platform);
   return (
     <section class="detail-section">
       <h2 class="section-heading">Installed</h2>
@@ -444,6 +446,32 @@ function InstalledCard({ app }: { app: AppDetail }) {
             {installed.verified && ` · seen on ${deviceName(app.platform)}`}
           </div>
         </div>
+      </div>
+      {unconfirmed && <p class="section-footer">{unconfirmed}</p>}
+    </section>
+  );
+}
+
+/** Screenshots that couldn't be loaded are left out rather than shown broken; without any, so is the section. */
+function Screenshots({ urls }: { urls: string[] }) {
+  const [failed, setFailed] = useState<ReadonlySet<string>>(new Set());
+  const shown = urls.filter((url) => !failed.has(url));
+  if (shown.length === 0) return null;
+  return (
+    <section class="detail-section">
+      <h2 class="section-heading">Preview</h2>
+      <div class="shots">
+        {shown.map((url) => (
+          <img
+            key={url}
+            class="shot"
+            src={url}
+            alt={`Screenshot ${urls.indexOf(url) + 1}`}
+            loading="lazy"
+            referrerpolicy="no-referrer"
+            onError={() => setFailed((f) => new Set(f).add(url))}
+          />
+        ))}
       </div>
     </section>
   );
@@ -606,16 +634,7 @@ function Details(props: {
         </section>
       )}
 
-      {app.screenshots.length > 0 && (
-        <section class="detail-section">
-          <h2 class="section-heading">Preview</h2>
-          <div class="shots">
-            {app.screenshots.map((url, i) => (
-              <img key={url} class="shot" src={url} alt={`Screenshot ${i + 1}`} loading="lazy" referrerpolicy="no-referrer" />
-            ))}
-          </div>
-        </section>
-      )}
+      <Screenshots urls={app.screenshots} />
 
       {app.description && (
         <section class="detail-section">
@@ -769,6 +788,17 @@ export function AppDetailScreen({ sourceId, bundleId }: { sourceId: string; bund
           )
         }
       />
+      {/* The last copy stays visible, but not as if it were current. */}
+      {detail.data && detail.error && (
+        <Banner level="error">
+          {detail.error instanceof ApiError && detail.error.status === 404
+            ? "This app is no longer in its source."
+            : `Couldn't refresh: ${detail.error.message}`}{" "}
+          <button type="button" class="text-button small" onClick={() => void detail.reload()}>
+            Try Again
+          </button>
+        </Banner>
+      )}
       {content}
       {linking && detail.data && <LinkSheet app={detail.data} onChange={mutate} onClose={closeLink} />}
     </main>

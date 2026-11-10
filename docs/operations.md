@@ -57,7 +57,7 @@ Signing uses an identity and profiles uploaded to Kiwi, kept in the data directo
 | `kiwi.db` | SQLite: sources, devices, builds, installs, push subscriptions, settings |
 | `kiwi.db.bak-<UTC time>` | Copies `install.sh` takes before each install (the newest 5 are kept) |
 | `vapid.json` | The Web Push key pair (0600). If it's lost, every device has to turn notifications on again. An unreadable one is moved to `vapid.json.corrupt-<time>` and replaced |
-| `downloads/`, `builds/`, `icons/` | Downloaded IPAs, signed builds and icons; caches that Kiwi cleans up |
+| `downloads/`, `builds/`, `icons/`, `art/` | Downloaded IPAs, signed builds, icons and the artwork the web app shows; caches that Kiwi cleans up |
 | `automation/` | Kiwi Builds' runner, recipes, jobs and artifacts (see [Kiwi Builds](kiwi-builds.md)) |
 | `android-app/` | Kiwi's Android app as this Kiwi signed it, and unsigned builds you place in `unsigned/` (see [Kiwi's Android app](android-app.md)) |
 | `work/` | Temporary files, emptied at every start |

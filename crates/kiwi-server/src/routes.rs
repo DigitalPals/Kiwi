@@ -53,6 +53,7 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .route("/sources/{id}", patch(patch_source).delete(delete_source))
         .route("/sources/{id}/refresh", post(refresh_source))
         .route("/icons/{file}", get(icon))
+        .route("/art/{tag}", get(art))
         .route("/apps", get(list_apps))
         .route(
             "/apps/{source_id}/{bundle_id}",
@@ -98,6 +99,7 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .route("/android/kiwi.apk", get(android_app_apk))
         .fallback(web)
         .layer(middleware::from_fn_with_state(kiwi.clone(), host_guard))
+        .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(log_requests))
         .with_state(kiwi)
 }
@@ -128,6 +130,37 @@ async fn host_guard(State(kiwi): K, req: Request, next: Next) -> Response {
         return ApiError::bad_host().into_response();
     }
     next.run(req).await
+}
+
+/// The web app's Content Security Policy: everything comes from Kiwi itself (source artwork
+/// too, through `/api/art`), and no other site may frame it.
+pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; img-src 'self' data: blob:; \
+     style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; \
+     base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+
+/// Defence in depth on every response: no framing (clickjacking an install), no MIME
+/// sniffing, no referrer, and the CSP above.
+async fn security_headers(req: Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    for (name, value) in [
+        (
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        ),
+        (header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY")),
+        (
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ),
+        (
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ),
+    ] {
+        headers.entry(name).or_insert(value);
+    }
+    response
 }
 
 async fn log_requests(req: Request, next: Next) -> Response {
@@ -713,6 +746,30 @@ async fn icon(State(kiwi): K, _: Ctx, P(file): P<String>) -> ApiResult<Response>
                 header::CACHE_CONTROL,
                 "private, max-age=31536000, immutable",
             ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// Source artwork through Kiwi ([`crate::art`]); only URLs Kiwi handed out.
+async fn art(
+    State(kiwi): K,
+    _: Ctx,
+    P(tag): P<String>,
+    RawQuery(query): RawQuery,
+) -> ApiResult<Response> {
+    let not_found = || ApiError::not_found("Artwork not found.");
+    let url = url::form_urlencoded::parse(query.unwrap_or_default().as_bytes())
+        .find(|(k, _)| k == "url")
+        .map(|(_, v)| v.into_owned())
+        .filter(|url| crate::art::verify(&tag, url))
+        .ok_or_else(not_found)?;
+    let (bytes, kind) = crate::art::get(&kiwi, &url).await.ok_or_else(not_found)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, kind),
+            (header::CACHE_CONTROL, "private, max-age=604800"),
         ],
         bytes,
     )

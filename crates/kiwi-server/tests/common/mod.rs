@@ -888,7 +888,9 @@ impl TestKiwi {
                 allow_simulators: setup.allow_simulators,
                 owner: None,
                 country: None,
-                python: kiwi_server::config::PYTHON.into(),
+                // The fake runners only need a Python 3 on PATH (CI's macOS runner has no
+                // Homebrew Python at config::PYTHON).
+                python: "python3".into(),
                 local: setup.local,
             },
             source_client: ClientOptions {

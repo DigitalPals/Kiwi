@@ -251,9 +251,20 @@ fn install_url(
     build: &BuildRow,
     now: Time,
 ) -> ApiResult<String> {
-    let token = kiwi
-        .db
-        .attempt_token(&build.id, device_id, random_token, now)?;
+    let mut was_alive = false;
+    let (token, replaced) =
+        kiwi.db
+            .attempt_token(&build.id, device_id, random_token, now, |attempt| {
+                was_alive = ota::token_alive(attempt, now);
+                !ota::renew_token(attempt, now)
+            })?;
+    // A replaced token that still worked goes on working for a while; an expired one
+    // stays expired.
+    if let Some(old) = replaced
+        && was_alive
+    {
+        kiwi.retired.add(old, token.clone());
+    }
     Ok(if crate::builds::android(&build.release) {
         ota::apk_url(public_url, &token)
     } else {
@@ -590,7 +601,11 @@ impl<'a> View<'a> {
         };
         Ok(AppDetail {
             description: a.description.clone(),
-            screenshots: a.screenshots.iter().map(|u| u.to_string()).collect(),
+            screenshots: a
+                .screenshots
+                .iter()
+                .map(|u| crate::art::client_url(u.as_str()))
+                .collect(),
             releases: a
                 .releases
                 .iter()

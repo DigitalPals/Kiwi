@@ -32,6 +32,8 @@ pub(crate) fn request_error(stage: &'static str, error: reqwest::Error) -> Error
 
 pub const MAX_FEED_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024;
+/// Screenshots, which are larger than icons ([`SourceClient::artwork`]).
+pub const MAX_ARTWORK_BYTES: u64 = 10 * 1024 * 1024;
 pub const MAX_IPA_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +78,9 @@ impl Default for ClientOptions {
 pub struct SourceClient {
     pub(crate) client: Client,
     pub(crate) permits: Arc<Semaphore>,
+    /// Artwork has its own, so a screen of icons doesn't wait for feeds and IPA downloads
+    /// (which hold a permit for the whole download), nor holds them up.
+    artwork_permits: Arc<Semaphore>,
     allow_local: bool,
 }
 impl SourceClient {
@@ -118,6 +123,7 @@ impl SourceClient {
         Ok(Self {
             client,
             permits: Arc::new(Semaphore::new(4)),
+            artwork_permits: Arc::new(Semaphore::new(6)),
             allow_local,
         })
     }
@@ -402,15 +408,24 @@ impl SourceClient {
             last_modified: fetched.last_modified,
         })
     }
-    /// Fetches artwork (icons, screenshots), at most [`MAX_IMAGE_BYTES`].
+    /// Fetches an icon, at most [`MAX_IMAGE_BYTES`].
     pub async fn image(&self, url: &Url, cancel: &CancellationToken) -> Result<Vec<u8>> {
+        self.artwork(url, MAX_IMAGE_BYTES, cancel).await
+    }
+    /// Fetches artwork (icons, screenshots), at most `max` bytes.
+    pub async fn artwork(
+        &self,
+        url: &Url,
+        max: u64,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>> {
         self.check_url(url)?;
-        let _permit = tokio::select! { _=cancel.cancelled()=>return Err(Error::new("Image","Cancelled")),p=self.permits.acquire()=>p.map_err(|e|Error::new("Image",e))? };
+        let _permit = tokio::select! { _=cancel.cancelled()=>return Err(Error::new("Image","Cancelled")),p=self.artwork_permits.acquire()=>p.map_err(|e|Error::new("Image",e))? };
         let response = tokio::select! { _=cancel.cancelled()=>return Err(Error::new("Image","Cancelled")),r=self.client.get(url.clone()).timeout(Duration::from_secs(30)).send()=>r.map_err(|e|crate::network::request_error("Image",e))? };
         if !response.status().is_success() || is_html(&response) {
             return Err(Error::new("Image", "Artwork unavailable"));
         }
-        limited_body(response, MAX_IMAGE_BYTES, cancel, "Image").await
+        limited_body(response, max, cancel, "Image").await
     }
     /// Fetches a small JSON document (e.g. an App Store lookup) under the same network
     /// policy, at most `max` bytes. `stage` names the request in errors.

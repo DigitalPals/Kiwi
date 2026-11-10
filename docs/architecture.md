@@ -251,7 +251,8 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
   one (`nl_NL.UTF-8` -> `nl`), else `us`.
 - SQLite (`rusqlite`, bundled) at `<data>/kiwi.db`, migrations embedded and versioned.
 - Data layout: `downloads/<sha256>.ipa` (content addressed), `builds/<build_id>/<Name>.ipa`,
-  `work/` (temporary, cleared at start), `icons/<sha256(url)>.png`, `vapid.json` (0600),
+  `work/` (temporary, cleared at start), `icons/<sha256(url)>.png`, `art/<sha256(url)>` (source artwork for the web app,
+  deleted after 30 days) and `art.key` (0600, the key of its URLs), `vapid.json` (0600),
   `signing/` (0700: `identity`, the `.p12` with its password, 0600, on `files` hosts;
   uploaded `profiles/<uuid>.mobileprovision` on every host),
   `automation/` (Kiwi Builds; `automation/android/signer.json` names the certificate of the
@@ -296,8 +297,12 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
   Reuse a ready build when the release, artifact, identity, profiles and signing settings
   are unchanged.
 - `attempts`: token (128-bit random, URL-safe), build_id, device_id, created_at,
-  manifest_at, download_started_at, download_completed_at, user_agent. One reusable
-  token per (build, device).
+  manifest_at, download_started_at, download_completed_at, user_agent. One token per
+  (build, device): it works for 24 h (`ota::TOKEN_LIFETIME`), or up to 48 h while the
+  manifest or a download was requested within the last hour (`ota::token_alive`). It is
+  replaced (token and created_at) when an install URL is made after 12 h unless it is in
+  use, and always after 24 h (`ota::renew_token`); the replaced token leads to the same
+  attempt for 2 h (`ota::RetiredTokens`, in memory).
 - `installs`: per device and signed bundle id: source_id, bundle_id, build_id (nullable),
   version, build, origin (`kiwi` = download completed, `device` = seen by devicectl),
   verified (seen by devicectl), installed_at, last_seen_at, removed_at.
@@ -632,7 +637,9 @@ subscriptions made with the old key are deleted (each device subscribes again).
 - Who is on the other end of a loopback connection (`peers`, `config::LocalTrust`): a Mac is
   its owner's alone, so Kiwi trusts `X-Forwarded-For` from any loopback connection and a
   request without it is the owner's browser (`LocalTrust::Anyone`; elsewhere only with
-  `--trust-local`, which Kiwi warns about at start). Other computers may have other users
+  `--trust-local`, which Kiwi warns about at start). Only a loopback connection counts as the
+  computer itself: when Kiwi listens on another address against advice, connections from
+  other computers are nobody's (`peers::trusted_origin`). Other computers may have other users
   and services, which can all reach the loopback port. There Kiwi trusts `X-Forwarded-For`
   only from connections whose client socket belongs to tailscaled's user (`--proxy-uid`,
   `KIWI_PROXY_UID`, default 0: tailscaled runs as root). It finds that user in the kernel's
@@ -655,6 +662,18 @@ subscriptions made with the old key are deleted (each device subscribes again).
   `X-Forwarded-For`.
 - Mutating `/api` requests must carry `X-Kiwi: 1` and `Content-Type: application/json`
   (no CORS is allowed), which blocks cross-site form posts.
+- Every response carries a Content Security Policy (`routes::CONTENT_SECURITY_POLICY`:
+  scripts, styles, images and requests from Kiwi itself only, `frame-ancestors 'none'`),
+  `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and `Referrer-Policy:
+  no-referrer`: no other site can frame Kiwi to trick a tap on Install.
+- The phone loads nothing from other hosts: source and App Store artwork comes through
+  `/api/art/<tag>?url=` (`art`), which fetches it with kiwi-source's client (same URL
+  policy, 10 MB limit), keeps it in `art/` and serves only images it recognises by their
+  signature (PNG, JPEG, GIF, WebP; never SVG). `tag` is an HMAC-SHA256 of the URL with
+  Kiwi's random key (`art.key`, 0600, kept across restarts), so another page can't make the
+  owner's phone ask Kiwi to fetch a URL of its choosing. Artwork has its own limit of
+  parallel requests, apart from feeds and downloads, and a URL that failed is not fetched
+  again for 15 minutes.
 - Source and download URLs go through kiwi-source validation (https, no credentials,
   no private/loopback targets). Push endpoints must pass `endpoint_allowed`.
 - Paths are never built from user input except through validated ids.

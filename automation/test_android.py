@@ -482,6 +482,60 @@ class AndroidTests(unittest.TestCase):
         self.assertTrue(recorded.is_file())
         self.assertEqual(len(commands), 3)
 
+    def test_a_lost_key_is_never_replaced_silently(self):
+        pem = "-----BEGIN CERTIFICATE-----\n" + base64.encodebytes(PUBLISHER.certificate).decode() + "-----END CERTIFICATE-----\n"
+        commands = []
+
+        def command(args, **kwargs):
+            commands.append([str(a) for a in args])
+            if "-genkeypair" in args:
+                Path(args[args.index("-keystore") + 1]).write_bytes(b"keystore")
+            return pem if kwargs.get("capture") else None
+
+        self.builder.command = command
+        java = self.root / "java" / "bin" / "java"
+        self.android.keystore(java)
+        secret = self.android.private / "keystore.pass"
+        password = secret.read_text()
+        (self.android.private / "keystore.p12").unlink()
+        with self.assertRaises(BuildError) as raised:
+            self.android.keystore(java)
+        self.assertTrue(raised.exception.blocked)
+        self.assertIn("backup", str(raised.exception))
+        # Nothing was generated or overwritten.
+        self.assertEqual([c[1] for c in commands], ["-genkeypair", "-exportcert"])
+        self.assertEqual(secret.read_text(), password)
+        self.assertFalse((self.android.private / "keystore.p12").exists())
+        # Deleting signer.json is the deliberate way to start over.
+        (self.android.private / "signer.json").unlink()
+        self.android.keystore(java)
+        self.assertEqual([c[1] for c in commands], ["-genkeypair", "-exportcert", "-genkeypair", "-exportcert"])
+
+    def test_a_damaged_signer_record_is_refused(self):
+        pem = "-----BEGIN CERTIFICATE-----\n" + base64.encodebytes(STRANGER.certificate).decode() + "-----END CERTIFICATE-----\n"
+        self.builder.command = lambda args, **kwargs: pem if kwargs.get("capture") else None
+        (self.android.private / "keystore.p12").write_bytes(b"keystore")
+        (self.android.private / "keystore.pass").write_text("secret")
+        recorded = self.android.private / "signer.json"
+        for damaged in ["{not json", "[]", '{"sha256": 7}', '{"sha256": null}', "{}", '{"sha256": "abc"}']:
+            recorded.write_text(damaged)
+            with self.assertRaises(BuildError, msg=damaged) as raised:
+                self.android.keystore(self.root / "java" / "bin" / "java")
+            self.assertTrue(raised.exception.blocked)
+            self.assertEqual(recorded.read_text(), damaged, "left as it was")
+
+    def test_a_different_key_than_the_recorded_one_is_refused(self):
+        pem = "-----BEGIN CERTIFICATE-----\n" + base64.encodebytes(STRANGER.certificate).decode() + "-----END CERTIFICATE-----\n"
+        self.builder.command = lambda args, **kwargs: pem if kwargs.get("capture") else None
+        (self.android.private / "keystore.p12").write_bytes(b"keystore")
+        (self.android.private / "keystore.pass").write_text("secret")
+        recorded = self.android.private / "signer.json"
+        recorded.write_text(json.dumps({"sha256": PUBLISHER.fingerprint}))
+        with self.assertRaises(BuildError) as raised:
+            self.android.keystore(self.root / "java" / "bin" / "java")
+        self.assertTrue(raised.exception.blocked)
+        self.assertEqual(json.loads(recorded.read_text()), {"sha256": PUBLISHER.fingerprint})
+
 
 KIWI_KEY = Key(0x5EED)
 KIWI_RELEASE = "https://github.com/DigitalPals/Kiwi/releases/download/android-v1.2.0/kiwi-android-1.2.0-unsigned.apk"

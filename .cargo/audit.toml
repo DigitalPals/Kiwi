@@ -1,0 +1,22 @@
+# `cargo audit` (CI's "Dependency audit" job). Every ignored advisory comes in through
+# apple-codesign 0.29, the newest release, so it can't be updated away; each says why Kiwi
+# isn't affected. Review this list whenever apple-codesign is updated.
+[advisories]
+ignore = [
+    # rsa 0.9 (Marvin attack): a timing side channel in RSA *decryption*. Kiwi only signs
+    # locally; apple-codesign decrypts only for remote signing, which Kiwi doesn't use.
+    "RUSTSEC-2023-0071",
+    # crypto-bigint 0.5 timing variability: local ECDSA operations; nothing measures them
+    # from outside.
+    "RUSTSEC-2026-0387",
+    # ruzstd 0.7 decompression bomb: reached only through `object`'s compressed ELF
+    # sections; Kiwi and apple-codesign read Mach-O.
+    "RUSTSEC-2026-0344",
+    # zip 2.6 `extract`/`ZipStreamReader::extract` symlink and permission issues:
+    # apple-codesign never extracts archives, and Kiwi extracts IPAs with its own checked
+    # code on zip 9.
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+    "RUSTSEC-2026-0429",
+]

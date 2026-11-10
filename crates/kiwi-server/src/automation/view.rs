@@ -164,7 +164,8 @@ fn build_view(
         name: recipe.name.clone(),
         bundle_id: recipe.bundle_id.clone(),
         icon_url: store_icon(kiwi, recipe.icon_id())
-            .or_else(|| app.and_then(|a| a.icon_url.as_ref().map(Url::to_string))),
+            .or_else(|| app.and_then(|a| a.icon_url.as_ref().map(Url::to_string)))
+            .map(|u| crate::linked::client_icon(&u)),
         tweak: recipe.tweak.clone(),
         summary: recipe.summary.clone(),
         experimental: recipe.experimental,

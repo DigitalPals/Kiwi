@@ -482,7 +482,15 @@ class Android:
         this key is the identity of every app Kiwi builds for this owner.
         """
         store, secret = self.private / "keystore.p12", self.private / "keystore.pass"
+        recorded = self.private / "signer.json"
         keytool = java.with_name("keytool")
+        if not store.is_file() and recorded.exists():
+            # signer.json is written whenever the key loads, before anything is signed with
+            # it: a key existed. A new one would quietly break every update on the phones.
+            raise BuildError("Kiwi's Android signing key (automation/android/keystore.p12) is missing. Restore "
+                             "keystore.p12 and keystore.pass from a backup. To start over with a new key instead, "
+                             "delete automation/android/signer.json; every phone then has to uninstall Kiwi's "
+                             "Android apps before it can install them again.", True)
         if not store.is_file():
             emit("stage", stage="Creating Kiwi's Android signing key")
             password = secrets.token_hex(24)
@@ -508,10 +516,28 @@ class Android:
         if not body:
             raise BuildError("Kiwi's Android signing key could not be read.")
         signer = hashlib.sha256(base64.b64decode(body.group(1))).hexdigest()
+        before = None
+        if recorded.exists():
+            try:
+                before = json.loads(recorded.read_text())["sha256"]
+                if not isinstance(before, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", before):
+                    raise ValueError(before)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                # It can't vouch for the key, so neither can Kiwi: a wrong key would pass.
+                raise BuildError("automation/android/signer.json is damaged, so Kiwi can't check that "
+                                 "keystore.p12 is the key it signed its Android apps with. Restore "
+                                 "signer.json from a backup, or delete it if keystore.p12 is the right "
+                                 "key.", True) from error
+        if before and before.lower() != signer:
+            raise BuildError(f"automation/android/keystore.p12 is not the key Kiwi signed its Android apps with "
+                             f"(its certificate is {signer}, not {before.lower()}). Restore the right keystore.p12 "
+                             "and keystore.pass from a backup. To switch to this key instead, delete "
+                             "automation/android/signer.json; every phone then has to uninstall Kiwi's Android "
+                             "apps before it can install them again.", True)
         # Not a secret: Kiwi's server reads it to tell its own builds on a phone from others.
         partial = self.private / "signer.partial"
         partial.write_bytes(canonical({"sha256": signer}))
-        partial.replace(self.private / "signer.json")
+        partial.replace(recorded)
         return store, password, signer
 
     # --- the original app --------------------------------------------------

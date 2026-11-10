@@ -115,7 +115,7 @@ mod tests {
         zip_payload(&root, &output, &AtomicBool::new(false)).unwrap();
 
         let mut zip = zip::ZipArchive::new(File::open(&output).unwrap()).unwrap();
-        let names: Vec<_> = zip.file_names().map(str::to_owned).collect();
+        let names: Vec<_> = zip.file_names().map(|n| n.unwrap().into_owned()).collect();
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(

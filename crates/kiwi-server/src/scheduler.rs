@@ -625,6 +625,7 @@ pub async fn cleanup(kiwi: &Arc<Kiwi>) -> ApiResult<()> {
             }
         }
     }
+    crate::art::cleanup(&kiwi.paths.art, SystemTime::now()).await;
     kiwi.db
         .prune_notifications(now - chrono::Duration::days(180))?;
     let stale = kiwi

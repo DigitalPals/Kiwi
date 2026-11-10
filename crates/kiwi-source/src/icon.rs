@@ -25,7 +25,11 @@ const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 pub fn ipa_icon(path: &Path) -> Result<Option<Vec<u8>>> {
     let file = File::open(path).map_err(|e| Error::new("Icon", e))?;
     let mut zip = zip::ZipArchive::new(BufReader::new(file)).map_err(|e| Error::new("Icon", e))?;
-    let names: Vec<String> = zip.file_names().map(str::to_owned).collect();
+    let names: Vec<String> = zip
+        .file_names()
+        .map(|n| n.map(|n| n.into_owned()))
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| Error::new("Icon", e))?;
     let Some(info) = names.iter().find(|n| {
         let parts: Vec<&str> = n.split('/').collect();
         parts.len() == 3

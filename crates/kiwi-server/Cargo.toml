@@ -26,6 +26,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 getrandom = "0.4"
 hex.workspace = true
+hmac = "0.13"
 libc = "0.2"
 plist.workspace = true
 rusqlite = { version = "0.41", features = ["bundled", "chrono"] }

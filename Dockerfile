@@ -8,9 +8,9 @@
 #   docker build -t kiwi .
 
 # --- the server -----------------------------------------------------------------------------
-FROM rust:1.99-slim-trixie AS server
+FROM rust:1.99.1-slim-trixie@sha256:f6c4a35d21dbb3c89d7a8d056c193e94fc09037f2b58dd858b09c39a47dd02d7 AS server
 WORKDIR /src
-# rustup installs the toolchain rust-toolchain.toml names (stable, as in CI).
+# The image's toolchain is the one rust-toolchain.toml pins (as in CI).
 COPY rust-toolchain.toml ./
 RUN rustup toolchain install && rustc --version
 COPY Cargo.toml Cargo.lock ./
@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && install -D target/release/kiwi /out/kiwi
 
 # --- the web app ----------------------------------------------------------------------------
-FROM node:24-trixie-slim AS web
+FROM node:24-trixie-slim@sha256:0820eaa85e07d0490446dd01d14707e17e6108a36988cf374899cd057eb3812d AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
@@ -34,7 +34,7 @@ COPY web ./
 RUN npm run build
 
 # --- Kiwi -----------------------------------------------------------------------------------
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 LABEL org.opencontainers.image.title="Kiwi" \
       org.opencontainers.image.description="A private, self-hosted app store for your own iPhones and Android phones" \
       org.opencontainers.image.source="https://github.com/DigitalPals/Kiwi" \

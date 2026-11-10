@@ -199,6 +199,23 @@ export const osName = (platform: Platform | undefined): string => OS_NAMES[platf
 /** What copy calls the device of a platform: "iPhone" or "Android device". */
 export const deviceName = (platform: Platform | undefined): string => (platform === "android" ? "Android device" : "iPhone");
 
+/**
+ * Kiwi records an install once the device has downloaded the whole app; whether the system then
+ * installed it, only a device sync or Kiwi's Android app can tell. Many devices never get
+ * either, so the note is for the day after the download, when a failed install shows.
+ */
+export function unconfirmedNote(
+  installed: { verified: boolean; origin: string; installed_at: string },
+  platform: Platform | undefined,
+  now: Date = new Date(),
+): string | null {
+  if (installed.verified || installed.origin !== "kiwi") return null;
+  const at = Date.parse(installed.installed_at);
+  if (!Number.isFinite(at) || now.getTime() - at > 24 * 3600 * 1000) return null;
+  const where = platform === "android" ? "among your apps" : "on your Home Screen";
+  return `Your ${deviceName(platform)} downloaded this version, but Kiwi hasn't seen it installed yet. If it isn't ${where}, use Reinstall.`;
+}
+
 /** Short, human summary for a release's OS requirement. */
 export function osRequirement(release: Pick<Release, "min_os" | "max_os">, platform?: Platform): string {
   const os = osName(platform);

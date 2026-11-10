@@ -17,11 +17,12 @@ use crate::{Kiwi, ota::icon_path};
 /// cache under that URL (so OTA manifests find them) and served at `/api/icons/<file>`.
 const ICON_BASE: &str = "https://kiwi.invalid/icons/";
 
-/// The URL the web app loads an icon from: `/api/icons/…` for icons taken from IPAs.
+/// The URL the web app loads an icon from: `/api/icons/…` for icons taken from IPAs, else
+/// Kiwi's copy of the source's artwork ([`crate::art`]).
 pub fn client_icon(url: &str) -> String {
     match url.strip_prefix(ICON_BASE) {
         Some(file) => format!("/api/icons/{file}"),
-        None => url.to_owned(),
+        None => crate::art::client_url(url),
     }
 }
 
@@ -284,7 +285,7 @@ mod tests {
         );
         assert_eq!(
             client_icon("https://example.com/i.png"),
-            "https://example.com/i.png"
+            crate::art::client_url("https://example.com/i.png")
         );
     }
 }

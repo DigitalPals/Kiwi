@@ -156,7 +156,7 @@ More detail: [architecture](docs/architecture.md).
 | **Server** | An always-on Mac you can stay logged in to (Kiwi runs in your login session so `codesign` can use your keychain). Tested on macOS 27 with Xcode 27 on Apple Silicon. Or a Linux computer or VM with systemd or Docker ([Linux](docs/install.md#linux), [Docker](docs/install.md#docker)); Kiwi Builds builds patched iOS apps on a Mac only. |
 | **Apple** | An [Apple Developer Program](https://developer.apple.com/programs/) membership, with an Apple Development certificate and a development profile that includes your iPhones. [The install guide](docs/install.md#2-signing-certificate-and-profile) walks you through it. |
 | **Tailscale** | Tailscale on the Mac and on every iPhone, with MagicDNS and HTTPS certificates turned on for your tailnet. |
-| **Build tools** | Xcode (or its command line tools), [Rust](https://rustup.rs) and Node.js 20 or later. `install.sh` checks them all. |
+| **Build tools** | Xcode (or its command line tools), [Rust](https://rustup.rs) and Node.js 20.19, or 22.12 or later. `install.sh` checks them all. |
 | **iPhone** | iOS 16 or later; iOS 16.4 or later for notifications. Developer Mode turned on. |
 
 ## Install
@@ -242,7 +242,8 @@ or change anything.
 
 **Does Kiwi send my apps or data anywhere?** No. Kiwi talks to the sources you add, Apple
 (App Store versions) and the Web Push service of your devices. Everything else stays on
-your Mac. Kiwi Builds, when you turn it on, also downloads the apps, tweaks and tools it
+your Mac. Your phone only talks to Kiwi: Kiwi fetches the icons and screenshots of the
+apps in your sources itself, so the sites that host them never see your phone. Kiwi Builds, when you turn it on, also downloads the apps, tweaks and tools it
 builds from; [its guide](docs/kiwi-builds.md) names each service.
 
 ## Disclaimer

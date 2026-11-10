@@ -18,8 +18,11 @@ use serde::Serialize;
 use crate::{
     Kiwi,
     catalog::CatalogApp,
+    config::LocalTrust,
     db::{Db, DeviceRow, InstallRow, Platform, Time},
     error::{ApiError, ApiResult},
+    owner,
+    peers::Origin,
 };
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -29,6 +32,8 @@ pub trait DeviceTools: Send + Sync + 'static {
     fn whois(&self, ip: IpAddr) -> BoxFuture<'_, Result<Option<TailscalePeer>, String>>;
     /// The Tailscale user who owns the Mac; `None` for a tagged machine.
     fn owner(&self) -> BoxFuture<'_, Result<Option<TailscaleUser>, String>>;
+    /// This computer's own Tailscale node (its StableID); `None` before it has joined.
+    fn node_id(&self) -> BoxFuture<'_, Result<Option<String>, String>>;
     fn devicectl_available(&self) -> BoxFuture<'_, bool>;
     fn list_devices(&self) -> BoxFuture<'_, Result<Vec<CoreDevice>, String>>;
     fn list_apps<'a>(&'a self, device: &'a str) -> BoxFuture<'a, Result<Vec<DeviceApp>, String>>;
@@ -45,6 +50,9 @@ impl DeviceTools for SystemDevices {
     }
     fn owner(&self) -> BoxFuture<'_, Result<Option<TailscaleUser>, String>> {
         Box::pin(async move { self.tailscale.owner().await.map_err(|e| e.to_string()) })
+    }
+    fn node_id(&self) -> BoxFuture<'_, Result<Option<String>, String>> {
+        Box::pin(async move { self.tailscale.node_id().await.map_err(|e| e.to_string()) })
     }
     fn devicectl_available(&self) -> BoxFuture<'_, bool> {
         Box::pin(kiwi_device::devicectl_available())
@@ -81,6 +89,8 @@ pub struct DeviceCaches {
     whois_queries: Mutex<HashMap<IpAddr, Weak<tokio::sync::Mutex<()>>>>,
     core: Mutex<Option<(Instant, Vec<CoreDevice>)>>,
     core_query: tokio::sync::Mutex<()>,
+    /// This computer's Tailscale node, when known.
+    node: Mutex<Option<(Instant, String)>>,
 }
 
 impl DeviceCaches {
@@ -135,6 +145,29 @@ impl DeviceCaches {
         failed.retain(|_, at| at.elapsed() < WHOIS_ERROR_TTL);
         failed.insert(ip, Instant::now());
         Err(ApiError::device_unidentified())
+    }
+
+    /// This computer's own Tailscale node, cached like a whois answer.
+    async fn node_id(&self, tools: &dyn DeviceTools) -> ApiResult<String> {
+        if let Some((at, id)) = self.node.lock().unwrap().as_ref()
+            && at.elapsed() < WHOIS_TTL
+        {
+            return Ok(id.clone());
+        }
+        match tools.node_id().await {
+            Ok(Some(id)) => {
+                *self.node.lock().unwrap() = Some((Instant::now(), id.clone()));
+                Ok(id)
+            }
+            Ok(None) => {
+                tracing::warn!("Tailscale doesn't name this computer's node yet");
+                Err(ApiError::device_unidentified())
+            }
+            Err(e) => {
+                tracing::warn!("could not ask Tailscale for this computer's node: {e}");
+                Err(ApiError::device_unidentified())
+            }
+        }
     }
 
     async fn core_devices(&self, tools: &dyn DeviceTools, force: bool) -> Vec<CoreDevice> {
@@ -410,20 +443,34 @@ pub fn device_profile(device: &DeviceRow) -> DeviceProfile {
 }
 
 /// What identified a request.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Requester {
-    pub peer: Option<SocketAddr>,
-    pub forwarded_for: Option<String>,
+    /// Where it comes from ([`crate::peers::origin`]).
+    pub origin: Origin,
     pub cookie: Option<String>,
     pub user_agent: Option<String>,
 }
 
 /// The device of a request, and a `kiwi_device` cookie value to set when it is new.
+/// Off macOS, a request that doesn't come through Tailscale, or comes from this computer's
+/// own node, belongs to no device: anyone on the computer could have made it
+/// (`403 not_owner`, see [`owner::not_on_this_computer`]).
 pub async fn resolve(kiwi: &Kiwi, req: &Requester) -> ApiResult<(DeviceRow, Option<String>)> {
     let now = Utc::now();
-    let peer = match forwarded_client(req.peer, req.forwarded_for.as_deref()) {
-        Some(ip) => whois(kiwi, ip).await?,
-        None => None,
+    let mac = kiwi.config.local == LocalTrust::Mac;
+    let peer = match req.origin {
+        Origin::Tailnet(ip) => match whois(kiwi, ip).await? {
+            Some(peer)
+                if !mac && peer.stable_id == kiwi.caches.node_id(kiwi.devices.as_ref()).await? =>
+            {
+                return Err(owner::not_on_this_computer(kiwi));
+            }
+            Some(peer) => Some(peer),
+            None if mac => None,
+            None => return Err(owner::not_on_this_computer(kiwi)),
+        },
+        Origin::Mac => None,
+        Origin::Unknown => return Err(owner::not_on_this_computer(kiwi)),
     };
     let mut set_cookie = None;
     let (id, kind) = match &peer {
@@ -651,16 +698,23 @@ fn link_columns(core: &CoreDevice) -> (&str, &str, bool, Option<&str>) {
 }
 
 /// Links a Kiwi device to a CoreDevice (or unlinks it with `None`) and returns the
-/// CoreDevice. A CoreDevice is linked to at most one Kiwi device.
+/// CoreDevice. A CoreDevice is linked to at most one Kiwi device, and only an iOS device
+/// can be linked.
 pub async fn link(
     kiwi: &Kiwi,
-    device_id: &str,
+    device: &DeviceRow,
     core_id: Option<&str>,
 ) -> ApiResult<Option<CoreDevice>> {
+    let device_id = device.id.as_str();
     let Some(core_id) = core_id else {
         kiwi.db.set_device_link(device_id, None)?;
         return Ok(None);
     };
+    if effective_platform(device) != Platform::Ios {
+        return Err(ApiError::bad_request(
+            "Only an iPhone or iPad can be linked to a Mac device; this is an Android device.",
+        ));
+    }
     let mut cores = core_devices(kiwi, false).await;
     if !cores.iter().any(|c| c.identifier == core_id) {
         cores = core_devices(kiwi, true).await;
@@ -686,18 +740,23 @@ pub async fn link(
     Ok(Some(core))
 }
 
-/// Links automatically when exactly one linkable paired CoreDevice and one Kiwi device exist.
-pub fn auto_link_candidate<'a>(
+/// Links automatically when exactly one linkable paired CoreDevice and one iOS device (see
+/// [`effective_platform`]) exist. Returns the pair.
+pub fn auto_link_candidate<'a, 'b>(
     cores: &'a [CoreDevice],
-    devices: &[DeviceRow],
+    devices: &'b [DeviceRow],
     allow_simulators: bool,
-) -> Option<&'a CoreDevice> {
+) -> Option<(&'a CoreDevice, &'b DeviceRow)> {
     let candidates: Vec<&CoreDevice> = cores
         .iter()
         .filter(|c| linkable(c, allow_simulators) && c.paired())
         .collect();
-    match (candidates.as_slice(), devices) {
-        ([core], [device]) if device.devicectl_id.is_none() => Some(core),
+    let ios: Vec<&DeviceRow> = devices
+        .iter()
+        .filter(|d| effective_platform(d) == Platform::Ios)
+        .collect();
+    match (candidates.as_slice(), ios.as_slice()) {
+        ([core], [device]) if device.devicectl_id.is_none() => Some((core, device)),
         _ => None,
     }
 }
@@ -796,10 +855,12 @@ pub async fn sync(kiwi: &Arc<Kiwi>) -> ApiResult<()> {
     let now = Utc::now();
     let cores = core_devices(kiwi, true).await;
     let devices = kiwi.db.devices()?;
-    if let Some(core) = auto_link_candidate(&cores, &devices, kiwi.config.allow_simulators) {
-        tracing::info!("linking {} to CoreDevice {}", devices[0].id, core.name);
+    if let Some((core, device)) =
+        auto_link_candidate(&cores, &devices, kiwi.config.allow_simulators)
+    {
+        tracing::info!("linking {} to CoreDevice {}", device.id, core.name);
         kiwi.db
-            .set_device_link(&devices[0].id, Some(link_columns(core)))?;
+            .set_device_link(&device.id, Some(link_columns(core)))?;
     }
     let team = kiwi.team_id();
     let catalog = kiwi.catalog.apps(None, None);
@@ -807,6 +868,10 @@ pub async fn sync(kiwi: &Arc<Kiwi>) -> ApiResult<()> {
         let Some(core_id) = device.devicectl_id.clone() else {
             continue;
         };
+        // An Android device linked before Kiwi refused that gets nothing from an iPhone.
+        if effective_platform(&device) != Platform::Ios {
+            continue;
+        }
         let record = |reachable: bool, name: Option<&str>, error: Option<&str>| {
             kiwi.db
                 .record_device_sync(&device.id, &core_id, now, reachable, name, error)
@@ -831,10 +896,9 @@ pub async fn sync(kiwi: &Arc<Kiwi>) -> ApiResult<()> {
         };
         let error = match kiwi.devices.list_apps(&core_id).await {
             Ok(apps) => {
-                let installs = kiwi.db.installs(&device.id, true)?;
-                for row in reconcile(&device.id, &installs, &apps, &catalog, team.as_deref(), now) {
-                    kiwi.db.save_install(&row)?;
-                }
+                kiwi.db.change_installs(&device.id, |installs| {
+                    reconcile(&device.id, installs, &apps, &catalog, team.as_deref(), now)
+                })?;
                 None
             }
             Err(e) => Some(e),
@@ -893,6 +957,10 @@ mod tests {
 
         fn owner(&self) -> BoxFuture<'_, Result<Option<TailscaleUser>, String>> {
             Box::pin(async { Ok(None) })
+        }
+
+        fn node_id(&self) -> BoxFuture<'_, Result<Option<String>, String>> {
+            Box::pin(async { Ok(Some("nTHISHOST".into())) })
         }
 
         fn devicectl_available(&self) -> BoxFuture<'_, bool> {
@@ -1211,9 +1279,10 @@ mod tests {
         assert!(auto_link_candidate(&sims, &one, false).is_none());
         assert!(auto_link_candidate(&sims, &one, true).is_none());
         let phone = vec![core("sim1", false, true), core("phone", true, true)];
+        let (core_device, linked_device) = auto_link_candidate(&phone, &one, false).unwrap();
         assert_eq!(
-            auto_link_candidate(&phone, &one, false).unwrap().identifier,
-            "phone"
+            (core_device.identifier.as_str(), linked_device.id.as_str()),
+            ("phone", "ts:n1")
         );
         assert!(auto_link_candidate(&[core("phone", true, false)], &one, false).is_none());
         let two = vec![
@@ -1224,6 +1293,27 @@ mod tests {
         let mut linked = device();
         linked.devicectl_id = Some("phone".into());
         assert!(auto_link_candidate(&phone, &[linked], false).is_none());
+    }
+
+    #[test]
+    fn android_devices_are_never_linked_to_an_iphone() {
+        let phone = vec![core("phone", true, true)];
+        let mut android = DeviceRow::new("ts:pixel".into(), "tailscale", Utc::now());
+        android.detected_platform = Some(Platform::Android);
+        // The only device is an Android phone: nothing to link.
+        assert!(auto_link_candidate(&phone, std::slice::from_ref(&android), false).is_none());
+        // Next to one iPhone it doesn't count, so the iPhone is linked.
+        let devices = vec![android.clone(), device()];
+        let (_, linked) = auto_link_candidate(&phone, &devices, false).unwrap();
+        assert_eq!(linked.id, "ts:n1");
+        // The owner's choice counts too, both ways.
+        let mut chosen = device();
+        chosen.platform = Some(Platform::Android);
+        assert!(auto_link_candidate(&phone, &[chosen], false).is_none());
+        android.platform = Some(Platform::Ios);
+        let chosen_ios = [android];
+        let (_, linked) = auto_link_candidate(&phone, &chosen_ios, false).unwrap();
+        assert_eq!(linked.id, "ts:pixel");
     }
 
     fn device_app(bundle_id: &str, version: &str) -> DeviceApp {

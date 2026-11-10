@@ -345,10 +345,57 @@ pub fn reconcile_packages(
     }
 }
 
-/// Installs whose download completed in the grace period before a package report that did
-/// not list their package: once the grace period is over, the report counts for them too
-/// (Android's install can fail after the download, and the app reports at once). Returns
-/// the rows to save; [`reconcile_packages`] decides what changes.
+/// The builds whose last download on a device Kiwi's Android app made (its `Kiwi-Android/`
+/// User-Agent). The app installs what it downloads at once and reports the packages after
+/// the install, so a report of it that lacks the package means the install failed. A
+/// browser download waits until the owner opens the APK in Android's installer, which can
+/// be after a report.
+pub fn app_downloads(kiwi: &Kiwi, device_id: &str) -> ApiResult<HashSet<String>> {
+    Ok(kiwi
+        .db
+        .device_attempts(device_id)?
+        .into_iter()
+        .map(|(_, attempt)| attempt)
+        .filter(|a| {
+            a.download_completed_at.is_some()
+                && a.user_agent
+                    .as_deref()
+                    .is_some_and(kiwi_device::is_native_android)
+        })
+        .map(|a| a.build_id)
+        .collect())
+}
+
+/// An install a package report made at `reported_at` speaks for once its grace period is
+/// over: an unverified download by Kiwi's Android app (see [`app_downloads`]) that
+/// completed before the report.
+fn settles(install: &InstallRow, reported_at: Time, app_builds: &HashSet<String>) -> bool {
+    install.origin == "kiwi"
+        && !install.verified
+        && install.removed_at.is_none()
+        && install.installed_at <= reported_at
+        && install
+            .build_id
+            .as_ref()
+            .is_some_and(|b| app_builds.contains(b))
+}
+
+/// [`settles`], and its grace period is not over at `now`.
+fn awaits_settling(
+    install: &InstallRow,
+    reported_at: Time,
+    app_builds: &HashSet<String>,
+    now: Time,
+) -> bool {
+    settles(install, reported_at, app_builds) && now - install.installed_at <= INSTALL_GRACE
+}
+
+/// Installs whose download by Kiwi's Android app ([`app_downloads`], `app_builds`)
+/// completed in the grace period before a package report that did not list their package:
+/// once the grace period is over, the report counts for them too (Android's install can
+/// fail after the download, and the app reports at once). Returns the rows to save;
+/// [`reconcile_packages`] decides what changes.
+#[allow(clippy::too_many_arguments)]
 pub fn settle_report(
     device_id: &str,
     installs: &[InstallRow],
@@ -356,17 +403,12 @@ pub fn settle_report(
     packages: &[Package],
     android_apps: &[CatalogApp],
     signer: Option<&str>,
+    app_builds: &HashSet<String>,
     now: Time,
 ) -> Vec<InstallRow> {
     let waiting: Vec<InstallRow> = installs
         .iter()
-        .filter(|i| {
-            i.origin == "kiwi"
-                && !i.verified
-                && i.removed_at.is_none()
-                && i.installed_at <= reported_at
-                && now - i.installed_at > INSTALL_GRACE
-        })
+        .filter(|i| settles(i, reported_at, app_builds) && now - i.installed_at > INSTALL_GRACE)
         .cloned()
         .collect();
     if waiting.is_empty() {
@@ -383,43 +425,102 @@ pub fn settle_report(
         .collect()
 }
 
-/// The last package report of each device, in memory, for [`settle_reports`].
+/// A package report [`settle_reports`] still needs: when it was made and the packages it
+/// listed of the installs waiting for it.
+#[derive(Debug, Clone)]
+struct KeptReport {
+    at: Time,
+    packages: Vec<Package>,
+}
+
+/// Package reports in memory, for [`settle_reports`]: of each device only the last one,
+/// only while an install is waiting for it ([`awaits_settling`]), and only the packages of
+/// those installs.
 #[derive(Default)]
-pub struct PackageReports(Mutex<HashMap<String, (Time, Vec<Package>)>>);
+pub struct PackageReports(Mutex<HashMap<String, KeptReport>>);
+
+impl PackageReports {
+    /// Keeps what settling needs of a device's report made at `at`, replacing the one
+    /// before; nothing when no install waits for it.
+    fn keep(&self, device_id: &str, at: Time, packages: Vec<Package>, waiting: &[InstallRow]) {
+        let mut reports = self.0.lock().unwrap();
+        if waiting.is_empty() {
+            reports.remove(device_id);
+            return;
+        }
+        let packages = packages
+            .into_iter()
+            .filter(|p| waiting.iter().any(|i| i.signed_bundle_id == p.package))
+            .collect();
+        reports.insert(device_id.to_owned(), KeptReport { at, packages });
+    }
+
+    /// Forgets the device's report made at `at` (not a newer one that replaced it).
+    fn forget(&self, device_id: &str, at: Time) {
+        let mut reports = self.0.lock().unwrap();
+        if reports.get(device_id).is_some_and(|r| r.at == at) {
+            reports.remove(device_id);
+        }
+    }
+
+    /// The devices with a report kept, and how many packages each keeps.
+    pub fn kept(&self) -> Vec<(String, usize)> {
+        let mut kept: Vec<_> = self
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(device, report)| (device.clone(), report.packages.len()))
+            .collect();
+        kept.sort();
+        kept
+    }
+}
 
 /// Applies each device's last package report to the installs whose grace period ended since
-/// (see [`settle_report`]). The scheduler runs it every minute.
+/// (see [`settle_report`]). The scheduler runs it every minute. A report no install waits
+/// for any more, or of a device that was deleted, is forgotten.
 pub fn settle_reports(kiwi: &Kiwi, now: Time) -> ApiResult<()> {
-    let reports: Vec<(String, Time, Vec<Package>)> = kiwi
+    let reports: Vec<(String, KeptReport)> = kiwi
         .package_reports
         .0
         .lock()
         .unwrap()
         .iter()
-        .map(|(device, (at, packages))| (device.clone(), *at, packages.clone()))
+        .map(|(device, report)| (device.clone(), report.clone()))
         .collect();
     let mut android_apps = None;
     let mut changed = false;
-    for (device_id, reported_at, packages) in reports {
-        let installs = kiwi.db.installs(&device_id, false)?;
-        if !installs.iter().any(|i| i.origin == "kiwi" && !i.verified) {
+    for (device_id, report) in reports {
+        if kiwi.db.device(&device_id)?.is_none() {
+            kiwi.package_reports.forget(&device_id, report.at);
             continue;
         }
+        let app_builds = app_downloads(kiwi, &device_id)?;
         let apps = android_apps.get_or_insert_with(|| catalog_apps(kiwi));
         let signer = kiwi_signer(kiwi, apps);
-        let rows = settle_report(
-            &device_id,
-            &installs,
-            reported_at,
-            &packages,
-            apps,
-            signer.as_deref(),
-            now,
-        );
+        let mut waiting = false;
+        let rows = kiwi.db.change_installs(&device_id, |installs| {
+            waiting = installs
+                .iter()
+                .any(|i| awaits_settling(i, report.at, &app_builds, now));
+            settle_report(
+                &device_id,
+                installs,
+                report.at,
+                &report.packages,
+                apps,
+                signer.as_deref(),
+                &app_builds,
+                now,
+            )
+        })?;
         for row in &rows {
             tracing::info!(device = %device_id, package = %row.signed_bundle_id, removed = row.removed_at.is_some(), "settled an install with the last package report");
-            kiwi.db.save_install(row)?;
             changed = true;
+        }
+        if !waiting {
+            kiwi.package_reports.forget(&device_id, report.at);
         }
     }
     if changed {
@@ -428,7 +529,9 @@ pub fn settle_reports(kiwi: &Kiwi, now: Time) -> ApiResult<()> {
     Ok(())
 }
 
-/// Saves a package report of an Android device (`PUT /api/me/packages`).
+/// Saves a package report of an Android device (`PUT /api/me/packages`). The installs are
+/// read, reconciled and written in one transaction, so a download completing meanwhile is
+/// not overwritten.
 pub fn record_packages(kiwi: &Kiwi, device_id: &str, report: PackageReport) -> ApiResult<()> {
     if report.packages.len() > MAX_PACKAGES {
         return Err(ApiError::bad_request(format!(
@@ -447,23 +550,35 @@ pub fn record_packages(kiwi: &Kiwi, device_id: &str, report: PackageReport) -> A
         .collect();
     let android_apps = catalog_apps(kiwi);
     let signer = kiwi_signer(kiwi, &android_apps);
-    let installs = kiwi.db.installs(device_id, true)?;
-    let result = reconcile_packages(
-        device_id,
-        &installs,
-        &packages,
-        &android_apps,
-        signer.as_deref(),
-        now,
-    );
-    kiwi.db
-        .save_package_report(device_id, &result.installs, &result.foreign, now)?;
+    let app_builds = app_downloads(kiwi, device_id)?;
+    let mut waiting = Vec::new();
+    let saved = kiwi.db.save_package_report(device_id, now, |installs| {
+        let result = reconcile_packages(
+            device_id,
+            installs,
+            &packages,
+            &android_apps,
+            signer.as_deref(),
+            now,
+        );
+        // The installs as this report leaves them that a later settling may change.
+        waiting = installs
+            .iter()
+            .map(|i| {
+                result
+                    .installs
+                    .iter()
+                    .find(|r| r.signed_bundle_id == i.signed_bundle_id)
+                    .unwrap_or(i)
+            })
+            .filter(|i| awaits_settling(i, now, &app_builds, now))
+            .cloned()
+            .collect();
+        (result.installs, result.foreign)
+    })?;
     kiwi.package_reports
-        .0
-        .lock()
-        .unwrap()
-        .insert(device_id.to_owned(), (now, packages));
-    if !result.installs.is_empty() {
+        .keep(device_id, now, packages, &waiting);
+    if !saved.is_empty() {
         kiwi.kick.notify_one();
     }
     Ok(())
@@ -512,7 +627,15 @@ mod tests {
         install.signed_bundle_id = PACKAGE.into();
         install.bundle_id = PACKAGE.into();
         install.source_id = "kiwi-youtube".into();
+        install.build_id = Some(BUILD.into());
         install
+    }
+
+    const BUILD: &str = "build-youtube";
+
+    /// The builds Kiwi's Android app downloaded: [`BUILD`], or none (a browser did).
+    fn app_builds(by_app: bool) -> HashSet<String> {
+        by_app.then(|| BUILD.to_owned()).into_iter().collect()
     }
 
     #[test]
@@ -656,6 +779,7 @@ mod tests {
         let catalog = android_catalog();
         let install = kiwi_install(3); // completed 3 minutes before the report
         let others = [package("com.example.other", OTHER)];
+        let by_app = app_builds(true);
         let settle = |installs: &[InstallRow], packages: &[Package], minutes: i64| {
             settle_report(
                 "ts:test",
@@ -664,6 +788,7 @@ mod tests {
                 packages,
                 &catalog,
                 Some(SIGNER),
+                &by_app,
                 reported + chrono::Duration::minutes(minutes),
             )
         };
@@ -714,6 +839,76 @@ mod tests {
             ..install
         };
         assert!(settle(&[removed], &others, 30).is_empty());
+    }
+
+    #[test]
+    fn a_browser_download_is_not_settled_with_an_earlier_report() {
+        // The owner downloads the APK in the browser; Kiwi's app reports before they open
+        // it in Android's installer, so the report lacks the package.
+        let reported = Utc::now();
+        let catalog = android_catalog();
+        let install = kiwi_install(3);
+        let others = [package("com.example.other", OTHER)];
+        let later = reported + chrono::Duration::minutes(30);
+        let settle = |by_app: bool| {
+            settle_report(
+                "ts:test",
+                std::slice::from_ref(&install),
+                reported,
+                &others,
+                &catalog,
+                Some(SIGNER),
+                &app_builds(by_app),
+                later,
+            )
+        };
+        // The grace period is long over, and the install still stands: only a report made
+        // after it decides.
+        assert!(settle(false).is_empty());
+        // Downloaded by the app, which installs at once: the report counts.
+        assert!(settle(true)[0].removed_at.is_some());
+        // An install without a build (seen on the device) is not Kiwi's download.
+        let seen = InstallRow {
+            build_id: None,
+            ..install.clone()
+        };
+        let rows = settle_report(
+            "ts:test",
+            &[seen],
+            reported,
+            &others,
+            &catalog,
+            Some(SIGNER),
+            &app_builds(true),
+            later,
+        );
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn only_reports_an_install_waits_for_are_kept() {
+        let reports = PackageReports::default();
+        let now = Utc::now();
+        let mut many: Vec<Package> = (0..MAX_PACKAGES)
+            .map(|i| package(&format!("com.example.app{i}"), OTHER))
+            .collect();
+        many.push(package(PACKAGE, SIGNER));
+        // Nothing waits: nothing is kept.
+        reports.keep("ts:a", now, many.clone(), &[]);
+        assert!(reports.kept().is_empty());
+        // Only the package of the waiting install is kept.
+        reports.keep("ts:a", now, many.clone(), &[kiwi_install(1)]);
+        assert_eq!(reports.kept(), [("ts:a".to_owned(), 1)]);
+        // A later report without a waiting install replaces it with nothing.
+        reports.keep("ts:a", now, many, &[]);
+        assert!(reports.kept().is_empty());
+        // Forgetting a report keeps a newer one.
+        let later = now + chrono::Duration::seconds(1);
+        reports.keep("ts:a", later, Vec::new(), &[kiwi_install(1)]);
+        reports.forget("ts:a", now);
+        assert_eq!(reports.kept(), [("ts:a".to_owned(), 0)]);
+        reports.forget("ts:a", later);
+        assert!(reports.kept().is_empty());
     }
 
     #[test]

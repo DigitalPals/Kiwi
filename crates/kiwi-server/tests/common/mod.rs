@@ -20,8 +20,9 @@ use kiwi_device::{CoreDevice, DeviceApp, TailscalePeer, TailscaleUser};
 use kiwi_push::{Outcome, Subscription};
 use kiwi_server::{
     Kiwi, Options,
-    config::Config,
+    config::{Config, LocalTrust},
     devices::{BoxFuture, DeviceTools},
+    peers::PeerUids,
     push::{PushTransport, SendError},
     signing::Signer,
 };
@@ -518,7 +519,12 @@ pub struct FakeDevices {
     pub no_devicectl: AtomicBool,
     /// Who owns the Mac in Tailscale.
     pub owner: Mutex<Option<TailscaleUser>>,
+    /// The StableID of Kiwi's own computer in Tailscale.
+    pub node: Mutex<Option<String>>,
 }
+
+/// The node of the computer Kiwi runs on (see [`FakeDevices::add_this_computer`]).
+pub const THIS_NODE: &str = "nKIWIHOST";
 
 pub fn fixture_devices(name: &str) -> Vec<CoreDevice> {
     let path = format!(
@@ -547,7 +553,39 @@ impl FakeDevices {
             login: "alex@example.com".into(),
             name: Some("Alex Morgan".into()),
         });
+        *devices.node.lock().unwrap() = Some(THIS_NODE.into());
         devices
+    }
+
+    /// The owner's desktop computer at `ip`, with Tailscale's `os` (`linux`, `windows`, ...).
+    pub fn add_computer(&self, ip: &str, os: &str) {
+        self.peers.lock().unwrap().insert(
+            ip.parse().unwrap(),
+            TailscalePeer {
+                stable_id: "nDESKTOP1CNTRL".into(),
+                name: "desktop".into(),
+                dns_name: "desktop.example.ts.net".into(),
+                os: Some(os.into()),
+                user_login: Some("alex@example.com".into()),
+                user_name: None,
+            },
+        );
+    }
+
+    /// Kiwi's own computer at `ip`, which belongs to the owner, as whois reports it for a
+    /// request made on it through its tailnet address.
+    pub fn add_this_computer(&self, ip: &str) {
+        self.peers.lock().unwrap().insert(
+            ip.parse().unwrap(),
+            TailscalePeer {
+                stable_id: THIS_NODE.into(),
+                name: "kiwi-server".into(),
+                dns_name: "kiwi-server.example.ts.net".into(),
+                os: Some("linux".into()),
+                user_login: Some("alex@example.com".into()),
+                user_name: None,
+            },
+        );
     }
 
     /// Adds another Tailscale user's iPhone at `ip`.
@@ -603,6 +641,10 @@ impl DeviceTools for FakeDevices {
         let owner = self.owner.lock().unwrap().clone();
         Box::pin(async move { Ok(owner) })
     }
+    fn node_id(&self) -> BoxFuture<'_, Result<Option<String>, String>> {
+        let node = self.node.lock().unwrap().clone();
+        Box::pin(async move { Ok(node) })
+    }
     fn devicectl_available(&self) -> BoxFuture<'_, bool> {
         let available = !self.no_devicectl.load(Ordering::SeqCst);
         Box::pin(async move { available })
@@ -624,11 +666,43 @@ impl DeviceTools for FakeDevices {
     }
 }
 
+/// The user of each loopback connection to Kiwi, as `/proc/net/tcp` would show it: `uid`
+/// (tailscaled's, root, unless a test changes it) for every connection.
+pub struct FakePeers {
+    pub uid: Mutex<Result<Option<u32>, String>>,
+    /// The connections looked up: (client, Kiwi's end).
+    pub lookups: Mutex<Vec<(SocketAddr, SocketAddr)>>,
+}
+
+impl Default for FakePeers {
+    fn default() -> Self {
+        Self {
+            uid: Mutex::new(Ok(Some(0))),
+            lookups: Mutex::default(),
+        }
+    }
+}
+
+impl FakePeers {
+    pub fn set(&self, uid: Result<Option<u32>, &str>) {
+        *self.uid.lock().unwrap() = uid.map_err(str::to_owned);
+    }
+}
+
+impl PeerUids for FakePeers {
+    fn uid(&self, client: SocketAddr, server: SocketAddr) -> Result<Option<u32>, String> {
+        self.lookups.lock().unwrap().push((client, server));
+        self.uid.lock().unwrap().clone()
+    }
+}
+
 /// Records every push; answers with queued `outcomes`, then `Delivered`.
 #[derive(Default)]
 pub struct FakePush {
     pub sent: Mutex<Vec<(String, Value)>>,
     pub outcomes: Mutex<VecDeque<Result<Outcome, SendError>>>,
+    /// The VAPID subjects Kiwi set after its start.
+    pub subjects: Mutex<Vec<String>>,
 }
 
 impl FakePush {
@@ -663,6 +737,10 @@ impl PushTransport for FakePush {
             .unwrap_or(Ok(Outcome::Delivered));
         Box::pin(async move { outcome })
     }
+
+    fn set_subject(&self, subject: &str) {
+        self.subjects.lock().unwrap().push(subject.to_owned());
+    }
 }
 
 pub fn web_dir(root: &Path) -> PathBuf {
@@ -675,12 +753,40 @@ pub fn web_dir(root: &Path) -> PathBuf {
     web
 }
 
+/// How a [`TestKiwi`] is set up.
+pub struct Setup {
+    pub devices: FakeDevices,
+    pub allow_simulators: bool,
+    pub app_store_url: String,
+    /// Instead of the [`FakeSigner`] (for example the real one).
+    pub signer: Option<Arc<dyn Signer>>,
+    /// Who may forward tailnet addresses: tailscaled (uid 0, see [`FakePeers`]) as on
+    /// Linux, unless a test runs Kiwi as on a Mac.
+    pub local: LocalTrust,
+    pub public_url: Option<String>,
+}
+
+impl Default for Setup {
+    fn default() -> Self {
+        Self {
+            devices: FakeDevices::with_phone(),
+            allow_simulators: false,
+            // A closed port: tests never reach the real App Store.
+            app_store_url: "http://127.0.0.1:9".into(),
+            signer: None,
+            local: LocalTrust::ProxyUid(0),
+            public_url: Some("https://kiwi.test".into()),
+        }
+    }
+}
+
 /// A running Kiwi with fakes.
 pub struct TestKiwi {
     pub kiwi: Arc<Kiwi>,
     pub base: String,
     pub signer: Arc<FakeSigner>,
     pub devices: Arc<FakeDevices>,
+    pub peers: Arc<FakePeers>,
     pub push: Arc<FakePush>,
     pub dir: tempfile::TempDir,
     http: reqwest::Client,
@@ -737,30 +843,38 @@ impl TestKiwi {
         allow_simulators: bool,
         app_store_url: &str,
     ) -> Self {
-        Self::start_full(dir, devices, allow_simulators, app_store_url, None).await
+        let setup = Setup {
+            devices,
+            allow_simulators,
+            app_store_url: app_store_url.into(),
+            ..Setup::default()
+        };
+        Self::start_setup(dir, setup).await
     }
 
     /// With `signer` (for example the real one) instead of the [`FakeSigner`].
     pub async fn start_with_signer(dir: tempfile::TempDir, signer: Arc<dyn Signer>) -> Self {
-        Self::start_full(
-            dir,
-            FakeDevices::with_phone(),
-            false,
-            "http://127.0.0.1:9",
-            Some(signer),
-        )
-        .await
+        let setup = Setup {
+            signer: Some(signer),
+            ..Setup::default()
+        };
+        Self::start_setup(dir, setup).await
     }
 
-    async fn start_full(
-        dir: tempfile::TempDir,
-        devices: FakeDevices,
-        allow_simulators: bool,
-        app_store_url: &str,
-        real_signer: Option<Arc<dyn Signer>>,
-    ) -> Self {
+    /// Kiwi as on a Mac, which is its owner's alone: a browser on it is the owner's.
+    pub async fn start_on_mac(dir: tempfile::TempDir, devices: FakeDevices) -> Self {
+        let setup = Setup {
+            devices,
+            local: LocalTrust::Mac,
+            ..Setup::default()
+        };
+        Self::start_setup(dir, setup).await
+    }
+
+    pub async fn start_setup(dir: tempfile::TempDir, setup: Setup) -> Self {
         let signer = Arc::new(FakeSigner::default());
-        let devices = Arc::new(devices);
+        let devices = Arc::new(setup.devices);
+        let peers = Arc::new(FakePeers::default());
         let push = Arc::new(FakePush::default());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let listen = listener.local_addr().unwrap();
@@ -769,26 +883,27 @@ impl TestKiwi {
                 listen,
                 data_dir: dir.path().join("data"),
                 web_dir: web_dir(dir.path()),
-                public_url: Some("https://kiwi.test".into()),
-                allow_simulators,
+                public_url: setup.public_url,
+                allow_simulators: setup.allow_simulators,
                 owner: None,
                 country: None,
                 python: kiwi_server::config::PYTHON.into(),
+                local: setup.local,
             },
             source_client: ClientOptions {
                 read_timeout: Duration::from_secs(10),
                 allow_local: true,
             },
-            signer: real_signer.unwrap_or_else(|| signer.clone()),
+            signer: setup.signer.unwrap_or_else(|| signer.clone()),
             devices: devices.clone(),
+            peers: peers.clone(),
             push: Some(push.clone()),
-            app_store_url: app_store_url.into(),
+            app_store_url: setup.app_store_url,
         })
         .await
         .unwrap();
         let base = format!("http://{listen}");
-        let app =
-            kiwi_server::router(kiwi.clone()).into_make_service_with_connect_info::<SocketAddr>();
+        let app = kiwi_server::app(kiwi.clone());
         let stop = kiwi.cancel.clone();
         tokio::spawn(async move {
             axum::serve(listener, app)
@@ -801,6 +916,7 @@ impl TestKiwi {
             base,
             signer,
             devices,
+            peers,
             push,
             dir,
             http: reqwest::Client::builder()
@@ -843,7 +959,8 @@ impl TestKiwi {
         }
     }
 
-    /// A browser without Tailscale identity.
+    /// A browser on the computer Kiwi runs on, without Tailscale identity: the owner's on a
+    /// Mac ([`TestKiwi::start_on_mac`]), nobody's elsewhere.
     pub fn browser(&self) -> Api {
         Api {
             http: self.http.clone(),

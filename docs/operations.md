@@ -80,10 +80,11 @@ Change them by running `./install.sh` again with other options (see
 | `--tailscale-bin` | `KIWI_TAILSCALE_BIN` | `/opt/homebrew/bin/tailscale` on a Mac, `/usr/bin/tailscale` on Linux (the installer passes the one it found) |
 | `--python` | `KIWI_PYTHON` | The Python for Kiwi Builds' runners: `/opt/homebrew/bin/python3.13` on a Mac, `python3` on Linux (Android builds need 3.12 or newer) |
 | `--owner` | `KIWI_OWNER` | The Tailscale user who owns this computer |
+| `--proxy-uid` | `KIWI_PROXY_UID` | Not on a Mac: `0`, the user tailscaled runs as; only its connections may forward tailnet addresses (see [Install](install.md)) |
 | `--allow-simulators` | `KIWI_ALLOW_SIMULATORS` | Off; treats simulators as linkable devices, for testing |
 
-Without `--public-url`, Kiwi asks Tailscale for this computer's name at start, waiting up
-to 30 s for a tailscaled that is still connecting. The App Store country starts as the
+Without `--public-url`, Kiwi asks Tailscale for this computer's name at start, and keeps
+asking in the background while tailscaled is still starting. The App Store country starts as the
 region of the Mac's locale, on Linux of `LC_ALL`, `LC_MESSAGES` or `LANG`, until you pick one
 in Settings. `RUST_LOG` sets the log level (`info` in the LaunchAgent, the service and the
 image). Everything else is in the app under Settings.

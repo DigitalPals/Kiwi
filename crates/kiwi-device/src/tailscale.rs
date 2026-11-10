@@ -82,6 +82,15 @@ impl Tailscale {
         parse_owner(&self.status().await?)
     }
 
+    /// This machine's node (`Self.ID` of the status, its StableID); `None` before it has
+    /// joined a tailnet.
+    pub async fn node_id(&self) -> Result<Option<String>> {
+        if !self.uses_localapi() {
+            return parse_node_id(&cli_status(&self.bin).await?);
+        }
+        parse_node_id(&self.status().await?)
+    }
+
     /// This machine's MagicDNS name without the trailing dot (`mac.tailnet.ts.net`);
     /// `None` before it has one.
     pub async fn dns_name(&self) -> Result<Option<String>> {
@@ -242,6 +251,16 @@ pub fn parse_dns_name(json: &[u8]) -> Result<Option<String>> {
         .map(|name| name.trim_end_matches('.').to_ascii_lowercase()))
 }
 
+/// Parses `tailscale status --json` output: `Self.ID`, this machine's StableID (what
+/// `whois` reports as the node's `StableID`).
+pub fn parse_node_id(json: &[u8]) -> Result<Option<String>> {
+    let status: Status = serde_json::from_slice(json).map_err(|e| Error::Parse {
+        program: "tailscale".into(),
+        message: e.to_string(),
+    })?;
+    Ok(status.self_node.and_then(|me| non_empty(me.id)))
+}
+
 /// Parses `tailscale whois --json` output.
 pub fn parse_whois(json: &[u8]) -> Result<TailscalePeer> {
     let whois: Whois = serde_json::from_slice(json).map_err(|e| Error::Parse {
@@ -302,6 +321,8 @@ struct Status {
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct SelfNode {
+    #[serde(rename = "ID")]
+    id: Option<String>,
     #[serde(rename = "UserID")]
     user_id: Option<i64>,
     tags: Option<Vec<String>>,

@@ -232,6 +232,21 @@ fn status_dns_name() {
     assert!(parse_dns_name(b"[").is_err());
 }
 
+#[test]
+fn status_node_id() {
+    let status = fixture("tailscale_status.json");
+    assert_eq!(
+        parse_node_id(&status).unwrap().as_deref(),
+        Some("nMACSTUDIO")
+    );
+    // Before the machine has joined a tailnet.
+    let mut status: Value = serde_json::from_slice(&status).unwrap();
+    status["Self"]["ID"] = serde_json::json!("");
+    assert_eq!(parse_node_id(status.to_string().as_bytes()).unwrap(), None);
+    assert_eq!(parse_node_id(b"{}").unwrap(), None);
+    assert!(parse_node_id(b"[").is_err());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn whois_command() {
@@ -360,6 +375,7 @@ async fn localapi() {
             name: Some("Alex Morgan".into()),
         })
     );
+    assert_eq!(ts.node_id().await.unwrap().as_deref(), Some("nMACSTUDIO"));
 
     // A socket left behind by a stopped tailscaled.
     let stale = dir.path().join("stale.socket");

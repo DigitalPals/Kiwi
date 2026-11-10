@@ -1,6 +1,9 @@
 //! Web push: subscriptions and delivery behind [`PushTransport`] (fake in tests).
 
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, RwLock},
+};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use chrono::Utc;
@@ -29,9 +32,20 @@ pub trait PushTransport: Send + Sync + 'static {
         payload: &'a [u8],
         topic: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Outcome, SendError>>;
+
+    /// Names Kiwi's public URL as the VAPID subject from now on (it became known after the
+    /// start, see [`crate::learn_public_url`]).
+    fn set_subject(&self, _subject: &str) {}
 }
 
-pub struct WebPush(pub PushSender);
+/// Web Push with the VAPID key in the data directory.
+pub struct WebPush(RwLock<Arc<PushSender>>);
+
+impl WebPush {
+    pub fn new(sender: PushSender) -> Self {
+        Self(RwLock::new(Arc::new(sender)))
+    }
+}
 
 /// Notifications stay useful for a day (e.g. while the phone is offline).
 const TTL_SECS: u32 = 24 * 60 * 60;
@@ -45,8 +59,9 @@ impl PushTransport for WebPush {
         payload: &'a [u8],
         topic: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Outcome, SendError>> {
+        let sender = self.0.read().unwrap().clone();
         Box::pin(async move {
-            self.0
+            sender
                 .send(sub, payload, TTL_SECS, Urgency::Normal, topic)
                 .await
                 .map_err(|e| SendError {
@@ -54,6 +69,14 @@ impl PushTransport for WebPush {
                     message: e.to_string(),
                 })
         })
+    }
+
+    fn set_subject(&self, subject: &str) {
+        let mut sender = self.0.write().unwrap();
+        match PushSender::new(sender.vapid().clone(), subject.to_owned()) {
+            Ok(new) => *sender = Arc::new(new),
+            Err(e) => tracing::warn!("keeping the Web Push subject: {e}"),
+        }
     }
 }
 

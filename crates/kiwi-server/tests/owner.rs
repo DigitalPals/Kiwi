@@ -14,9 +14,9 @@ async fn only_the_owners_devices_may_use_kiwi() {
     devices.add_peer(NOAH_IP, "nNOAH1CNTRL", "noah@example.com", "Noah");
     let k = TestKiwi::start_in(tempfile::tempdir().unwrap(), devices, false).await;
 
-    // The phone belongs to the Mac's Tailscale user; a browser on the Mac counts as theirs.
+    // The phone belongs to the computer's Tailscale user (a browser on the computer itself:
+    // tests/local.rs).
     k.phone().ok("/api/me").await;
-    k.browser().ok("/api/me").await;
 
     let noah = k.device(NOAH_IP);
     let requests = [
@@ -75,7 +75,7 @@ async fn the_owner_is_remembered_while_tailscale_cannot_tell() {
 async fn nobody_on_the_tailnet_is_the_owner_of_a_tagged_mac() {
     let devices = FakeDevices::with_phone();
     *devices.owner.lock().unwrap() = None;
-    let k = TestKiwi::start_in(tempfile::tempdir().unwrap(), devices, false).await;
+    let k = TestKiwi::start_on_mac(tempfile::tempdir().unwrap(), devices).await;
     let r = k.phone().get("/api/me").await;
     assert_eq!(r.status, StatusCode::FORBIDDEN);
     assert_eq!(r.body["error"]["code"], "not_owner");

@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const ANDROID_IP: &str = "100.64.0.9";
+const DESKTOP_IP: &str = "100.64.0.11";
 const NATIVE_UA: &str = "Kiwi-Android/1.2.0 (12; Android 15; SDK 35; Google Pixel 9a)";
 const MACOS: bool = cfg!(target_os = "macos");
 
@@ -69,21 +70,17 @@ async fn devices_have_a_platform_and_a_first_run_setup() {
     assert_eq!(me["device"]["model"], "Android");
     assert_eq!(features(&me), ["android_apps", "web_push"]);
 
-    // A desktop browser tells nothing: iOS is assumed, and either platform can be chosen.
-    let mut desktop = k.browser();
-    desktop.user_agent = Some(
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36".into(),
-    );
+    // A desktop browser tells nothing, nor does Tailscale for a desktop computer: iOS is
+    // assumed, and either platform can be chosen.
+    k.devices.add_computer(DESKTOP_IP, "linux");
+    let desktop = Api {
+        user_agent: Some(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36".into(),
+        ),
+        ..k.device(DESKTOP_IP)
+    };
     let r = desktop.get("/api/me").await;
-    desktop.cookie = Some(
-        r.headers[header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned(),
-    );
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
     let device = &r.body["device"];
     assert_eq!(device["platform"], "ios");
     assert_eq!(device["platform_source"], "assumed");
@@ -279,8 +276,13 @@ async fn browse_follows_the_chosen_platform() {
     assert_eq!(names(phone.ok("/api/apps").await), [BUNDLE]);
 
     // An iOS device whose version is unknown is offered every iOS release.
-    let browser = k.browser();
-    let app = browser.ok(&format!("/api/apps/{source}/{BUNDLE}")).await;
+    k.devices
+        .add_peer("100.64.0.12", "nIPAD1CNTRL", "alex@example.com", "iPad");
+    let ipad = Api {
+        user_agent: None,
+        ..k.device("100.64.0.12")
+    };
+    let app = ipad.ok(&format!("/api/apps/{source}/{BUNDLE}")).await;
     assert_eq!(app["state"]["action"], "get", "{app}");
     assert!(app["unavailable"].is_null());
 }
@@ -410,4 +412,73 @@ async fn kiwis_android_app_is_served_to_the_owners_devices() {
     );
     let r = android.get("/android/kiwi.apk").await;
     assert_eq!(r.status, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn android_devices_are_never_linked_to_an_iphone() {
+    let k = TestKiwi::start().await;
+    k.devices.add_android(ANDROID_IP);
+    let core = fixture_devices("devicectl_list_devices_physical.json")
+        .into_iter()
+        .find(|c| c.physical && c.reachable())
+        .unwrap();
+    *k.devices.cores.lock().unwrap() = vec![core.clone()];
+    let android = k.android(ANDROID_IP);
+    let id = android.ok("/api/me").await["device"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let find = |list: &Value, id: &str| {
+        list["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == id)
+            .unwrap()
+            .clone()
+    };
+
+    // The only device is an Android phone: the iPhone devicectl knows is not linked to it.
+    let r = android.post("/api/devices/sync", json!({})).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(find(&r.body, &id)["devicectl"].is_null());
+    // Nor by hand.
+    let path = format!("/api/devices/{id}");
+    let link = json!({ "devicectl_id": core.identifier });
+    let r = android.send(Method::PATCH, &path, Some(link)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert_eq!(r.body["error"]["code"], "bad_request");
+    assert_eq!(
+        r.body["error"]["message"],
+        "Only an iPhone or iPad can be linked to a Mac device; this is an Android device."
+    );
+
+    // An Android phone linked before Kiwi refused that gets nothing from the iPhone, and can
+    // be unlinked.
+    let columns = (
+        core.identifier.as_str(),
+        core.name.as_str(),
+        true,
+        core.udid.as_deref(),
+    );
+    k.kiwi.db.set_device_link(&id, Some(columns)).unwrap();
+    let r = android.post("/api/devices/sync", json!({})).await;
+    let device = find(&r.body, &id);
+    assert!(device["devicectl"]["last_sync_at"].is_null(), "{device}");
+    assert_ne!(device["os_version_source"], "devicectl");
+    assert_eq!(device["model"], "Android");
+    let unlink = json!({ "devicectl_id": null });
+    let r = android.send(Method::PATCH, &path, Some(unlink)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body["devicectl"].is_null());
+
+    // The iPhone is linked once it has opened Kiwi.
+    let phone = k.phone();
+    phone.ok("/api/me").await;
+    let r = phone.post("/api/devices/sync", json!({})).await;
+    assert_eq!(
+        find(&r.body, PHONE_ID)["devicectl"]["id"],
+        core.identifier.as_str()
+    );
+    assert!(find(&r.body, &id)["devicectl"].is_null());
 }

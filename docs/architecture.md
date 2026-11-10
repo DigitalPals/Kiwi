@@ -185,9 +185,10 @@ gracefully.
 
 Tailscale is asked through tailscaled's LocalAPI socket (one HTTP request, 10 s timeout):
 `whois?addr=<ip>` for the node and user behind a request (`404` for a non-peer) and
-`status?peers=false` for this Mac's own user and MagicDNS name. Only where the socket does not
-exist (the Mac App Store and standalone Tailscale apps have none) it runs the `tailscale` CLI
-(`whois --json`, `status --json`); the socket is looked for on every call. A socket that exists
+`status?peers=false` for this computer's own user, node (`Self.ID`) and MagicDNS name. Only
+where the socket does not exist (the Mac App Store and standalone Tailscale apps have none)
+it runs the `tailscale` CLI (`whois --json`, `status --json`); the socket is looked for on
+every call. A socket that exists
 but does not answer is an error, not a reason to try the CLI, which would use the same socket.
 
 User agents: Safari `Version/27.0` gives an approximate OS version (the `iPhone OS 18_6` token is
@@ -214,15 +215,20 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
   `~/Library/Application Support/Kiwi` on macOS, `$XDG_DATA_HOME/kiwi` or
   `~/.local/share/kiwi` elsewhere), `--web-dir` (default `<exe dir>/web`),
   `--public-url` (default `https://<this computer's MagicDNS name>`, asked from Tailscale at
-  start, waiting up to 30 s while tailscaled's socket exists but it has no name yet; without
-  Tailscale, the listen address with a warning; also the only host name requests may
-  use besides the listen address, see "Security"), `--tailscale-socket` (tailscaled's
-  LocalAPI, default `/var/run/tailscaled.socket` on macOS and
-  `/var/run/tailscale/tailscaled.sock` on Linux), `--tailscale-bin` (the CLI, used without
-  that socket; default `/opt/homebrew/bin/tailscale` on macOS, `/usr/bin/tailscale` on
-  Linux), `--owner` (the owner's Tailscale login, see "The owner"), `--python` (runs Kiwi
-  Builds' runners; default `/opt/homebrew/bin/python3.13` on macOS, `python3` elsewhere),
-  `--allow-simulators` (treat simulators as linkable devices, for testing only).
+  start; when Tailscale can't name it yet, because tailscaled is still starting, its socket
+  doesn't exist yet or it isn't logged in, Kiwi warns, answers only on the listen address and
+  keeps asking in the background, every 2 s and then less often, up to every 30 s, until it
+  takes the name: allowed hosts, links and the Web Push subject switch to it without a
+  restart; also the only host name requests may use besides the listen address, see
+  "Security"), `--tailscale-socket` (tailscaled's LocalAPI, default
+  `/var/run/tailscaled.socket` on macOS and `/var/run/tailscale/tailscaled.sock` on Linux),
+  `--tailscale-bin` (the CLI, used without that socket; default
+  `/opt/homebrew/bin/tailscale` on macOS, `/usr/bin/tailscale` on Linux), `--owner` (the
+  owner's Tailscale login, see "The owner"), `--python` (runs Kiwi Builds' runners; default
+  `/opt/homebrew/bin/python3.13` on macOS, `python3` elsewhere), `--proxy-uid` (not on
+  macOS: the user tailscaled runs as, as `/proc/net/tcp` shows it to Kiwi; default 0, root;
+  see "Security"), `--allow-simulators` (treat simulators as linkable devices, for testing
+  only).
   `install.sh` passes the address and the Tailscale CLI it found explicitly.
 - The App Store country, until the owner picks one, is the region of the Mac's locale
   (`AppleLocale`), elsewhere of the first of `LC_ALL`, `LC_MESSAGES` and `LANG` that names
@@ -295,17 +301,25 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
 
 ### Device identification
 
-Requests come from `tailscale serve` on loopback. When the peer is loopback and
-`X-Forwarded-For` is present, take the client IP, resolve it with tailscaled's whois
-(cache 10 min) and use device `ts:<StableID>`; Safari and the Home Screen app on the same
-phone therefore share one device. When whois fails (error or timeout, as opposed to "not a
-peer"), it is retried once, then the request fails with `503 device_unidentified` rather
-than splitting the phone into a cookie device; requests from that address fail the same
-way for 15 s without running whois again. Otherwise use (and set) a `kiwi_device`
-cookie (`local:<random>`); the web app sends `/api/me` first so concurrent first requests
-do not each create one, and cleanup deletes `local:` devices without installs, attempts or
-push subscriptions that were not seen for 24 h. Update `last_seen`, the Tailscale name and,
-from the User-Agent, the OS version (never downgrading the source priority). Kiwi's
+Requests come from `tailscale serve` on loopback. `peers::origin` decides where a request
+comes from (`peers::LocalTrust`, see "Security"): when the peer is loopback, carries
+`X-Forwarded-For` (the rightmost entry of the last header, the one the proxy added) and,
+off macOS, its connection belongs to tailscaled's user (`--proxy-uid`), take that client
+IP, resolve it with tailscaled's whois (cache 10 min) and use device `ts:<StableID>`;
+Safari and the Home Screen app on the same phone therefore share one device. When whois
+fails (error or timeout, as opposed to "not a peer"), it is retried once, then the request
+fails with `503 device_unidentified` rather than splitting the phone into a cookie device;
+requests from that address fail the same way for 15 s without running whois again.
+Otherwise, on a Mac, use (and set) a `kiwi_device` cookie (`local:<random>`): a browser on
+the Mac; the web app sends `/api/me` first so concurrent first requests do not each create
+one, and cleanup deletes `local:` devices without installs, attempts or push subscriptions
+that were not seen for 24 h. On other computers there is no cookie device: a request
+without a trusted forwarded address, one whose address whois doesn't know, and one from
+the computer's own Tailscale node (whois `StableID` = `Self.ID` of tailscaled's status,
+cached 10 min; reachable by any local user through the computer's tailnet address) get
+`403 not_owner` before any device is made (`owner::not_on_this_computer`). Update
+`last_seen`, the Tailscale name and, from the User-Agent, the OS version (never
+downgrading the source priority). Kiwi's
 Android app is identified the same way, so it and the phone's browser are one device;
 `Ctx.client` tells them apart by the User-Agent.
 
@@ -338,9 +352,15 @@ device records its Tailscale user from whois (`UserProfile.LoginName`) in `perso
 
 The `Ctx` extractor every API handler but `/api/health` takes answers `403 not_owner` for a
 device whose user is not the owner (also while the owner is unknown, when only browser
-devices on the Mac get in), so other people on the tailnet can't browse, install, sign or
+devices on a Mac get in), so other people on the tailnet can't browse, install, sign or
 change anything. The message names the owner, or says to pass `--owner` for a tagged Mac.
-The scheduler likewise prepares updates and sends notifications only for the owner's devices.
+Devices without a recorded user count as the owner's when they came through Tailscale
+(before Kiwi recorded users) or are browser devices on a Mac. On other computers, which
+other users and services may share, a request made on the computer itself is nobody's (see
+"Device identification"), and so is a browser device left from before; the message says
+to open Kiwi's Tailscale address on one of the owner's devices. The scheduler likewise
+prepares updates and sends notifications only for the owner's devices, and Kiwi signs its
+Android app only for an Android device of the owner's.
 
 ### Android devices
 
@@ -377,12 +397,20 @@ small:
   Android apps signed with Kiwi's key are verified installs (or `device` installs), missing
   ones are marked removed (after the same 10-minute grace for a fresh download), and the
   ones signed with another key are saved in `foreign_packages` (`AppState.foreign_install`).
-  Android's install can fail after the download, and the app reports at once, inside the
-  grace period. So Kiwi keeps each device's last report in memory
-  (`android::PackageReports`) and, every minute, applies it to the unverified `kiwi`
-  installs that completed before it and whose grace period has ended since
-  (`android::settle_reports`): a package the report lacked is removed then, without
-  waiting for the next report.
+  When Kiwi's Android app downloaded the APK (the attempt's User-Agent is `Kiwi-Android/…`,
+  `android::app_downloads`), it installs it at once and reports right after, inside the
+  grace period, and Android's install can fail after the download. So Kiwi keeps the
+  device's last report in memory (`android::PackageReports`) while such an install waits
+  for it, with only the packages of the waiting installs, and, every minute, applies it to
+  those unverified `kiwi` installs that completed before it and whose grace period has
+  ended since (`android::settle_reports`): a package the report lacked is removed then,
+  without waiting for the next report. A report nothing waits for any more, or of a
+  deleted device, is dropped. A browser download is not settled this way: the owner opens
+  it in Android's installer whenever they like, possibly after a report, so only a report
+  made after its grace period decides. Reports and settling read, reconcile and write the
+  device's installs in one SQLite transaction holding the connection
+  (`Db::change_installs`, `Db::save_package_report`), as the devicectl sync does, so a
+  download completed meanwhile is never overwritten with a row read before it.
   Kiwi's key is the certificate SHA-256 the Android runner writes to
   `automation/android/signer.json` whenever it loads the key (before that, the `signer`
   of a published build's provenance); without either only removals are recorded. `/api/me`
@@ -395,8 +423,8 @@ small:
   paths are 404s rather than the app shell.
 - **Delivering it.** The project publishes the app unsigned (`android-release.yml`);
   `automation/kiwi-app.json` pins a release (URL, SHA-256, size; `null` before the first).
-  `kiwi_app::tick` (at startup and every minute, while Kiwi Builds is on and Kiwi has an
-  Android device or an added Android recipe) computes an input key over the pinned
+  `kiwi_app::tick` (at startup and every minute, while Kiwi Builds is on and the owner has
+  an Android device or an added Android recipe) computes an input key over the pinned
   release's digest and the name, size and time of each APK in `android-app/unsigned/`.
   When `kiwi.json` does not carry that key (its `input`) or another signer than
   `signer.json`, it queues the Android runner's `kiwi-app` command on Kiwi Builds' worker
@@ -552,8 +580,10 @@ without one, the same bundle id).
   - every `devicectl_sync_minutes` when `devicectl_sync`: for each device linked to a
     reachable CoreDevice, list apps, mark Kiwi installs present (`verified`) or removed,
     record apps from enabled sources installed outside Kiwi (origin `device`), and take
-    the OS version; auto-link when exactly one physical paired device and one Kiwi device
-    exist. A Kiwi install completed in the last 10 minutes is neither marked removed nor
+    the OS version; auto-link when exactly one physical paired device and one iOS device
+    (by its platform, "Device platforms") exist. Devices of another platform are never
+    linked (`PATCH /api/devices/:id` refuses it with `400`) nor synced, also when linked
+    before. A Kiwi install completed in the last 10 minutes is neither marked removed nor
     given (or verified with) another listed version: iOS may still be replacing the old
     one;
   - cleanup: after 7 days, delete builds not referenced by a current install, except the
@@ -580,6 +610,25 @@ subscriptions made with the old key are deleted (each device subscribes again).
   with HTTPS to the tailnet only. `install.sh` refuses to install while Funnel is on for the
   Mac's name and never replaces another `/` mapping. Within the tailnet, only the owner's
   devices may use the API (see "The owner").
+- Who is on the other end of a loopback connection (`peers`, `config::LocalTrust`): a Mac
+  is its owner's alone, so Kiwi trusts `X-Forwarded-For` from any loopback connection and
+  a request without it is the owner's browser. Other computers may have other users and
+  services, which can all reach the loopback port. There Kiwi trusts `X-Forwarded-For` only
+  from connections whose client socket belongs to tailscaled's user (`--proxy-uid`,
+  `KIWI_PROXY_UID`, default 0: tailscaled runs as root). It finds that user in the
+  kernel's socket tables of its network namespace (`/proc/net/tcp` and `/proc/net/tcp6`,
+  read through `/proc/self/net`): the open socket (inode not 0, so not a time-wait or
+  orphaned one, which the kernel reports as root's) whose local address is the client's
+  and whose remote address is Kiwi's end of the connection, comparing IPv4-mapped IPv6
+  addresses as IPv4. The answer is kept for the connection, which `tailscale serve` reuses.
+  When the connection can't be found or the tables can't be read, Kiwi logs it and trusts
+  nothing. A request that isn't trusted this way, or that comes from the computer's own
+  Tailscale node (any local user can reach `tailscale serve` through the computer's tailnet
+  address), is nobody's: `403 not_owner` on every endpoint but `/api/health`, and no
+  device. In Docker, the Tailscale container's tailscaled runs as root and shares Kiwi's
+  network namespace, so the default fits; with user namespaces that map the containers
+  differently, Kiwi logs the uid it saw ("ignored X-Forwarded-For … uid N") and
+  `KIWI_PROXY_UID=N` names it.
 - Requests must name the public URL's host or the listen address
   (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`) in `Host`, and an
   `X-Forwarded-Host` must be the public host; otherwise `421 bad_host`. A DNS-rebinding

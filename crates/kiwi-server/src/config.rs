@@ -50,6 +50,33 @@ pub struct Args {
     /// Python 3.12 or newer for Kiwi Builds' runners
     #[arg(long, env = "KIWI_PYTHON", default_value = PYTHON)]
     pub python: PathBuf,
+    /// The user tailscaled runs as (as /proc/net/tcp shows it to Kiwi): only its loopback connections may forward tailnet addresses (not on macOS)
+    #[arg(long, env = "KIWI_PROXY_UID", default_value_t = 0)]
+    pub proxy_uid: u32,
+}
+
+/// Which loopback requests speak for whom (architecture.md "Security").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalTrust {
+    /// macOS: the Mac is its owner's alone. Any loopback connection may forward a tailnet
+    /// address (`X-Forwarded-For`), and a request without one is the owner's browser on
+    /// the Mac.
+    Mac,
+    /// Elsewhere, where other users and services may share the computer: only loopback
+    /// connections of this uid (tailscaled's, `--proxy-uid`) may forward a tailnet address,
+    /// and nothing else on the computer is the owner.
+    ProxyUid(u32),
+}
+
+impl LocalTrust {
+    /// [`LocalTrust::Mac`] on macOS, else [`LocalTrust::ProxyUid`] with `proxy_uid`.
+    pub fn of_host(proxy_uid: u32) -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Mac
+        } else {
+            Self::ProxyUid(proxy_uid)
+        }
+    }
 }
 
 /// Resolved settings that do not change at runtime.
@@ -59,7 +86,8 @@ pub struct Config {
     pub listen: SocketAddr,
     pub data_dir: PathBuf,
     pub web_dir: PathBuf,
-    /// Without a trailing slash.
+    /// Without a trailing slash. The one known at start: Kiwi may learn it from Tailscale
+    /// later (`Kiwi::known_public_url` has the current one).
     pub public_url: Option<String>,
     pub allow_simulators: bool,
     /// `--owner`: the owner's Tailscale login, instead of asking Tailscale.
@@ -69,6 +97,9 @@ pub struct Config {
     pub country: Option<String>,
     /// `--python`: runs Kiwi Builds' runners.
     pub python: PathBuf,
+    /// Who may forward tailnet addresses on loopback, and whether the computer itself is
+    /// the owner (`--proxy-uid`).
+    pub local: LocalTrust,
 }
 
 /// `http(s)://host[:port][/path]`, returned without a trailing slash.
@@ -201,6 +232,7 @@ impl Args {
                 posix_region(|key| std::env::var(key).ok())
             },
             python: self.python.clone(),
+            local: LocalTrust::of_host(self.proxy_uid),
         })
     }
 }
@@ -315,6 +347,18 @@ mod tests {
         let config = args.config().unwrap();
         assert_eq!(config.data_dir, PathBuf::from("/tmp/k"));
         assert!(config.public_url.is_none());
+        let trust = |args: &[&str]| Args::try_parse_from(args).unwrap().config().unwrap().local;
+        let (default, remapped) = if cfg!(target_os = "macos") {
+            (LocalTrust::Mac, LocalTrust::Mac)
+        } else {
+            (LocalTrust::ProxyUid(0), LocalTrust::ProxyUid(65534))
+        };
+        assert_eq!(trust(&["kiwi", "--data-dir", "/tmp/k"]), default);
+        assert_eq!(
+            trust(&["kiwi", "--data-dir", "/tmp/k", "--proxy-uid", "65534"]),
+            remapped
+        );
+        assert!(Args::try_parse_from(["kiwi", "--proxy-uid", "-1"]).is_err());
     }
 
     #[test]

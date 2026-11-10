@@ -1,7 +1,6 @@
 //! HTTP routes: `/api` (JSON, CSRF-checked), `/ota` and the web app.
 
 use std::{
-    net::SocketAddr,
     path::{Component, Path as FsPath},
     sync::{Arc, Mutex},
     time::Instant,
@@ -27,6 +26,7 @@ use crate::{
     devices::{self, COOKIE, Client, Requester, device_json},
     error::{ApiError, ApiResult},
     ota, owner,
+    peers::{self, Connection},
     push::{self, Payload, SubscribeBody},
     sources,
     store::{self, StoreAppJson},
@@ -119,7 +119,7 @@ async fn host_guard(State(kiwi): K, req: Request, next: Next) -> Response {
         [one] => Some(one.to_str().unwrap_or("")),
         _ => Some(""),
     };
-    if !kiwi.hosts.allows(host, forwarded) {
+    if !kiwi.allows_host(host, forwarded) {
         tracing::warn!(
             "rejected a request for host {:?} (forwarded host {:?})",
             host.unwrap_or(""),
@@ -229,16 +229,19 @@ impl FromRequestParts<Arc<Kiwi>> for Ctx {
                 .collect();
             (!values.is_empty()).then(|| values.join("; "))
         };
+        let connection = parts
+            .extensions
+            .get::<ConnectInfo<Connection>>()
+            .map(|c| &c.0);
+        // `tailscale serve` sends one; with several, the last one is the proxy's.
+        let forwarded_for = parts
+            .headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .next_back()
+            .and_then(|v| v.to_str().ok());
         let requester = Requester {
-            peer: parts
-                .extensions
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|c| c.0),
-            forwarded_for: parts
-                .headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned),
+            origin: peers::origin(kiwi, connection, forwarded_for).await,
             cookie: text(header::COOKIE),
             user_agent: parts
                 .headers
@@ -626,10 +629,10 @@ async fn patch_device(
     JsonBody(body): JsonBody<DevicePatch>,
 ) -> ApiResult<Json<devices::DeviceJson>> {
     let not_found = || ApiError::not_found("Device not found.");
-    kiwi.db.device(&id)?.ok_or_else(not_found)?;
+    let device = kiwi.db.device(&id)?.ok_or_else(not_found)?;
     let name = body.name.as_deref().map(device_name).transpose()?;
     if let Some(core) = body.devicectl_id
-        && let Some(core) = devices::link(&kiwi, &id, core.as_deref()).await?
+        && let Some(core) = devices::link(&kiwi, &device, core.as_deref()).await?
         && let Some(v) = &core.os_version
         && core.reachable()
     {

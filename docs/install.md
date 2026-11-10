@@ -225,6 +225,15 @@ It takes the options of the [Mac installer](#5-install-kiwi), plus `--python PAT
 are often [tagged](https://tailscale.com/kb/1068/tags) in Tailscale, and then have no
 owner: pass `--owner you@example.com`.
 
+Other users and services on the computer can reach Kiwi's port too, so on Linux (and in
+Docker) a request made on the computer itself is nobody's: only connections from
+tailscaled, which runs as root, may name a device in your tailnet, and everything else
+gets "Kiwi is used through Tailscale" (`403`), except `/api/health`. That includes a
+browser on the computer, also at its own `https://….ts.net` address: use Kiwi from your
+phone or another computer. If tailscaled runs as another user, or Docker's user namespaces
+show it as another uid (the log names the uid Kiwi saw), pass that uid with `--proxy-uid`
+(`KIWI_PROXY_UID`).
+
 ### Signing iOS apps on Linux
 
 Kiwi signs on Linux with the same Apple Development certificate and development profile as

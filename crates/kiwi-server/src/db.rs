@@ -737,6 +737,19 @@ fn subscription_row(row: &Row) -> rusqlite::Result<SubscriptionRow> {
     })
 }
 
+fn installs_in(
+    c: &Connection,
+    device_id: &str,
+    include_removed: bool,
+) -> rusqlite::Result<Vec<InstallRow>> {
+    c.prepare(
+        "SELECT * FROM installs WHERE device_id = ?1 AND (?2 OR removed_at IS NULL)
+         ORDER BY name COLLATE NOCASE",
+    )?
+    .query_map(params![device_id, include_removed], install_row)?
+    .collect()
+}
+
 fn save_install_in(c: &Connection, i: &InstallRow) -> rusqlite::Result<()> {
     c.execute(
         "INSERT OR REPLACE INTO installs (device_id, signed_bundle_id, source_id, bundle_id,
@@ -1538,14 +1551,19 @@ impl Db {
         device_id: &str,
         include_removed: bool,
     ) -> rusqlite::Result<Vec<InstallRow>> {
-        self.with(|c| {
-            c.prepare(
-                "SELECT * FROM installs WHERE device_id = ?1 AND (?2 OR removed_at IS NULL)
-                 ORDER BY name COLLATE NOCASE",
-            )?
-            .query_map(params![device_id, include_removed], install_row)?
-            .collect()
-        })
+        self.with(|c| installs_in(c, device_id, include_removed))
+    }
+
+    /// Reads a device's installs (removed ones too), lets `change` decide which rows to
+    /// save, and saves those, in one transaction while holding the connection: a download
+    /// completed meanwhile is never overwritten with a row read before it. Returns the saved
+    /// rows.
+    pub fn change_installs(
+        &self,
+        device_id: &str,
+        change: impl FnOnce(&[InstallRow]) -> Vec<InstallRow>,
+    ) -> rusqlite::Result<Vec<InstallRow>> {
+        self.save_package_report_with(device_id, None, |installs| (change(installs), None))
     }
 
     pub fn all_installs(&self) -> rusqlite::Result<Vec<InstallRow>> {
@@ -1583,32 +1601,50 @@ impl Db {
         })
     }
 
-    /// Saves a package report: the install rows it changed and the device's foreign
-    /// packages (replacing the previous ones), in one transaction.
+    /// Saves a package report like [`Db::change_installs`]: `reconcile` turns the device's
+    /// installs into the rows to save and the device's foreign packages, which replace the
+    /// previous ones, all in one transaction. Returns the saved rows.
     pub fn save_package_report(
         &self,
         device_id: &str,
-        installs: &[InstallRow],
-        foreign: &[String],
         now: Time,
-    ) -> rusqlite::Result<()> {
+        reconcile: impl FnOnce(&[InstallRow]) -> (Vec<InstallRow>, Vec<String>),
+    ) -> rusqlite::Result<Vec<InstallRow>> {
+        self.save_package_report_with(device_id, Some(now), |installs| {
+            let (rows, foreign) = reconcile(installs);
+            (rows, Some(foreign))
+        })
+    }
+
+    /// [`Db::change_installs`], also replacing the foreign packages when `change` returns
+    /// them (seen at `now`).
+    fn save_package_report_with(
+        &self,
+        device_id: &str,
+        now: Option<Time>,
+        change: impl FnOnce(&[InstallRow]) -> (Vec<InstallRow>, Option<Vec<String>>),
+    ) -> rusqlite::Result<Vec<InstallRow>> {
         self.with(|c| {
             let tx = c.unchecked_transaction()?;
-            for install in installs {
-                save_install_in(&tx, install)?;
+            let (rows, foreign) = change(&installs_in(&tx, device_id, true)?);
+            for row in &rows {
+                save_install_in(&tx, row)?;
             }
-            tx.execute(
-                "DELETE FROM foreign_packages WHERE device_id = ?1",
-                [device_id],
-            )?;
-            for package in foreign {
+            if let (Some(foreign), Some(now)) = (foreign, now) {
                 tx.execute(
-                    "INSERT OR REPLACE INTO foreign_packages (device_id, package, seen_at)
-                     VALUES (?1, ?2, ?3)",
-                    params![device_id, package, now],
+                    "DELETE FROM foreign_packages WHERE device_id = ?1",
+                    [device_id],
                 )?;
+                for package in foreign {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO foreign_packages (device_id, package, seen_at)
+                         VALUES (?1, ?2, ?3)",
+                        params![device_id, package, now],
+                    )?;
+                }
             }
-            tx.commit()
+            tx.commit()?;
+            Ok(rows)
         })
     }
 
@@ -1894,12 +1930,61 @@ mod tests {
         assert_eq!(db.device("ts:n1").unwrap().unwrap().onboarded_at, None);
         // A package report replaces the foreign packages.
         let foreign = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
-        db.save_package_report("ts:n1", &[], &foreign(&["b.b", "a.a"]), now)
+        db.save_package_report("ts:n1", now, |_| (Vec::new(), foreign(&["b.b", "a.a"])))
             .unwrap();
         assert_eq!(db.foreign_packages("ts:n1").unwrap(), ["a.a", "b.b"]);
-        db.save_package_report("ts:n1", &[], &foreign(&["c.c"]), now)
+        db.save_package_report("ts:n1", now, |_| (Vec::new(), foreign(&["c.c"])))
             .unwrap();
         assert_eq!(db.foreign_packages("ts:n1").unwrap(), ["c.c"]);
+    }
+
+    #[test]
+    fn a_download_completed_during_a_report_is_not_overwritten() {
+        use std::sync::{Arc, mpsc};
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let now = Utc::now();
+        let mut old = crate::testutil::install_of(
+            &crate::testutil::release("1.0", None),
+            "kiwi",
+            now - Duration::hours(1),
+        );
+        old.verified = true;
+        db.save_install(&old).unwrap();
+        let new = InstallRow {
+            version: "2.0".into(),
+            verified: false,
+            installed_at: now,
+            ..old.clone()
+        };
+        // The download of 2.0 completes while a package report of the phone is reconciled
+        // with the installs it read (1.0, now missing from the phone).
+        let (started, completes) = mpsc::channel();
+        let download = std::thread::spawn({
+            let db = db.clone();
+            let new = new.clone();
+            move || {
+                completes.recv().unwrap();
+                db.save_install(&new).unwrap();
+            }
+        });
+        let saved = db
+            .change_installs("ts:test", |installs| {
+                started.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                installs
+                    .iter()
+                    .map(|i| InstallRow {
+                        removed_at: Some(now),
+                        verified: false,
+                        ..i.clone()
+                    })
+                    .collect()
+            })
+            .unwrap();
+        assert_eq!(saved.len(), 1);
+        download.join().unwrap();
+        // The report's change came first; the completed download is what stays.
+        assert_eq!(db.installs("ts:test", true).unwrap(), [new]);
     }
 
     #[test]

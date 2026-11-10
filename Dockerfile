@@ -60,5 +60,7 @@ USER kiwi
 # /api/health on the listen address (requests must name it as their host).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
     CMD ["python3", "-c", "import os, urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://%s/api/health' % os.environ.get('KIWI_LISTEN', '127.0.0.1:8742'), timeout=4)"]
-# tini reaps the processes Kiwi Builds starts; Kiwi itself stops gracefully on SIGTERM.
-ENTRYPOINT ["/usr/bin/tini", "--", "/opt/kiwi/kiwi"]
+# tini reaps the processes Kiwi Builds starts; Kiwi itself stops gracefully on SIGTERM. The
+# shell sets umask 077, as kiwi.service does, so the database, builds, downloads and signing
+# keys Kiwi writes are private to the kiwi user, then replaces itself with Kiwi.
+ENTRYPOINT ["/usr/bin/tini", "--", "/bin/sh", "-c", "umask 077 && exec /opt/kiwi/kiwi \"$@\"", "kiwi"]

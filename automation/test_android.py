@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import shlex
 import stat
 import struct
 import tempfile
@@ -420,6 +421,39 @@ class AndroidTests(unittest.TestCase):
             self.android.build(app, first, 0, self.job)
         with self.assertRaisesRegex(BuildError, "Unknown app recipe"):
             self.android.app("youtube")
+
+    def test_the_patcher_reads_the_keystore_password_from_a_private_file(self):
+        app = self.android.app("android-youtube")
+        with redirect_stdout(io.StringIO()) as out:
+            self.android.plan(app, {})
+        plan = json.loads(out.getvalue())["plan"]
+        password = 'pass"word\\#1 2'
+        original = self.apk("base.apk")
+        self.android.java = lambda: Path("/jre/bin/java")
+        self.android.tool = lambda name: Path(f"/tools/{name}")
+        self.android.keystore = lambda java: (Path("/keys/keystore.p12"), password, "f" * 64)
+        self.android.original = lambda app, plan, job_dir: ([original], "Google Play")
+        seen = []
+
+        def command(args, **_):
+            args = [str(a) for a in args]
+            # picocli reads "@<file>" as the arguments in that file.
+            secret = Path(next(a for a in args if a.startswith("@"))[1:])
+            seen.append((args, stat.S_IMODE(secret.stat().st_mode), shlex.split(secret.read_text())))
+            raise BuildError("Patching failed")
+
+        self.builder.command = command
+        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(BuildError, "Patching failed"):
+            self.android.build(app, plan, 1, self.job)
+        [(args, mode, secret)] = seen
+        self.assertNotIn("pass", " ".join(args))
+        self.assertEqual(args[args.index("--keystore") + 1], "/keys/keystore.p12")
+        self.assertEqual(mode, 0o600)
+        self.assertEqual(secret, ["--keystore-password", password, "--keystore-entry-password", password])
+        # The file is gone once the patcher has run.
+        self.assertEqual(list(self.job.glob("*.args")), [])
+        with self.assertRaises(BuildError):
+            android.argument_file(self.job / "other.args", ["line\nbreak"])
 
     def test_loading_the_key_records_its_certificate_for_the_server(self):
         certificate = PUBLISHER.certificate

@@ -12,7 +12,8 @@
 #   --owner LOGIN      the owner's Tailscale login [default: the user who owns this computer
 #                      in Tailscale; required when it is tagged]
 #   --port PORT        loopback port Kiwi listens on [default: 8742]
-#   --python PATH      Linux: Python 3.12 or newer for Kiwi Builds' Android apps [default: python3]
+#   --python PATH      Linux: Python 3.12 or newer for Kiwi Builds' Android apps, installed
+#                      outside /home [default: python3 in /usr/local/bin, /usr/bin or /bin]
 #
 # What it does on a Mac:
 #  1. checks macOS, your login session, Xcode's command line tools, Rust, Node.js, Tailscale
@@ -85,6 +86,8 @@ TS_HOST=
 TMP_DIR=
 BACKUP=
 PYTHON=
+PYTHON_GIVEN=0 # --python named it
+PYTHON_OK=0    # it runs and is new enough
 
 say() { printf '==> %s\n' "$*"; }
 good() { printf '  \342\234\223 %s\n' "$*"; }
@@ -98,7 +101,7 @@ die() {
 	exit 1
 }
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # sudo that may ask for a password in Terminal, but never blocks a script without one. As
 # root (Linux only) it runs the command itself.
@@ -205,11 +208,123 @@ check_system() {
 	fi
 }
 
-# Linux: the distribution, systemd, tools, Python for Kiwi Builds and the build tools.
-# Sets PYTHON.
+# Linux: why an existing account named $SERVICE_USER is not one install.sh made (a system
+# account with the home $DATA and no login shell), as a message; nothing when it is, or when
+# there is none yet. Kiwi would run as that account and its data and keys would be its.
+foreign_service_user() {
+	local entry uid home shell uid_min why=
+	entry=$(getent passwd "$SERVICE_USER") || return 0
+	IFS=: read -r _ _ uid _ _ home shell <<<"$entry"
+	uid_min=$(awk '$1 == "UID_MIN" { print $2; exit }' /etc/login.defs 2>/dev/null || true)
+	case "$uid_min" in "" | *[!0-9]*) uid_min=1000 ;; esac
+	if [ "$uid" = 0 ] || [ "$uid" -ge "$uid_min" ]; then
+		why="it is not a system account (uid $uid)"
+	elif [ "$home" != "$DATA" ]; then
+		why="its home is $home, not $DATA"
+	else
+		case "$shell" in
+		*/nologin | */false) ;;
+		*) why="it has the login shell $shell" ;;
+		esac
+	fi
+	[ -n "$why" ] || return 0
+	printf '%s\n' "The user $SERVICE_USER already exists, but $why, so install.sh did not make it for Kiwi (Kiwi runs as $SERVICE_USER, which owns its data and signing keys). If another program uses that account, Kiwi can't share it. If it is unused, remove it (sudo userdel $SERVICE_USER); then run ./install.sh again, which makes its own."
+}
+
+# Linux: directories kiwi.service can't see (ProtectHome=yes, PrivateTmp=yes).
+hidden_from_service() {
+	case "$1" in
+	/home | /home/* | /root | /root/* | /run/user | /run/user/* | /tmp | /tmp/* | /var/tmp | /var/tmp/*) return 0 ;;
+	esac
+	return 1
+}
+
+# Linux: the Python kiwi.service runs Kiwi Builds' Android runner with. Without --python,
+# python3 from the system's directories, never from your PATH: pyenv, uv, mise, conda,
+# Linuxbrew and virtualenvs keep theirs in your home, which the service can't see. Sets
+# PYTHON and PYTHON_OK.
+check_python() {
+	local dir version
+	if [ "$PYTHON_GIVEN" = 0 ]; then
+		PYTHON=python3
+		for dir in /usr/local/bin /usr/bin /bin; do
+			if [ -x "$dir/python3" ] && ! hidden_from_service "$(readlink -f "$dir/python3")"; then
+				PYTHON=$dir/python3
+				break
+			fi
+		done
+		if [ "$PYTHON" = python3 ]; then
+			note "Optional: Python 3.12 or newer as python3 in /usr/local/bin or /usr/bin (or named with --python) lets Kiwi Builds build Android apps"
+			return
+		fi
+	else
+		case "$PYTHON" in
+		/*) ;;
+		*/*)
+			problem "--python needs an absolute path, not $PYTHON"
+			return
+			;;
+		*)
+			for dir in /usr/local/bin /usr/bin /bin; do
+				if [ -x "$dir/$PYTHON" ]; then
+					PYTHON=$dir/$PYTHON
+					break
+				fi
+			done
+			case "$PYTHON" in
+			/*) ;;
+			*)
+				problem "--python $PYTHON: there is no $PYTHON in /usr/local/bin, /usr/bin or /bin; name its full path"
+				return
+				;;
+			esac
+			;;
+		esac
+		if [ ! -f "$PYTHON" ] || [ ! -x "$PYTHON" ]; then
+			problem "--python $PYTHON is not a program"
+			return
+		fi
+		if hidden_from_service "$PYTHON" || hidden_from_service "$(readlink -f "$PYTHON")"; then
+			problem "--python $PYTHON: kiwi.service can't use a Python in /home, /root, /run/user or /tmp (it runs as the user $SERVICE_USER, without access to them). Install Python 3.12 or newer system-wide (your package manager, or a build in /usr/local) and name that one"
+			return
+		fi
+	fi
+	if version=$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2]); sys.exit(sys.version_info < (3, 12))' 2>/dev/null); then
+		PYTHON_OK=1
+		good "Python $version ($PYTHON) for Kiwi Builds' Android apps"
+	elif [ "$PYTHON_GIVEN" = 1 ]; then
+		problem "--python $PYTHON is Python ${version:-of an unknown version}; Kiwi Builds needs 3.12 or newer"
+	else
+		note "Optional: $PYTHON is Python ${version:-of an unknown version}; Kiwi Builds needs 3.12 or newer for Android apps (install one system-wide and name it with --python)"
+	fi
+}
+
+# Linux, as root: runs $PYTHON the way kiwi.service will (as $SERVICE_USER, without /home,
+# /root, /run/user and the real /tmp) and prints its version, or what went wrong.
+service_python() {
+	local out rc=0
+	out=$(systemd-run --quiet --wait --pipe --collect \
+		-p User="$SERVICE_USER" -p Group="$SERVICE_USER" -p ProtectHome=yes -p PrivateTmp=yes \
+		-p ProtectSystem=strict -p PrivateDevices=yes -p NoNewPrivileges=yes -p UMask=0077 \
+		"$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2]); sys.exit(sys.version_info < (3, 12))' \
+		</dev/null 2>&1) || rc=$?
+	if [ "$rc" = 0 ]; then
+		printf '%s\n' "$out"
+		return 0
+	fi
+	case "$out" in
+	[0-9]*.[0-9]*) out="it is Python $out there; Kiwi Builds needs 3.12 or newer" ;;
+	"") out="it does not start there (exit status $rc): it, or something it needs, is in a directory the service can't see or the user $SERVICE_USER can't read" ;;
+	esac
+	printf '%s\n' "$out"
+	return 1
+}
+
+# Linux: the distribution, systemd, tools, the service's user, Python for Kiwi Builds and
+# the build tools. Sets PYTHON.
 check_linux() {
 	say "Checking this computer"
-	local distro tool major version
+	local distro tool major
 	distro=$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | tr -d '"')
 	good "${distro:-Linux} on $(uname -m), user $(id -un)"
 	if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
@@ -229,15 +344,10 @@ check_linux() {
 	elif ! command -v sudo >/dev/null; then
 		problem "sudo is missing: run ./install.sh as root"
 	fi
-	PYTHON=${PYTHON:-$(command -v python3 2>/dev/null || true)}
-	if [ -z "$PYTHON" ]; then
-		PYTHON=python3
-		note "Optional: Python 3.12 or newer (python3) lets Kiwi Builds build Android apps"
-	elif version=$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2]); sys.exit(sys.version_info < (3, 12))' 2>/dev/null); then
-		good "Python $version ($PYTHON) for Kiwi Builds' Android apps"
-	else
-		note "Optional: $PYTHON is Python ${version:-of an unknown version}; Kiwi Builds needs 3.12 or newer for Android apps (name one with --python)"
-	fi
+	local foreign
+	foreign=$(foreign_service_user)
+	if [ -n "$foreign" ]; then problem "$foreign"; fi
+	check_python
 	note "Kiwi Builds builds iOS apps on a Mac only; Android apps build here"
 	if [ "$BUILD" = 1 ]; then
 		if command -v cargo >/dev/null; then
@@ -602,10 +712,12 @@ install_kiwi() {
 
 # Linux, as root: the kiwi user, /opt/kiwi/app, /var/lib/kiwi and kiwi.service.
 install_kiwi_linux() {
-	local mode=restart old_pid version nologin group=--user-group
+	local mode=restart old_pid version nologin group=--user-group foreign out
 	[ -x "$REPO/target/release/kiwi" ] || die "$REPO/target/release/kiwi is missing; run without --no-build"
 	[ -f "$REPO/web/dist/index.html" ] || die "$REPO/web/dist is missing; run without --no-build"
 
+	foreign=$(foreign_service_user)
+	[ -z "$foreign" ] || die "$foreign"
 	if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
 		nologin=$(command -v nologin || echo /bin/false)
 		if getent group "$SERVICE_USER" >/dev/null; then group="--gid=$SERVICE_USER"; fi
@@ -615,6 +727,15 @@ install_kiwi_linux() {
 	fi
 	install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 700 "$DATA"
 	install -d -m 755 "$APPS"
+	if [ "$PYTHON_OK" = 1 ]; then
+		if out=$(service_python); then
+			say "kiwi.service can run Python $out ($PYTHON)"
+		elif [ "$PYTHON_GIVEN" = 1 ]; then
+			die "kiwi.service can't use --python $PYTHON: $out. Name a Python 3.12 or newer installed for the whole system"
+		else
+			say "Note: kiwi.service can't use $PYTHON ($out), so Kiwi Builds can't build Android apps; name a Python 3.12 or newer it can run with --python"
+		fi
+	fi
 
 	say "Installing into $APPS/app"
 	rm -rf "$APPS/app.new"
@@ -703,6 +824,7 @@ main() {
 			[ $# -ge 2 ] || die "--python needs the path of a Python 3.12 or newer"
 			[ "$LINUX" = 1 ] || die "--python is for Linux; on a Mac, Kiwi Builds uses Homebrew's python3.13"
 			PYTHON=$2
+			PYTHON_GIVEN=1
 			shift
 			;;
 		-h | --help)
@@ -804,7 +926,9 @@ linux_main() {
 	[ "$PROBLEMS" = 0 ] || die "fix the $PROBLEMS problem(s) above, then run ./install.sh again"
 	if [ "$BUILD" = 1 ]; then build; fi
 	if [ "$(id -u)" != 0 ]; then
-		local args=(--no-build --port "$PORT" --python "$PYTHON")
+		local args=(--no-build --port "$PORT")
+		# Without --python, the root run looks in the same system directories.
+		if [ "$PYTHON_GIVEN" = 1 ]; then args+=(--python "$PYTHON"); fi
 		if [ -n "$PUBLIC_URL" ]; then args+=(--public-url "$PUBLIC_URL"); fi
 		if [ -n "$OWNER" ]; then args+=(--owner "$OWNER"); fi
 		say "Installing as root (sudo)"

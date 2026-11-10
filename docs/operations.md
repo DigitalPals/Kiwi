@@ -191,16 +191,21 @@ a backup. Everything else in the data directory can be rebuilt. The data directo
 private (on Linux owned by `kiwi`), so copy it as root and keep the copy private too: it
 holds signing keys.
 
-In Docker, copy the files out of the running container:
+In Docker, copy the files out of the running container into a private directory of their
+own, outside the Kiwi clone (where they would be one `git add` away from being published).
+Run this in the clone, where `compose.yaml` is; each run makes a new dated copy:
 
 ```sh
-docker compose exec kiwi python3 -c "import sqlite3; sqlite3.connect('/data/kiwi.db').backup(sqlite3.connect('/data/kiwi.db.bak'))"
-docker compose cp kiwi:/data/kiwi.db.bak ./kiwi.db
-docker compose cp kiwi:/data/vapid.json ./
-docker compose cp kiwi:/data/automation/android ./android   # keystore.p12, keystore.pass
-docker compose cp kiwi:/data/signing ./signing              # when you upload an iOS identity
+b=~/kiwi-backup/$(date +%Y%m%d-%H%M%S)
+install -d -m 700 ~/kiwi-backup "$b"
+docker compose exec kiwi python3 -c "import os, sqlite3; os.umask(0o077); sqlite3.connect('/data/kiwi.db').backup(sqlite3.connect('/data/kiwi.db.bak'))"
+docker compose cp kiwi:/data/kiwi.db.bak "$b/kiwi.db"
+docker compose cp kiwi:/data/vapid.json "$b/"
+docker compose cp kiwi:/data/automation/android "$b/android"   # keystore.p12, keystore.pass
+docker compose cp kiwi:/data/signing "$b/signing"              # when you upload an iOS identity
 ```
 
+Then copy `~/kiwi-backup` to another disk and keep it private: it holds signing keys.
 `docker compose cp` fails for a path that doesn't exist yet (no Android build, no uploaded
 identity); that's fine.
 

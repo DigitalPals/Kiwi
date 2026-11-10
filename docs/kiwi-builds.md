@@ -192,8 +192,10 @@ fingerprint Android shows for apps Kiwi signed; the web app never offers the key
 [Kiwi's own Android app](android-app.md), which Kiwi offers to Android phones while Kiwi
 Builds is on.
 
-The patcher takes the keystore password as a command-line argument, so it is visible to
-other processes of the same user on the Mac while a build runs.
+The password never appears on a command line, where other local users could read it while
+a build runs: `keytool` and `apksigner` get it through their environment, and the patcher
+reads it from an argument file (`@file`) that only Kiwi can read, in the build's job
+directory, deleted once patching is done.
 
 ### Install on Android
 
@@ -219,9 +221,10 @@ and Kiwi's signing warnings don't apply to them.
 ### Requirements and limits
 
 - Python 3.13 on the Mac (`brew install python@3.13`); on Linux Python 3.12 or newer
-  (`python3`, or the one `--python`/`KIWI_PYTHON` names; the Docker image has 3.13). An older
-  Python fails the build with a message saying so. Nothing else: the setup below, the
-  Apple account, Xcode and enrollment are for iPhone apps only.
+  (`python3`, or the one `--python`/`KIWI_PYTHON` names, installed outside home directories
+  for `install.sh`'s service; the Docker image has 3.13). An older Python fails the build
+  with a message saying so. Nothing else: the setup below, the Apple account, Xcode and
+  enrollment are for iPhone apps only.
 - Linux on x86-64 or ARM64, or a Mac: the pinned Java runtime exists for those.
 - About 1 GB of disk for the tools and cached originals, plus 75 to 180 MB for each
   retained release (the newest 5 per app), and network access to GitHub, `auroraoss.com`,

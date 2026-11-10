@@ -7,13 +7,17 @@ use std::{
     time::Duration,
 };
 
-use kiwi_signer::{Identity, Profile, SignReport, SignRequest, SignStep};
+use kiwi_signer::{Backend, Identity, Profile, SignReport, SignRequest, SignStep, SigningDir};
 use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::db::Time;
 
 pub trait Signer: Send + Sync + 'static {
+    /// Where identities come from: the keychain, or a `.p12` uploaded to Kiwi.
+    fn backend(&self) -> Backend {
+        Backend::current()
+    }
     fn identities(&self) -> Result<Vec<Identity>, String>;
     fn profiles(&self) -> Vec<(PathBuf, Result<Profile, String>)>;
     /// Blocking.
@@ -25,15 +29,28 @@ pub trait Signer: Send + Sync + 'static {
     ) -> Result<SignReport, String>;
 }
 
-/// The keychain, Xcode's profile directories and `codesign` (macOS only).
-pub struct AppleSigner;
+/// This computer's signer. On macOS: the login keychain and `codesign`; elsewhere: the
+/// identity uploaded to `<data>/signing` and rcodesign. Profiles come from Kiwi's uploads
+/// and Xcode's profile directories on every system.
+pub struct SystemSigner {
+    pub dir: SigningDir,
+}
 
-impl Signer for AppleSigner {
+impl Signer for SystemSigner {
     fn identities(&self) -> Result<Vec<Identity>, String> {
-        kiwi_signer::list_identities().map_err(|e| e.to_string())
+        match Backend::current() {
+            Backend::Keychain => kiwi_signer::list_identities().map_err(|e| e.to_string()),
+            Backend::Files => self
+                .dir
+                .identity()
+                .map(|identity| identity.into_iter().collect())
+                .map_err(|e| e.to_string()),
+        }
     }
     fn profiles(&self) -> Vec<(PathBuf, Result<Profile, String>)> {
-        kiwi_signer::load_profiles(&kiwi_signer::default_profile_dirs())
+        let mut dirs = vec![self.dir.profiles_dir()];
+        dirs.extend(kiwi_signer::default_profile_dirs());
+        kiwi_signer::load_profiles(&dirs)
             .into_iter()
             .map(|(path, r)| (path, r.map_err(|e| e.to_string())))
             .collect()
@@ -44,7 +61,11 @@ impl Signer for AppleSigner {
         cancel: &AtomicBool,
         progress: &dyn Fn(SignStep),
     ) -> Result<SignReport, String> {
-        kiwi_signer::sign_ipa(req, cancel, progress).map_err(|e| e.to_string())
+        match Backend::current() {
+            Backend::Keychain => kiwi_signer::sign_ipa(req, cancel, progress),
+            Backend::Files => kiwi_signer::sign_ipa_with_files(req, &self.dir, cancel, progress),
+        }
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -62,6 +83,7 @@ pub async fn scan_signing(
     previous: &SigningInfo,
     timeout: Duration,
 ) -> SigningInfo {
+    let backend = signer.backend();
     let scan = async move {
         let guard = lock.lock_owned().await;
         tokio::task::spawn_blocking(move || {
@@ -73,15 +95,21 @@ pub async fn scan_signing(
     match tokio::time::timeout(timeout, scan).await {
         Ok(Ok(info)) => info,
         Ok(Err(e)) => SigningInfo {
+            backend,
             identity_error: Some(format!("Signing scan failed: {e}")),
             ..Default::default()
         },
         Err(_) => {
             tracing::warn!("reading signing identities did not finish in {timeout:?}");
+            let message = match backend {
+                Backend::Keychain => {
+                    "Reading the keychain timed out. If the Mac shows a keychain prompt, answer it, then rescan."
+                }
+                Backend::Files => "Reading the signing identity and profiles timed out. Rescan.",
+            };
             SigningInfo {
-                identity_error: Some(
-                    "Reading the keychain timed out. If the Mac shows a keychain prompt, answer it, then rescan.".into(),
-                ),
+                backend,
+                identity_error: Some(message.into()),
                 profiles: previous.profiles.clone(),
                 profile_errors: previous.profile_errors.clone(),
                 ..Default::default()
@@ -93,10 +121,13 @@ pub async fn scan_signing(
 /// A snapshot of the identities and profiles.
 #[derive(Debug, Clone, Default)]
 pub struct SigningInfo {
+    pub backend: Backend,
     pub identities: Vec<Identity>,
     pub identity_error: Option<String>,
     pub profiles: Vec<Profile>,
     pub profile_errors: Vec<String>,
+    /// Kiwi's own signing files; profiles loaded from its uploads can be deleted.
+    pub uploads: Option<SigningDir>,
 }
 
 /// How a bundle id would be signed now.
@@ -122,6 +153,8 @@ impl Plan {
 
 #[derive(Debug, Serialize)]
 pub struct SigningJson {
+    /// `keychain` (macOS) or `files` (an uploaded `.p12`).
+    pub backend: Backend,
     pub identities: Vec<IdentityJson>,
     pub profiles: Vec<ProfileJson>,
     pub active: Option<ActiveJson>,
@@ -150,6 +183,8 @@ pub struct ProfileJson {
     pub entitlements: Vec<String>,
     pub usable: bool,
     pub reason: Option<String>,
+    /// Uploaded to Kiwi (and deletable there) rather than found in Xcode's directories.
+    pub uploaded: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,6 +200,7 @@ const WILDCARD_PROBE: &str = "kiwi.wildcard.probe";
 impl SigningInfo {
     /// Blocking: lists identities and parses profiles.
     pub fn scan(signer: &dyn Signer) -> Self {
+        let backend = signer.backend();
         let (identities, identity_error) = match signer.identities() {
             Ok(ids) => (ids, None),
             Err(e) => (Vec::new(), Some(e)),
@@ -178,10 +214,12 @@ impl SigningInfo {
             }
         }
         Self {
+            backend,
             identities,
             identity_error,
             profiles,
             profile_errors,
+            uploads: None,
         }
     }
 
@@ -211,8 +249,9 @@ impl SigningInfo {
     }
 
     fn no_identity_message(&self) -> String {
-        self.identity_error.clone().unwrap_or_else(|| {
-            "No code signing identity was found in the login keychain. Sign in to Xcode and create an Apple Development certificate.".into()
+        self.identity_error.clone().unwrap_or_else(|| match self.backend {
+            Backend::Keychain => "No code signing identity was found in the login keychain. Sign in to Xcode and create an Apple Development certificate.".into(),
+            Backend::Files => "No signing identity was uploaded. Export your Apple Development certificate with its private key as a .p12 file and upload it.".into(),
         })
     }
 
@@ -261,7 +300,10 @@ impl SigningInfo {
         if self.identities.is_empty() {
             Some(self.no_identity_message())
         } else if self.active(now).is_none() {
-            Some("No usable wildcard provisioning profile was found. Open an app project in Xcode with automatic signing once, then rescan.".into())
+            Some(match self.backend {
+                Backend::Keychain => "No usable wildcard provisioning profile was found. Open an app project in Xcode with automatic signing once, then rescan.".into(),
+                Backend::Files => "No usable wildcard provisioning profile was found. Download a profile for the App ID * that includes this certificate from the Apple Developer site and upload it.".into(),
+            })
         } else {
             None
         }
@@ -294,6 +336,7 @@ impl SigningInfo {
                     entitlements: kiwi_signer::profile_entitlement_keys(p),
                     usable: reason.is_none(),
                     reason,
+                    uploaded: self.uploads.as_ref().is_some_and(|d| d.is_uploaded(p)),
                 }
             })
             .collect();
@@ -301,6 +344,7 @@ impl SigningInfo {
             (b.usable, b.wildcard, b.expires_at).cmp(&(a.usable, a.wildcard, a.expires_at))
         });
         SigningJson {
+            backend: self.backend,
             identities: self
                 .identities
                 .iter()
@@ -378,9 +422,13 @@ mod tests {
     struct Stuck {
         release: std::sync::atomic::AtomicBool,
         calls: std::sync::atomic::AtomicUsize,
+        backend: Backend,
     }
 
     impl Signer for Stuck {
+        fn backend(&self) -> Backend {
+            self.backend
+        }
         fn identities(&self) -> Result<Vec<Identity>, String> {
             use std::sync::atomic::Ordering::SeqCst;
             self.calls.fetch_add(1, SeqCst);
@@ -406,7 +454,20 @@ mod tests {
     async fn hung_scans_time_out_without_piling_up() {
         use std::sync::atomic::Ordering::SeqCst;
         let now = Utc::now();
-        let stuck = Arc::new(Stuck::default());
+        let stuck = Arc::new(Stuck {
+            backend: Backend::Keychain,
+            ..Stuck::default()
+        });
+        // Released whatever happens: the runtime waits for the blocked thread when it stops.
+        struct Release(Arc<Stuck>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                self.0
+                    .release
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let _release = Release(stuck.clone());
         let lock = Arc::default();
         let previous = SigningInfo {
             profiles: vec![profile(
@@ -434,6 +495,75 @@ mod tests {
         .await;
         assert_eq!(info.identities.len(), 1);
         assert!(info.profiles.is_empty());
+
+        let files = Arc::new(Stuck {
+            backend: Backend::Files,
+            ..Stuck::default()
+        });
+        let _release = Release(files.clone());
+        let info = scan_signing(files, Arc::default(), &previous, timeout).await;
+        assert_eq!(info.backend, Backend::Files);
+        assert_eq!(
+            info.error(now).unwrap(),
+            "Reading the signing identity and profiles timed out. Rescan."
+        );
+    }
+
+    #[test]
+    fn messages_and_json_follow_the_backend() {
+        let now = Utc::now();
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = SigningDir::new(dir.path().join("signing"));
+        let mut uploaded = profile("up", &format!("{TEAM}.*"), now + Duration::days(200));
+        uploaded.path = uploads.profiles_dir().join("up.mobileprovision");
+        let xcode = profile("xcode", &format!("{TEAM}.*"), now + Duration::days(100));
+        let files = SigningInfo {
+            backend: Backend::Files,
+            profiles: vec![uploaded, xcode],
+            uploads: Some(uploads),
+            ..Default::default()
+        };
+        assert!(
+            files
+                .error(now)
+                .unwrap()
+                .starts_with("No signing identity was uploaded.")
+        );
+        let json = serde_json::to_value(files.json(now)).unwrap();
+        assert_eq!(json["backend"], "files");
+        let uploaded: Vec<_> = json["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                (
+                    p["uuid"].as_str().unwrap(),
+                    p["uploaded"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(uploaded, [("up", true), ("xcode", false)]);
+
+        let with_identity = SigningInfo {
+            identities: vec![identity(now + Duration::days(300))],
+            profiles: Vec::new(),
+            ..files.clone()
+        };
+        assert!(
+            with_identity
+                .error(now)
+                .unwrap()
+                .contains("from the Apple Developer site")
+        );
+        let keychain = SigningInfo {
+            backend: Backend::Keychain,
+            ..Default::default()
+        };
+        assert!(keychain.error(now).unwrap().contains("login keychain"));
+        assert_eq!(
+            serde_json::to_value(keychain.json(now)).unwrap()["backend"],
+            "keychain"
+        );
     }
 
     #[test]

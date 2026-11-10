@@ -66,6 +66,12 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .route("/updates/prepare", post(prepare_updates))
         .route("/signing", get(signing))
         .route("/signing/rescan", post(rescan_signing))
+        .route(
+            "/signing/identity",
+            post(upload_identity).delete(delete_identity),
+        )
+        .route("/signing/profiles", post(upload_profile))
+        .route("/signing/profiles/{uuid}", delete(delete_profile))
         .route("/settings", get(get_settings).patch(patch_settings))
         .route("/push/subscribe", post(push_subscribe))
         .route("/push/unsubscribe", post(push_unsubscribe))
@@ -250,13 +256,18 @@ impl FromRequestParts<Arc<Kiwi>> for Ctx {
     }
 }
 
-/// A JSON body; empty bodies read as `{}`.
-pub struct JsonBody<T>(pub T);
+/// Largest JSON body most endpoints accept.
+const BODY_LIMIT: usize = 64 * 1024;
 
-impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for JsonBody<T> {
+/// A JSON body of at most `LIMIT` bytes; empty bodies read as `{}`.
+pub struct JsonBody<T, const LIMIT: usize = BODY_LIMIT>(pub T);
+
+impl<S: Send + Sync, T: DeserializeOwned, const LIMIT: usize> FromRequest<S>
+    for JsonBody<T, LIMIT>
+{
     type Rejection = ApiError;
     async fn from_request(req: Request, _: &S) -> ApiResult<Self> {
-        let bytes: Bytes = axum::body::to_bytes(req.into_body(), 64 * 1024)
+        let bytes: Bytes = axum::body::to_bytes(req.into_body(), LIMIT)
             .await
             .map_err(|_| ApiError::bad_request("Request body is too large."))?;
         let bytes: &[u8] = if bytes.iter().all(u8::is_ascii_whitespace) {
@@ -863,6 +874,121 @@ async fn signing(State(kiwi): K, _: Ctx) -> Response {
 
 async fn rescan_signing(State(kiwi): K, _: Ctx) -> Response {
     Json(kiwi.rescan_signing().await.json(Utc::now())).into_response()
+}
+
+/// Base64 grows files by a third; leave room for the JSON around it.
+const IDENTITY_BODY_LIMIT: usize = kiwi_signer::MAX_P12_BYTES / 3 * 4 + 8 * 1024;
+const PROFILE_BODY_LIMIT: usize = kiwi_signer::MAX_PROFILE_BYTES / 3 * 4 + 8 * 1024;
+
+/// An uploaded `.p12` and its password. Both are secrets: they are zeroed after use and
+/// never logged or returned.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdentityUpload {
+    p12: String,
+    #[serde(default)]
+    password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileUpload {
+    profile: String,
+}
+
+/// Maps signer errors on uploads: unusable files are the client's, the rest are Kiwi's.
+fn upload_error(e: kiwi_signer::Error) -> ApiError {
+    use kiwi_signer::Error;
+    match e {
+        Error::InvalidIdentity(_)
+        | Error::InvalidProfile(_)
+        | Error::NoProfile(_)
+        | Error::InvalidRequest(_) => ApiError::bad_request(e.to_string()),
+        Error::Unsupported(message) => ApiError::conflict(message),
+        other => ApiError::internal(other),
+    }
+}
+
+fn decode_upload(field: &str, base64: &str) -> ApiResult<zeroize::Zeroizing<Vec<u8>>> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let compact: String = base64.split_ascii_whitespace().collect();
+    let compact = zeroize::Zeroizing::new(compact);
+    STANDARD
+        .decode(compact.as_bytes())
+        .map(zeroize::Zeroizing::new)
+        .map_err(|_| ApiError::bad_request(format!("{field} must be base64.")))
+}
+
+/// Files backend only: stores a `.p12` identity with its password, then rescans.
+async fn upload_identity(
+    State(kiwi): K,
+    _: Ctx,
+    JsonBody(body): JsonBody<IdentityUpload, IDENTITY_BODY_LIMIT>,
+) -> ApiResult<Response> {
+    let IdentityUpload { p12, password } = body;
+    let (p12, password) = (
+        zeroize::Zeroizing::new(p12),
+        zeroize::Zeroizing::new(password),
+    );
+    require_files_backend(&kiwi)?;
+    let p12 = decode_upload("p12", &p12)?;
+    let identity = kiwi
+        .paths
+        .signing
+        .set_identity(&p12, &password, Utc::now())
+        .map_err(upload_error)?;
+    tracing::info!("signing identity uploaded: {}", identity.name);
+    Ok(Json(kiwi.rescan_signing().await.json(Utc::now())).into_response())
+}
+
+async fn delete_identity(State(kiwi): K, _: Ctx) -> ApiResult<Response> {
+    require_files_backend(&kiwi)?;
+    if !kiwi.paths.signing.remove_identity().map_err(upload_error)? {
+        return Err(ApiError::not_found("No signing identity was uploaded."));
+    }
+    tracing::info!("signing identity removed");
+    Ok(Json(kiwi.rescan_signing().await.json(Utc::now())).into_response())
+}
+
+fn require_files_backend(kiwi: &Kiwi) -> ApiResult<()> {
+    match kiwi.signer.backend() {
+        kiwi_signer::Backend::Files => Ok(()),
+        kiwi_signer::Backend::Keychain => Err(ApiError::conflict(
+            "This Kiwi signs with the Mac's login keychain. Add the certificate to the keychain (for example in Xcode) instead of uploading it.",
+        )),
+    }
+}
+
+/// Stores a provisioning profile (any backend), then rescans.
+async fn upload_profile(
+    State(kiwi): K,
+    _: Ctx,
+    JsonBody(body): JsonBody<ProfileUpload, PROFILE_BODY_LIMIT>,
+) -> ApiResult<Response> {
+    let bytes = decode_upload("profile", &body.profile)?;
+    let profile = kiwi
+        .paths
+        .signing
+        .add_profile(&bytes, Utc::now())
+        .map_err(upload_error)?;
+    tracing::info!("provisioning profile uploaded: {}", profile.uuid);
+    Ok(Json(kiwi.rescan_signing().await.json(Utc::now())).into_response())
+}
+
+/// Deletes an uploaded profile; Xcode's profiles are not Kiwi's to delete.
+async fn delete_profile(State(kiwi): K, _: Ctx, P(uuid): P<String>) -> ApiResult<Response> {
+    if !kiwi
+        .paths
+        .signing
+        .remove_profile(&uuid)
+        .map_err(upload_error)?
+    {
+        return Err(ApiError::not_found(
+            "No uploaded provisioning profile has this UUID. Profiles from Xcode can't be removed here.",
+        ));
+    }
+    tracing::info!("provisioning profile removed: {uuid}");
+    Ok(Json(kiwi.rescan_signing().await.json(Utc::now())).into_response())
 }
 
 async fn get_settings(State(kiwi): K, _: Ctx) -> Response {

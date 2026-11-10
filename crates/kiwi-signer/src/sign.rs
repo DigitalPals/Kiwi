@@ -2,25 +2,17 @@ use std::{
     collections::{BTreeSet, HashMap},
     fmt, fs, io,
     path::{Path, PathBuf},
-    process::Command,
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Error, Identity, Profile, Result, archive,
+    Error, Identity, Profile, Result, SigningDir, archive,
     bundle::{self, CodeKind, remove_path, short},
-    entitlements, macho, parse_profile, process, require_macos, select_profile,
+    codesign, entitlements, macho, parse_profile, require_macos, select_profile,
 };
-
-/// Longest one `codesign` call may run. It blocks while macOS waits for an answer to a
-/// keychain prompt, which would otherwise hold the signing slot forever.
-const CODESIGN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-/// Longest zipping the signed app may run (large apps on a busy disk).
-const ZIP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignRequest {
@@ -82,23 +74,57 @@ pub struct SignReport {
     pub size: u64,
 }
 
-/// Re-signs `req.input_ipa` into `req.output_ipa`. Blocking; checks `cancel` between
-/// steps and while external tools run, and reports steps through `progress`.
+/// Re-signs `req.input_ipa` into `req.output_ipa` with the keychain and `codesign`
+/// ([`crate::Backend::Keychain`], macOS). Blocking; checks `cancel` between steps and while
+/// external tools run, and reports steps through `progress`.
 pub fn sign_ipa(
     req: &SignRequest,
     cancel: &AtomicBool,
     progress: &dyn Fn(SignStep),
 ) -> Result<SignReport> {
     require_macos()?;
-    let tools = AppleTools {
+    let tools = codesign::AppleTools {
         identity: &req.identity.sha1,
     };
     sign_with(&tools, req, cancel, progress, Utc::now())
 }
 
-/// The macOS tools, behind a trait so the rest of the flow is testable anywhere.
-/// Paths are relative to `root` (the extracted IPA), which is the working directory.
-trait Toolchain {
+/// Re-signs like [`sign_ipa`] with the identity uploaded to `dir` and rcodesign's library
+/// ([`crate::Backend::Files`], every system but macOS). `req.identity` must be that identity.
+pub fn sign_ipa_with_files(
+    req: &SignRequest,
+    dir: &SigningDir,
+    cancel: &AtomicBool,
+    progress: &dyn Fn(SignStep),
+) -> Result<SignReport> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (req, dir, cancel, progress);
+        Err(Error::Unsupported(
+            "Kiwi on macOS signs with the login keychain and codesign",
+        ))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let key = dir
+            .signing_key()?
+            .ok_or_else(|| Error::InvalidIdentity("No signing identity was uploaded".into()))?;
+        if !key.identity.sha1.eq_ignore_ascii_case(&req.identity.sha1) {
+            return Err(Error::InvalidIdentity(
+                "The uploaded signing identity changed while the build waited; try again".into(),
+            ));
+        }
+        let tools = crate::rcodesign::Rcodesign::new(&key);
+        sign_with(&tools, req, cancel, progress, Utc::now())
+    }
+}
+
+/// The tools of a backend: the macOS tools ([`codesign::AppleTools`]) or rcodesign's library,
+/// behind a trait so the rest of the flow is shared and testable anywhere. Paths are
+/// relative to `root` (the extracted IPA).
+pub(crate) trait Toolchain {
+    /// Signs one item: a dylib, or a framework or app bundle with `entitlements` (apps and
+    /// extensions) after its profile was embedded.
     fn sign(
         &self,
         root: &Path,
@@ -106,109 +132,10 @@ trait Toolchain {
         entitlements: Option<&Path>,
         cancel: &AtomicBool,
     ) -> Result<()>;
+    /// Checks the signed app and everything in it (`codesign --verify --deep --strict`).
     fn verify(&self, root: &Path, app: &Path, cancel: &AtomicBool) -> Result<()>;
+    /// Zips `root/Payload` into `output` with symlinks and permissions.
     fn package(&self, root: &Path, output: &Path, cancel: &AtomicBool) -> Result<()>;
-}
-
-struct AppleTools<'a> {
-    identity: &'a str,
-}
-
-impl Toolchain for AppleTools<'_> {
-    fn sign(
-        &self,
-        root: &Path,
-        path: &Path,
-        entitlements: Option<&Path>,
-        cancel: &AtomicBool,
-    ) -> Result<()> {
-        let mut cmd = Command::new("/usr/bin/codesign");
-        cmd.args([
-            "--force",
-            "--timestamp=none",
-            "--generate-entitlement-der",
-            "-s",
-            self.identity,
-        ]);
-        if let Some(entitlements) = entitlements {
-            cmd.arg("--entitlements").arg(entitlements);
-        }
-        cmd.arg(path).current_dir(root);
-        run(
-            &mut cmd,
-            &format!("Signing {}", path.display()),
-            Some(path),
-            CODESIGN_TIMEOUT,
-            cancel,
-        )
-    }
-
-    fn verify(&self, root: &Path, app: &Path, cancel: &AtomicBool) -> Result<()> {
-        let mut cmd = Command::new("/usr/bin/codesign");
-        cmd.args(["--verify", "--deep", "--strict"])
-            .arg(app)
-            .current_dir(root);
-        run(
-            &mut cmd,
-            "Verifying the signature",
-            Some(app),
-            CODESIGN_TIMEOUT,
-            cancel,
-        )
-    }
-
-    fn package(&self, root: &Path, output: &Path, cancel: &AtomicBool) -> Result<()> {
-        let mut cmd = Command::new("/usr/bin/zip");
-        cmd.arg("-qry").arg(output).arg("Payload").current_dir(root);
-        run(&mut cmd, "Packaging the IPA", None, ZIP_TIMEOUT, cancel)
-    }
-}
-
-/// Runs a tool, killing it when `cancel` is set or after `timeout`; failures carry its
-/// stderr, without the `<subject>: ` prefix codesign puts on its lines.
-fn run(
-    cmd: &mut Command,
-    what: &str,
-    subject: Option<&Path>,
-    timeout: Duration,
-    cancel: &AtomicBool,
-) -> Result<()> {
-    let out = process::output(cmd, what, timeout, cancel)?;
-    if out.status.success() {
-        return Ok(());
-    }
-    let prefix = subject.map(|s| format!("{}: ", s.display()));
-    Err(Error::Tool(failure_message(
-        what,
-        &out.status.to_string(),
-        &String::from_utf8_lossy(&out.stderr),
-        prefix.as_deref(),
-    )))
-}
-
-fn failure_message(what: &str, status: &str, stderr: &str, prefix: Option<&str>) -> String {
-    let detail: Vec<&str> = stderr
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.ends_with(": replacing existing signature"))
-        .map(|l| prefix.and_then(|p| l.strip_prefix(p)).unwrap_or(l))
-        .collect();
-    let mut message = if detail.is_empty() {
-        format!("{what} failed ({status})")
-    } else {
-        let detail = detail.join("; ");
-        let cut = detail
-            .char_indices()
-            .nth(1500)
-            .map_or(detail.len(), |(i, _)| i);
-        format!("{what} failed: {}", &detail[..cut])
-    };
-    if stderr.contains("errSecInternalComponent") {
-        message.push_str(
-            ". The signing key cannot be used from this session; Kiwi must run in the logged-in user's GUI session",
-        );
-    }
-    message
 }
 
 struct Plan<'a> {
@@ -216,7 +143,7 @@ struct Plan<'a> {
     entitlements: PathBuf,
 }
 
-fn sign_with(
+pub(crate) fn sign_with(
     tools: &dyn Toolchain,
     req: &SignRequest,
     cancel: &AtomicBool,
@@ -868,79 +795,20 @@ mod tests {
         assert_eq!(SignStep::Packaging.to_string(), "Packaging");
     }
 
-    #[test]
-    fn tool_failure_messages() {
-        let msg = failure_message(
-            "Signing Payload/A.app",
-            "exit status: 1",
-            "Payload/A.app: replacing existing signature\nPayload/A.app: errSecInternalComponent\n",
-            Some("Payload/A.app: "),
-        );
-        assert!(
-            msg.starts_with(
-                "Signing Payload/A.app failed: errSecInternalComponent. The signing key"
-            ),
-            "{msg}"
-        );
-        assert_eq!(
-            failure_message("Packaging the IPA", "exit status: 15", "", None),
-            "Packaging the IPA failed (exit status: 15)"
-        );
-    }
-
-    #[test]
-    fn runs_cancels_and_times_out_tools() {
-        let minute = Duration::from_secs(60);
-        assert!(
-            run(
-                Command::new("/bin/sh").args(["-c", "exit 0"]),
-                "ok",
-                None,
-                minute,
-                &AtomicBool::new(false)
-            )
-            .is_ok()
-        );
-        let err = run(
-            Command::new("/bin/sh").args(["-c", "echo boom >&2; exit 3"]),
-            "Tool",
-            None,
-            minute,
-            &AtomicBool::new(false),
-        )
-        .unwrap_err();
-        assert_eq!(err.to_string(), "Tool failed: boom");
-        let started = std::time::Instant::now();
-        let err = run(
-            Command::new("/bin/sleep").arg("10"),
-            "sleep",
-            None,
-            minute,
-            &AtomicBool::new(true),
-        )
-        .unwrap_err();
-        assert!(matches!(err, Error::Cancelled));
-        let err = run(
-            Command::new("/bin/sleep").arg("10"),
-            "Sleeping",
-            None,
-            Duration::from_millis(100),
-            &AtomicBool::new(false),
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .starts_with("Sleeping did not finish within 100 ms"),
-            "{err}"
-        );
-        assert!(started.elapsed() < Duration::from_secs(5));
-    }
-
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn unsupported_off_macos() {
+    fn keychain_signing_is_unsupported_off_macos() {
         let Setup { req, dir: _dir } = setup();
         let err = sign_ipa(&req, &AtomicBool::new(false), &|_| {}).unwrap_err();
-        assert!(matches!(err, Error::Unsupported));
+        assert!(matches!(err, Error::Unsupported(_)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn file_signing_is_unsupported_on_macos() {
+        let Setup { req, dir } = setup();
+        let files = SigningDir::new(dir.path().join("signing"));
+        let err = sign_ipa_with_files(&req, &files, &AtomicBool::new(false), &|_| {}).unwrap_err();
+        assert!(matches!(err, Error::Unsupported(_)));
     }
 }

@@ -19,6 +19,8 @@ import type {
   Release,
   Settings,
   SetupCheck,
+  Signing,
+  SigningBackend,
   Source,
   StoreApp,
   Warning,
@@ -56,6 +58,11 @@ export interface MockOptions {
   builds?: "blocked" | "simulated";
   /** The device the mock answers as: an iPhone (default) or an Android phone. */
   device?: Platform;
+  /**
+   * How the imitated Kiwi signs: "keychain" (default, a Mac) or "files" (Linux: uploaded
+   * identity and profiles, which the upload endpoints change).
+   */
+  signing?: SigningBackend;
 }
 
 export interface MockResponse {
@@ -122,7 +129,7 @@ function newerThanInstalled(target: Release, installed: Installed): boolean {
 }
 
 export function createMockApi(clock: () => number = Date.now, options: MockOptions = {}) {
-  const db: MockDb = createDb(clock(), options.device);
+  const db: MockDb = createDb(clock(), options.device, options.signing);
   const vapid = vapidPublicKey();
   const builds = createBuilds(iso(clock()));
   const simulated = options.builds === "simulated";
@@ -978,18 +985,92 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       );
     }
 
-    if (is("GET", "signing") || is("POST", "signing", "rescan")) {
+    const signing = (): Signing => {
       const identity = db.identities[0];
-      const profile = db.profiles[0];
-      return ok({
+      const profile = db.profiles.find((p) => p.usable && p.wildcard);
+      const files = db.signing_backend === "files";
+      return {
+        backend: db.signing_backend,
         identities: db.identities,
         profiles: db.profiles,
         active:
           identity && profile
             ? { identity_sha1: identity.sha1, profile_uuid: profile.uuid, expires_at: iso(Math.min(PROFILE_EXPIRES, CERT_EXPIRES)) }
             : null,
-        error: null,
+        error: !identity
+          ? files
+            ? "No signing identity was uploaded. Export your Apple Development certificate with its private key as a .p12 file and upload it."
+            : "No code signing identity was found in the login keychain. Sign in to Xcode and create an Apple Development certificate."
+          : !profile
+            ? files
+              ? "No usable wildcard provisioning profile was found. Download a profile for the App ID * that includes this certificate from the Apple Developer site and upload it."
+              : "No usable wildcard provisioning profile was found. Open an app project in Xcode with automatic signing once, then rescan."
+            : null,
+      };
+    };
+    const base64 = (field: string, value: unknown): Buffer => {
+      if (typeof value !== "string" || !value.trim() || !/^[A-Za-z0-9+/=\s]+$/.test(value)) {
+        throw new HttpError(400, "bad_request", `${field} must be base64.`);
+      }
+      return Buffer.from(value, "base64");
+    };
+    if (is("GET", "signing") || is("POST", "signing", "rescan")) return ok(signing());
+    if (is("POST", "signing", "identity") || is("DELETE", "signing", "identity")) {
+      if (db.signing_backend !== "files") {
+        throw new HttpError(
+          409,
+          "conflict",
+          "This Kiwi signs with the Mac's login keychain. Add the certificate to the keychain (for example in Xcode) instead of uploading it.",
+        );
+      }
+      if (method === "DELETE") {
+        if (!db.identities.length) throw new HttpError(404, "not_found", "No signing identity was uploaded.");
+        db.identities = [];
+        return ok(signing());
+      }
+      base64("p12", body.p12);
+      // The mock can't open a .p12; the password "wrong" imitates a bad one.
+      if (body.password === "wrong") throw new HttpError(400, "bad_request", "The password is wrong");
+      db.identities = [
+        {
+          sha1: createHash("sha1").update(String(body.p12)).digest("hex").toUpperCase(),
+          name: `Apple Development: Alex Morgan (${TEAM_ID})`,
+          team_id: TEAM_ID,
+          expires_at: iso(CERT_EXPIRES),
+        },
+      ];
+      return ok(signing());
+    }
+    if (is("POST", "signing", "profiles")) {
+      const bytes = base64("profile", body.profile);
+      // The mock can't parse a profile: it adds a usable team wildcard profile per upload.
+      const uuid = createHash("sha256").update(bytes).digest("hex").slice(0, 32).toUpperCase()
+        .replace(/^(.{8})(.{4})(.{4})(.{4})/, "$1-$2-$3-$4-");
+      db.profiles = db.profiles.filter((p) => p.uuid !== uuid);
+      db.profiles.unshift({
+        uuid,
+        name: "iOS Team Provisioning Profile: *",
+        team_id: TEAM_ID,
+        app_id_pattern: `${TEAM_ID}.*`,
+        wildcard: true,
+        development: true,
+        created_at: iso(clock()),
+        expires_at: iso(PROFILE_EXPIRES),
+        devices: 2,
+        entitlements: ["application-identifier", "com.apple.developer.team-identifier", "get-task-allow", "keychain-access-groups"],
+        usable: db.identities.length > 0,
+        reason: db.identities.length > 0 ? null : "No signing identity",
+        uploaded: true,
       });
+      return ok(signing());
+    }
+    if (is("DELETE", "signing", "profiles", undefined)) {
+      const before = db.profiles.length;
+      db.profiles = db.profiles.filter((p) => !(p.uploaded && p.uuid === sub));
+      if (db.profiles.length === before) {
+        throw new HttpError(404, "not_found", "No uploaded provisioning profile has this UUID. Profiles from Xcode can't be removed here.");
+      }
+      return ok(signing());
     }
 
     if (is("GET", "settings")) return ok(db.settings);

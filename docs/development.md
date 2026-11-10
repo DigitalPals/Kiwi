@@ -96,6 +96,12 @@ The demo answers as an iPhone. Add `KIWI_MOCK_DEVICE=android` and it answers as 
 phone: Browse lists Android apps only, and a simulated Android build installs as an APK
 download.
 
+The demo imitates a Kiwi on a Mac, which signs with the keychain. Add
+`KIWI_MOCK_SIGNING=files` and it imitates one on Linux (`Signing.backend: "files"`): the
+identity and profiles are uploads, which the `/api/signing/identity` and
+`/api/signing/profiles` endpoints add and remove (any base64 is accepted; the password
+`wrong` is refused).
+
 ## Running the server locally
 
 ```sh
@@ -105,7 +111,8 @@ cargo run -p kiwi-server -- \
   --public-url http://localhost:5173
 ```
 
-On Linux, signing reports "only available on macOS" and Tailscale lookups fail, but sources,
+On Linux, Kiwi signs with an uploaded identity and profile ([signing-on-linux.md](signing-on-linux.md);
+until then signing reports that none was uploaded) and Tailscale lookups fail, but sources,
 the catalogue, settings and the API work. Every flag is also an environment variable
 (`KIWI_LISTEN`, `KIWI_DATA_DIR`, `KIWI_PUBLIC_URL`, ...; see `kiwi --help`).
 

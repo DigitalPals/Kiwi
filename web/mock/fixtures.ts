@@ -6,6 +6,7 @@ import type {
   Platform,
   Profile,
   Settings,
+  SigningBackend,
   Source,
   StoreApp,
 } from "../src/api/types.ts";
@@ -109,6 +110,7 @@ export interface MockDb {
   attempts: MockAttempt[];
   subscriptions: Set<string>;
   core_devices: CoreDevice[];
+  signing_backend: SigningBackend;
   identities: Identity[];
   profiles: Profile[];
 }
@@ -162,7 +164,7 @@ function rel(version: string, build: string | null, daysAgo: number, now: number
 }
 
 /** `platform`: the device the mock answers as; an Android one starts with nothing installed. */
-export function createDb(now: number, platform: Platform = "ios"): MockDb {
+export function createDb(now: number, platform: Platform = "ios", signing: SigningBackend = "keychain"): MockDb {
   const sources: MockSource[] = [
     {
       id: "ytlite",
@@ -772,6 +774,7 @@ export function createDb(now: number, platform: Platform = "ios"): MockDb {
       entitlements: base,
       usable: true,
       reason: null,
+      uploaded: false,
     },
     {
       uuid: "5e0c7d1a-93b4-4f2e-a8c6-1d2e3f4a5b6c",
@@ -786,6 +789,7 @@ export function createDb(now: number, platform: Platform = "ios"): MockDb {
       entitlements: [...base, "aps-environment", "com.apple.security.application-groups"],
       usable: true,
       reason: null,
+      uploaded: false,
     },
     {
       uuid: "c41f8e2b-6a7d-4b90-9e3c-5f6a7b8c9d0e",
@@ -800,6 +804,7 @@ export function createDb(now: number, platform: Platform = "ios"): MockDb {
       entitlements: base,
       usable: false,
       reason: "Expired on May 1, 2026",
+      uploaded: false,
     },
     {
       uuid: "0b9a8c7d-6e5f-4a3b-2c1d-0e9f8a7b6c5d",
@@ -814,6 +819,7 @@ export function createDb(now: number, platform: Platform = "ios"): MockDb {
       entitlements: base,
       usable: false,
       reason: "Does not include the signing certificate 45ADD89D…",
+      uploaded: false,
     },
   ];
 
@@ -867,6 +873,7 @@ export function createDb(now: number, platform: Platform = "ios"): MockDb {
     attempts: android ? [] : attempts,
     subscriptions: new Set(),
     core_devices,
+    signing_backend: signing,
     identities: [
       {
         sha1: "0123456789ABCDEF0123456789ABCDEF01234567",
@@ -875,6 +882,7 @@ export function createDb(now: number, platform: Platform = "ios"): MockDb {
         expires_at: iso(CERT_EXPIRES),
       },
     ],
-    profiles,
+    // A Kiwi on Linux has only the profiles that were uploaded to it.
+    profiles: signing === "files" ? profiles.map((p) => ({ ...p, uploaded: true })) : profiles,
   };
 }

@@ -42,7 +42,8 @@ usable there, and works in the GUI session, so its child processes can sign dire
 ```
 Cargo.toml              workspace (shared dependency versions in [workspace.dependencies])
 crates/kiwi-source      AltStore source fetching/parsing, release selection, IPA download+validation
-crates/kiwi-signer      provisioning profiles, identities, IPA re-signing with codesign (macOS)
+crates/kiwi-signer      provisioning profiles, identities, IPA re-signing (codesign on macOS,
+                        rcodesign's library elsewhere)
 crates/kiwi-device      devicectl wrapper, Tailscale (LocalAPI or CLI), user-agent parsing
 crates/kiwi-push        VAPID keys + Web Push (RFC 8030/8291/8292) sender
 crates/kiwi-server      axum HTTP server, SQLite state, jobs, scheduler; binary `kiwi`
@@ -56,8 +57,8 @@ docs/                   this file, the HTTP API (api.md) and the guides
 ```
 
 Library crates do not depend on each other; only `kiwi-server` depends on them. All crates
-compile and their platform-neutral tests pass on Linux; macOS-only behaviour (codesign,
-devicectl) is exercised on a Mac.
+compile and their platform-neutral tests pass on Linux, including signing with the files
+backend; macOS-only behaviour (codesign and the keychain, devicectl) is exercised on a Mac.
 
 ## Crates
 
@@ -81,21 +82,43 @@ release), and `ipa_icon` converts their loose Xcode icon (CgBI PNG) into a stand
 server's `linked` module builds their one-app catalog and refreshes it: page first, then a
 `HEAD` request whose ETag, Last-Modified and length are compared with the stored ones.
 
-### kiwi-signer (macOS)
+### kiwi-signer (macOS and Linux backends)
 
-Lists signing identities (`security find-identity` / `find-certificate`), loads and parses
-provisioning profiles in pure Rust (the plist embedded in the CMS envelope: team, App ID
-pattern, devices, entitlements, certificates, expiry, `get-task-allow`), matches a bundle id
-against a profile (exact before wildcard), checks a profile is usable with an identity
-(certificate in profile, team matches, not expired) and re-signs IPAs. A signed bundle id is
-`<original>.<team>` (`com.google.ios.youtube.A1B2C3D4E5`); its URL scheme is `kiwi-` plus 12
-hex characters of its SHA-256.
+Lists signing identities, loads and parses provisioning profiles in pure Rust (the plist
+embedded in the CMS envelope: team, App ID pattern, devices, entitlements, certificates,
+expiry, `get-task-allow`), matches a bundle id against a profile (exact before wildcard),
+checks a profile is usable with an identity (certificate in profile, team matches, not
+expired) and re-signs IPAs. A signed bundle id is `<original>.<team>`
+(`com.google.ios.youtube.A1B2C3D4E5`); its URL scheme is `kiwi-` plus 12 hex characters of
+its SHA-256.
 
-Signing algorithm:
+Two backends sign (`Backend`, `Signing.backend` in the API):
+
+- **`keychain`** (macOS): identities come from the login keychain (`security find-identity`
+  / `find-certificate`); `codesign` signs and verifies and `/usr/bin/zip` packages.
+- **`files`** (every other system): the identity is a `.p12` uploaded to
+  `<data>/signing/identity.p12` with its password in `identity.password` (both 0600, the
+  directory 0700, replaced atomically, never logged or returned; the buffers that held them
+  are zeroed). rcodesign's library ([`apple-codesign`](https://github.com/indygreg/apple-platform-rs),
+  MPL-2.0, default features off, a dependency only on non-macOS targets) signs; Kiwi
+  verifies and packages in Rust. A `.p12` is accepted when it opens with the password (the
+  legacy PKCS#12 encryption Keychain Access exports; an AES-encrypted file from OpenSSL 3
+  is refused with advice how to convert it), holds a certificate whose Extended Key Usage
+  includes code signing, whose subject has a team id (OU) and that has not expired, and the
+  private key (RSA, P-256 or Ed25519) that belongs to it.
+
+Profiles uploaded to `<data>/signing/profiles/<uuid>.mobileprovision` are scanned on every
+host, before Xcode's folders (`~/Library/Developer/Xcode/UserData/Provisioning Profiles`,
+`~/Library/MobileDevice/Provisioning Profiles`). An upload must parse, be an iOS profile
+and not have expired; its UUID (letters, digits, `-`, `_`, `.`) names the file. Only
+uploaded profiles can be deleted through Kiwi.
+
+Signing algorithm (shared; the backends differ only in signing, verifying and packaging):
 
 1. Validate the archive (no absolute paths, no `..`, no symlinks escaping the root,
-   exactly one `Payload/*.app`) then extract preserving symlinks and permissions
-   (with `/usr/bin/ditto -x -k`, after validation).
+   exactly one `Payload/*.app`) then extract it with the zip crate, preserving symlinks
+   and permissions; symlinks are created last and resolved again to catch chains that
+   escape.
 2. Remove `iTunesMetadata.plist`, `META-INF`, `SC_Info`, `UISupportedDevices`; remove
    `Watch/` when `strip_watch`.
 3. Set main `CFBundleIdentifier` to `bundle_id`; for every nested bundle (`PlugIns/*.appex`,
@@ -110,17 +133,35 @@ Signing algorithm:
    `com.apple.developer.team-identifier`, `get-task-allow` from the profile,
    `keychain-access-groups = [TEAM.<id>]`, plus every other entitlement the profile
    grants that the original binary requested (for explicit App IDs, e.g. app groups).
-   Record original entitlements (`codesign -d --entitlements - --xml`, empty when
-   unsigned) and which were dropped.
+   The original entitlements are read from the executable's code signature in pure Rust
+   (the XML entitlements slot, arm64 slice first; empty when unsigned); the requested keys
+   no profile grants are reported as dropped.
 6. Sign inside-out (deepest path first): dylibs and frameworks plain, appex/nested apps
-   with `embedded.mobileprovision` + entitlements, then the main app:
-   `codesign --force --timestamp=none --generate-entitlement-der -s <sha1> [--entitlements f] <path>`.
-7. `codesign --verify --deep --strict` on the main app, then zip `Payload` into
-   `output_ipa` (`/usr/bin/zip -qry`, symlinks preserved).
+   with `embedded.mobileprovision` + entitlements, then the main app. Without a timestamp
+   and with DER entitlements next to the XML ones:
+   - `keychain`: `codesign --force --timestamp=none --generate-entitlement-der -s <sha1>
+     [--entitlements f] <path>`.
+   - `files`: a dylib is signed as a Mach-O. A bundle is sealed like `codesign` seals an
+     iOS bundle: every file except the main executable goes into
+     `_CodeSignature/CodeResources` with Apple's rules for bundles without a `Resources`
+     directory (code signed in an earlier step is sealed as it is, nested code as plain
+     files, other Mach-O files are signed on the way), then the main executable is signed
+     with its bundle id, the entitlements and digests of `Info.plist` and that file. The
+     CMS signature carries the certificate and, for an Apple-issued certificate, Apple's
+     intermediate and root; the code directory carries the team id.
+7. Set directories and executables to 0755 and other files to 0644, verify, then zip
+   `Payload` into `output_ipa` (via `<output>.partial`, symlinks preserved):
+   - `keychain`: `codesign --verify --deep --strict` on the main app; `/usr/bin/zip -qry`.
+   - `files`: for the app and every framework, extension and dylib in it: rcodesign's
+     Mach-O verifier (code and slot digests, CMS signature) on every architecture, the
+     team id, the identifier, the `Info.plist` and `CodeResources` digests, every sealed
+     file's SHA-256 and symlink target, and no file left unsealed (Apple's omissions
+     aside); then the zip crate (Deflate, Unix modes, symlinks as links).
 
 Signing reports its steps (extracting, preparing, signing n of m, verifying, packaging), can be
-cancelled, and returns the new bundle ids, the profiles used, the expiry, and the original and
-dropped entitlements (shown on an app's page before it is installed).
+cancelled (between items; `codesign` and `zip` are killed), and returns the new bundle ids,
+the profiles used, the expiry, and the original and dropped entitlements (shown on an app's
+page before it is installed).
 
 ### kiwi-device
 
@@ -166,6 +207,8 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
 - SQLite (`rusqlite`, bundled) at `<data>/kiwi.db`, migrations embedded and versioned.
 - Data layout: `downloads/<sha256>.ipa` (content addressed), `builds/<build_id>/<Name>.ipa`,
   `work/` (temporary, cleared at start), `icons/<sha256(url)>.png`, `vapid.json` (0600),
+  `signing/` (0700: `identity.p12` and `identity.password`, 0600, on `files` hosts;
+  uploaded `profiles/<uuid>.mobileprovision` on every host),
   `automation/` (Kiwi Builds), `kiwi.lock`.
 - At start Kiwi takes an exclusive lock on `<data>/kiwi.lock` before any startup cleanup
   (clearing `work/`, failing interrupted builds); a second instance exits with an error

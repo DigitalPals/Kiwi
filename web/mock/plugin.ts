@@ -53,8 +53,14 @@ export function mockApi(): Plugin {
       const builds = process.env.KIWI_MOCK_BUILDS === "simulate" ? "simulated" : "blocked";
       // KIWI_MOCK_DEVICE=android answers as an Android phone instead of an iPhone.
       const device = process.env.KIWI_MOCK_DEVICE === "android" ? "android" : "ios";
-      api = createMockApi(Date.now, { builds, device });
-      const notes = [builds === "simulated" && "simulated Kiwi Builds", device === "android" && "Android device"].filter(Boolean);
+      // KIWI_MOCK_SIGNING=files imitates a Kiwi on Linux: uploaded identity and profiles.
+      const signing = process.env.KIWI_MOCK_SIGNING === "files" ? "files" : "keychain";
+      api = createMockApi(Date.now, { builds, device, signing });
+      const notes = [
+        builds === "simulated" && "simulated Kiwi Builds",
+        device === "android" && "Android device",
+        signing === "files" && "signing with uploaded files",
+      ].filter(Boolean);
       server.config.logger.info(`  Kiwi mock API enabled (VITE_MOCK=1${notes.map((n) => `, ${n}`).join("")})`);
       server.middlewares.use((req, res, next) => {
         const url = new URL(req.url ?? "/", "http://localhost");

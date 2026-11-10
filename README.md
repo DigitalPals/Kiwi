@@ -51,7 +51,8 @@ can only be reached from your own tailnet.
 - **App Store originals.** Patched apps show the App Store app they're based on and warn you
   when the App Store is ahead.
 - **Kiwi Builds (optional, off by default).** Build patched YouTube, YouTube Music, Twitch,
-  X and Reddit apps on your Mac from pinned open-source tweaks, on a schedule.
+  X and Reddit apps on your Mac from pinned open-source tweaks, on a schedule. It can also
+  build patched YouTube, YouTube Music and Reddit for your Android devices.
 - **Private by design.** Kiwi listens on `127.0.0.1` only. `tailscale serve` publishes it to
   your tailnet over HTTPS, never to the internet, and only your own Tailscale user can use it.
 
@@ -235,7 +236,8 @@ or change anything.
 
 **Does Kiwi send my apps or data anywhere?** No. Kiwi talks to the sources you add, Apple
 (App Store versions) and the Web Push service of your devices. Everything else stays on
-your Mac.
+your Mac. Kiwi Builds, when you turn it on, also downloads the apps, tweaks and tools it
+builds from; [its guide](docs/kiwi-builds.md) names each service.
 
 ## Disclaimer
 

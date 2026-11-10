@@ -560,6 +560,23 @@ impl FakeDevices {
     }
 }
 
+impl FakeDevices {
+    /// Adds the owner's Android phone at `ip`.
+    pub fn add_android(&self, ip: &str) {
+        self.peers.lock().unwrap().insert(
+            ip.parse().unwrap(),
+            TailscalePeer {
+                stable_id: "nANDROID1CNTRL".into(),
+                name: "pixel-9a".into(),
+                dns_name: "pixel-9a.example.ts.net".into(),
+                os: Some("android".into()),
+                user_login: Some("alex@example.com".into()),
+                user_name: None,
+            },
+        );
+    }
+}
+
 impl DeviceTools for FakeDevices {
     fn whois(&self, ip: IpAddr) -> BoxFuture<'_, Result<Option<TailscalePeer>, String>> {
         self.whois_calls.fetch_add(1, Ordering::SeqCst);
@@ -782,6 +799,17 @@ impl TestKiwi {
     pub fn device(&self, ip: &str) -> Api {
         Api {
             forwarded_for: Some(ip.into()),
+            ..self.phone()
+        }
+    }
+
+    /// The owner's Android phone (see [`FakeDevices::add_android`]), in Chrome.
+    pub fn android(&self, ip: &str) -> Api {
+        Api {
+            forwarded_for: Some(ip.into()),
+            user_agent: Some(
+                "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36".into(),
+            ),
             ..self.phone()
         }
     }

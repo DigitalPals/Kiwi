@@ -51,8 +51,11 @@ export function mockApi(): Plugin {
     configureServer(server) {
       // KIWI_MOCK_BUILDS=simulate runs Kiwi Builds through the Mac's stages instead of stopping at setup.
       const builds = process.env.KIWI_MOCK_BUILDS === "simulate" ? "simulated" : "blocked";
-      api = createMockApi(Date.now, { builds });
-      server.config.logger.info(`  Kiwi mock API enabled (VITE_MOCK=1${builds === "simulated" ? ", simulated Kiwi Builds" : ""})`);
+      // KIWI_MOCK_DEVICE=android answers as an Android phone instead of an iPhone.
+      const device = process.env.KIWI_MOCK_DEVICE === "android" ? "android" : "ios";
+      api = createMockApi(Date.now, { builds, device });
+      const notes = [builds === "simulated" && "simulated Kiwi Builds", device === "android" && "Android device"].filter(Boolean);
+      server.config.logger.info(`  Kiwi mock API enabled (VITE_MOCK=1${notes.map((n) => `, ${n}`).join("")})`);
       server.middlewares.use((req, res, next) => {
         const url = new URL(req.url ?? "/", "http://localhost");
         // POST {"bundle_id", "version"}: the App Store releases a new version, for Kiwi Builds to update to.

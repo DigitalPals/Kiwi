@@ -36,9 +36,11 @@ RFC 3339 strings in UTC. All `/api` responses are `application/json` with
 ## Kiwi Builds (automation)
 
 Kiwi patches and signs App Store apps on the Mac from the recipes in
-`automation/recipes.json`: `youtube`, `youtube-music`, `twitch`, `x` and `reddit`. `:app` below is one
-of those ids; an unknown id returns 404. Responses contain no credentials, models, raw
-Apple responses, file paths or private logs.
+`automation/recipes.json`: `youtube`, `youtube-music`, `twitch`, `x` and `reddit`. It
+patches Android apps from the recipes in `automation/android.json`: `android-youtube`,
+`android-youtube-music` and `android-reddit`. `:app` below is one of those ids; an unknown
+id returns 404. Responses contain no credentials, signing keys, models, raw Apple or
+Google responses, file paths or private logs.
 
 Kiwi Builds is off until the owner turns it on (`Settings.kiwi_builds`). While it is off,
 every `/api/automation` endpoint answers `409 builds_off` and nothing is built; turning it
@@ -50,7 +52,8 @@ newest 3 `jobs`) in display order, and the shared Mac setup `checks` (`{name,rea
 
 `GET /api/automation/:app` returns one app's state with up to 30 `jobs`, newest first:
 
-- From the recipe: `id`, `name`, `bundle_id`, `icon_url` (App Store artwork or null),
+- From the recipe: `id`, `platform` (`"ios"` or `"android"`), `name`, `bundle_id` (for
+  Android the package the patched app installs as), `icon_url` (App Store artwork or null),
   `tweak` (name and version, e.g. `"NeoFreeBird 7.3.0"`), `summary`, `experimental`,
   `warning` (null or a risk notice to show before adding), `names` (Home Screen names to
   choose from, empty when there is no choice), `app_version` (the App Store version the
@@ -69,7 +72,8 @@ newest 3 `jobs`) in display order, and the shared Mac setup `checks` (`{name,rea
 - `configuration_changed`: true when saved patch choices or the app name differ from the
   published build. Schedule changes alone never require rebuilding.
 - `next_check_at`: scheduled UTC time, or null when not added, disabled or a job is active.
-- `checks`: the shared Mac setup checks.
+- `checks`: the shared Mac setup checks. They concern iOS builds only: an Android job
+  never changes them and is never blocked by them.
 
 Preferences, for `PATCH /api/automation/:app` (replaces them) and `POST .../add`:
 
@@ -98,10 +102,14 @@ job has `id`, `app`, `sequence`, `stage`, `created_at`, nullable `finished_at`, 
 `external_id`, `recipe_key`, `signed_build_id`, a bounded user-facing `error`, and the
 `preferences` it was started with; changing preferences never changes a queued or running
 job. Poll while `finished_at` is null. A `ready` job has passed package and signing checks;
-it does not imply a test on a physical device.
+it does not imply a test on a physical device. An Android job's `external_id` is the
+original app's version code. Its runner signs the app itself, so `signed_build_id` names
+the build Kiwi creates, already `ready`, when it publishes the app, and the job ends at
+stage "Available in Kiwi".
 
 Published builds use source `kiwi-youtube` (its id predates the other apps) with each
-app's original bundle id, and the usual app/prepare/install APIs. Its source URL is an
+app's original bundle id (an Android app's `bundle_id` is its patched package), and the
+usual app/prepare/install APIs. Its source URL is an
 internal identifier; refreshing it returns the saved local catalogue without fetching the
 network. Raw artifacts and provenance files have no HTTP download route. See
 [kiwi-builds.md](kiwi-builds.md) for Mac setup and operational details.
@@ -130,9 +138,10 @@ interface Device {
   name: string;                     // user-editable; defaults to Tailscale name
   kind: "tailscale" | "browser";
   tailscale_name: string | null;    // "iphone194"
-  os_version: string | null;        // "27.0.1"
-  os_version_source: "devicectl" | "installer" | "manual" | "safari" | null;
-  model: string | null;             // "iPhone19,4"
+  platform: "ios" | "android";      // what the device installs (see "Android devices")
+  os_version: string | null;        // "27.0.1"; Android: "15", or null (Chrome doesn't tell)
+  os_version_source: "devicectl" | "installer" | "manual" | "safari" | "android" | null;
+  model: string | null;             // "iPhone19,4"; "Android" for an Android device
   devicectl: LinkedCoreDevice | null;
   last_seen: Timestamp;
 }
@@ -234,7 +243,8 @@ interface AppState {
   installed: Installed | null;      // this app's install (same source_id and bundle_id)
   target: Release | null;           // release that Get/Update would install
   build: Build | null;              // build of the target release, if any
-  install_url: string | null;       // itms-services URL when a ready build exists for target
+  install_url: string | null;       // when a ready build exists for target: an itms-services
+                                    // URL, or for an Android app the https URL of its APK
   open_url: string | null;          // "kiwi-xxxxxxxxxxxx://" when installed with Kiwi's scheme
   replaces: Replaces | null;        // installing this app replaces another source's app
 }
@@ -256,6 +266,7 @@ interface AppSummary {
   source_id: string;
   source_name: string;
   bundle_id: string;                // original bundle id from the source
+  platform: "ios" | "android";      // "android": an APK, installed as the package `bundle_id`
   name: string;
   developer: string | null;
   subtitle: string | null;
@@ -306,7 +317,7 @@ interface AppDetail extends AppSummary {
   releases: Release[];              // newest first
   permissions: { entitlements: string[]; privacy: { key: string; description: string }[] };
   dropped_entitlements: string[];   // requested entitlements the current profile cannot grant
-  signed_bundle_id: string;         // what Kiwi will install it as
+  signed_bundle_id: string;         // what Kiwi will install it as (Android: `bundle_id`)
   source_url: string;
   original_match: "bundle_id" | "linked" | "not_found" | "none" | "pending";
                                     // how `original` was found: same bundle id, chosen by hand, no
@@ -327,8 +338,8 @@ interface Build {
   progress: number | null;          // 0..1 when known
   error: string | null;
   signed_bundle_id: string;
-  size: number | null;              // signed IPA bytes
-  expires_at: Timestamp | null;
+  size: number | null;              // signed IPA (or APK) bytes
+  expires_at: Timestamp | null;     // null for an Android build: nothing expires
   dropped_entitlements: string[];
   created_at: Timestamp;
   finished_at: Timestamp | null;
@@ -384,7 +395,7 @@ interface Settings {
 | DELETE | `/api/sources/:id` | | `204` (keeps installs; their apps become orphaned) |
 | POST | `/api/sources/:id/refresh` | | `Source` (after the refresh; may download an `ipa` source's new IPA) |
 | POST | `/api/sources/refresh` | | `Source[]` (refreshes all enabled) |
-| GET | `/api/apps?q=&source=&hidden=` | | `AppSummary[]` (enabled sources, sorted by name; apps hidden from Browse only with `hidden=1`) |
+| GET | `/api/apps?q=&source=&hidden=` | | `AppSummary[]` (enabled sources, sorted by name; apps hidden from Browse only with `hidden=1`, which also lists the apps made for the other platform) |
 | GET | `/api/apps/:source_id/:bundle_id` | | `AppDetail` |
 | PATCH | `/api/apps/:source_id/:bundle_id` | `{ hidden?: boolean, original?: { bundle_id: string \| null } \| null }` | `AppDetail`. `hidden` hides or shows it in Browse. `original`: `null` matches by bundle id again, `{ "bundle_id": null }` means not based on an App Store app, otherwise that App Store app (looked up unless cached; `400` when the storefront has no such app) |
 | GET | `/api/store/search?term=` | | `StoreApp[]` (iOS apps in the storefront, at most 15; cached so one can be linked) |
@@ -412,9 +423,36 @@ OTA (no `/api` prefix, no cookies, token-authorized; see architecture.md):
 | GET | `/ota/:token/manifest.plist` | XML plist manifest |
 | GET, HEAD | `/ota/:token/app.ipa` | signed IPA, `Range` supported; the install is recorded when a full GET has written the last byte, or when the ranges served for the token cover the whole file |
 | GET | `/ota/:token/icon.png` | app icon or 404 |
+| GET, HEAD | `/ota/:token/app.apk` | an Android build's APK (`application/vnd.android.package-archive`, `Content-Disposition: attachment; filename="<Name>-<version>.apk"`), `Range` supported; the install is recorded as for `app.ipa` |
 
 `install_url` = `itms-services://?action=download-manifest&url=` + percent-encoded
-`<public_url>/ota/<token>/manifest.plist`.
+`<public_url>/ota/<token>/manifest.plist`. For an Android build it is
+`<public_url>/ota/<token>/app.apk`: the browser downloads the file and Android's installer
+opens it. A token serves the file of its own kind only: `manifest.plist` and `app.ipa`
+answer 404 for an Android build, `app.apk` for an iOS one.
+
+## Android devices
+
+A device is an Android one (`platform: "android"`, `model: "Android"`) when, having no
+model recorded yet, it is reported as Android by Tailscale or sends an Android browser's
+User-Agent; an iPhone never turns into one. For such a device:
+
+- Releases are compared with platform `android`. Kiwi Builds' Android releases name the
+  platform `Android` and declare no `min_os`, so they are offered whatever version the
+  browser reports. Releases that name no platform are iOS ones.
+- `GET /api/apps` leaves out apps none of whose releases run on the device's platform
+  (and for an iPhone, the Android apps). They can still be opened: every release is then
+  `compatible: false` with `incompatibility` (and the app's `unavailable`)
+  `"Made for iPhone and iPad"` on Android, `"Made for Android devices"` elsewhere.
+- An Android app needs no signing. Its build is `ready` from the moment Kiwi Builds
+  publishes it, so the app's action is `install` with the APK as `install_url`, and
+  `POST .../prepare` answers at once with that `Build` (`expires_at: null`, no
+  `dropped_entitlements`). A completed download records the install:
+  `Installed.expires_at` is null and `AppState.open_url` is null, since Kiwi cannot open
+  or see apps on Android.
+- `Me.warnings` omits the signing warnings (`no_identity`, `no_profile`, `expiring`) and
+  `unknown_os`.
+- Android apps have no App Store original (`original: null`, `original_match: "none"`).
 
 Static: every other GET path serves `web/dist`; unknown paths without a file extension
 fall back to `index.html`. `/sw.js` and `/index.html` use `Cache-Control: no-cache`;

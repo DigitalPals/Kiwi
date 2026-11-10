@@ -1,7 +1,7 @@
 import type { ComponentChildren } from "preact";
 import { useCallback, useEffect, useState } from "preact/hooks";
 import { ApiError, api } from "../api/client";
-import type { AppDetail, AppPatch, AppState, AppSummary, Release, StoreApp } from "../api/types";
+import type { AppDetail, AppPatch, AppState, AppSummary, Platform, Release, StoreApp } from "../api/types";
 import { ActionButton, ReinstallButton, VersionButton } from "../components/ActionButton";
 import { AppIcon } from "../components/AppIcon";
 import { Icon } from "../components/Icon";
@@ -9,6 +9,7 @@ import { Empty, ErrorState, ExpandableText, LinkCell, Loading, Spinner, VersionC
 import { canReinstall, replacesLabel, versionChange, type ButtonView } from "../lib/action";
 import { BUILD_SOURCE_ID } from "../lib/automation";
 import {
+  deviceName,
   expiryInfo,
   formatBytes,
   formatDate,
@@ -16,6 +17,7 @@ import {
   formatRelative,
   formatRemaining,
   formatVersion,
+  osName,
   osRequirement,
   privacyLabel,
   splitBytes,
@@ -100,7 +102,7 @@ function AppMenu(props: {
               >
                 <span>
                   Reinstall
-                  <span class="menu-sub">If it's no longer on this iPhone</span>
+                  <span class="menu-sub">If it's no longer on this {deviceName(app.platform)}</span>
                 </span>
                 <Icon name="refresh" size={19} />
               </button>
@@ -109,21 +111,24 @@ function AppMenu(props: {
               <span>{app.hidden ? "Show in Browse" : "Hide from Browse"}</span>
               <Icon name={app.hidden ? "eye" : "eyeOff"} size={19} />
             </button>
-            <button
-              type="button"
-              role="menuitem"
-              class="menu-item"
-              onClick={() => {
-                setOpen(false);
-                props.onLink();
-              }}
-            >
-              <span>
-                Change Original App…
-                <span class="menu-sub">{originalLabel(app)}</span>
-              </span>
-              <Icon name="link" size={19} />
-            </button>
+            {/* Only iPhone apps are compared with the App Store. */}
+            {app.platform !== "android" && (
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                onClick={() => {
+                  setOpen(false);
+                  props.onLink();
+                }}
+              >
+                <span>
+                  Change Original App…
+                  <span class="menu-sub">{originalLabel(app)}</span>
+                </span>
+                <Icon name="link" size={19} />
+              </button>
+            )}
           </div>
         </>
       )}
@@ -235,7 +240,8 @@ function LinkSheet(props: { app: AppDetail; onChange: (app: AppDetail) => void; 
 }
 
 /** Step and error details that do not fit under the pill. */
-function ActionStatus({ view }: { view: ButtonView }) {
+function ActionStatus({ view, platform }: { view: ButtonView; platform: Platform }) {
+  const android = platform === "android";
   if (view.kind === "progress") {
     const percent = formatPercent(view.progress);
     return (
@@ -249,28 +255,31 @@ function ActionStatus({ view }: { view: ButtonView }) {
     return <p class="action-status danger">{view.caption}</p>;
   }
   if (view.kind === "installing") {
+    if (android) return <p class="action-status">Open the downloaded file and choose Install. Android may first ask you to allow installs from your browser.</p>;
     return <p class="action-status">Follow the prompt on your iPhone. Kiwi updates when the install finishes.</p>;
   }
   if (view.kind === "link") {
     if (view.caption === "Re-sign") return <p class="action-status">Re-signed build with a later expiry date.</p>;
+    if (android) return <p class="action-status">Ready. Tap {view.label} to download the app, then open the file to install it.</p>;
     return <p class="action-status">Ready. Tap {view.label} and confirm on your iPhone.</p>;
   }
   if (view.kind === "disabled" && view.caption) return <p class="action-status">{view.caption}</p>;
   return null;
 }
 
-function requirement(release: Release | null): [string, string] {
+function requirement(release: Release | null, platform: Platform): [string, string] {
   if (!release) return ["—", ""];
+  const os = osName(platform);
   const { min_os: min, max_os: max } = release;
-  if (min && max) return [`iOS ${min}`, `to ${max}`];
-  if (min) return [`iOS ${min}`, "or later"];
-  if (max) return [`iOS ${max}`, "or earlier"];
-  return ["Any", "iOS version"];
+  if (min && max) return [`${os} ${min}`, `to ${max}`];
+  if (min) return [`${os} ${min}`, "or later"];
+  if (max) return [`${os} ${max}`, "or earlier"];
+  return platform === "android" ? [os, "phone or tablet"] : ["Any", "iOS version"];
 }
 
 function InfoStrip({ app, release }: { app: AppDetail; release: Release | null }) {
   const [size, unit] = splitBytes(release?.size ?? app.state.build?.size ?? null);
-  const [os, osSub] = requirement(release);
+  const [os, osSub] = requirement(release, app.platform);
   const expiresAt = app.state.installed?.expires_at;
   const expiry = expiryInfo(expiresAt);
   const original = app.original;
@@ -429,7 +438,7 @@ function InstalledCard({ app }: { app: AppDetail }) {
           <div class="cell-main cell-label">Installed by</div>
           <div class="cell-value">
             {installed.origin === "kiwi" ? "Kiwi" : "Another tool"}
-            {installed.verified && " · seen on iPhone"}
+            {installed.verified && ` · seen on ${deviceName(app.platform)}`}
           </div>
         </div>
       </div>
@@ -467,7 +476,7 @@ function Releases({ app, onState }: { app: AppDetail; onState: (app: AppSummary,
               <div>
                 <div class="release-version">{formatVersion(release)}</div>
                 <div class="release-meta">
-                  {[release.date && formatDate(release.date), release.size && formatBytes(release.size), osRequirement(release)]
+                  {[release.date && formatDate(release.date), release.size && formatBytes(release.size), osRequirement(release, app.platform)]
                     .filter(Boolean)
                     .join(" · ")}
                 </div>
@@ -503,6 +512,7 @@ function Details(props: {
     : app.dropped_entitlements;
   const replaces = replacesLabel(app.state);
   const change = versionChange(app.state);
+  const android = app.platform === "android";
 
   return (
     <article class="detail">
@@ -525,7 +535,7 @@ function Details(props: {
             render={(view, button) => (
               <div>
                 <div class="detail-action">{button}</div>
-                <ActionStatus view={view} />
+                <ActionStatus view={view} platform={app.platform} />
                 <p class="action-status">
                   <button type="button" class="text-button small" onClick={onReinstallEnd}>
                     Cancel Reinstall
@@ -547,7 +557,7 @@ function Details(props: {
                   {change && <VersionChange from={change.from} to={change.to} large />}
                 </div>
                 {/* Why it is unavailable shows once, below. */}
-                {!(view.kind === "disabled" && view.caption === app.unavailable) && <ActionStatus view={view} />}
+                {!(view.kind === "disabled" && view.caption === app.unavailable) && <ActionStatus view={view} platform={app.platform} />}
                 {replaces && <p class="action-status">{replaces}</p>}
                 {app.unavailable && <p class="action-status warn">{app.unavailable}</p>}
               </div>
@@ -650,13 +660,13 @@ function Details(props: {
             </div>
           )}
           <div class="cell">
-            <div class="cell-main cell-label">Bundle ID</div>
+            <div class="cell-main cell-label">{android ? "Package" : "Bundle ID"}</div>
             <div class="cell-value mono">{app.bundle_id}</div>
           </div>
           {target && (
             <div class="cell">
               <div class="cell-main cell-label">Compatibility</div>
-              <div class="cell-value">{target.compatible ? osRequirement(target) : (target.incompatibility ?? "Incompatible")}</div>
+              <div class="cell-value">{target.compatible ? osRequirement(target, app.platform) : (target.incompatibility ?? "Incompatible")}</div>
             </div>
           )}
           {dropped.length > 0 && (
@@ -686,10 +696,16 @@ function Details(props: {
             </details>
           )}
         </div>
-        <p class="section-footer">
-          Kiwi will install this app as <span class="mono">{app.signed_bundle_id}</span>, so it can live alongside the
-          App Store version.
-        </p>
+        {android ? (
+          <p class="section-footer">
+            Signed with this Kiwi's own key. Android installs updates over it only when they carry the same signature.
+          </p>
+        ) : (
+          <p class="section-footer">
+            Kiwi will install this app as <span class="mono">{app.signed_bundle_id}</span>, so it can live alongside the
+            App Store version.
+          </p>
+        )}
       </section>
     </article>
   );

@@ -267,6 +267,10 @@ pub async fn refresh(kiwi: &Kiwi) -> Result<usize, String> {
     let mut due = Vec::new();
     for app in kiwi.catalog.apps(None, None) {
         let a = app.app();
+        // Android packages are not App Store bundle ids.
+        if crate::builds::android_app(a) {
+            continue;
+        }
         let choice = prefs
             .get(&(app.source.id.clone(), a.bundle_id.clone()))
             .map_or(&auto, |p| &p.original);
@@ -279,9 +283,9 @@ pub async fn refresh(kiwi: &Kiwi) -> Result<usize, String> {
     }
     // Kiwi Builds shows apps it can build before they are in any catalogue.
     for recipe in crate::automation::recipes() {
-        let id = &recipe.bundle_id;
-        if seen.insert(id.clone()) && cached.get(id).is_none_or(|r| stale(r, now)) {
-            due.push(id.clone());
+        let id = recipe.icon_id();
+        if seen.insert(id.to_owned()) && cached.get(id).is_none_or(|r| stale(r, now)) {
+            due.push(id.to_owned());
         }
     }
     if due.is_empty() {

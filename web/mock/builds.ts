@@ -21,8 +21,11 @@ export interface RecipeCatalog {
 
 interface Recipe {
   id: string;
+  platform?: "android";
   name: string;
   bundle_id: string;
+  /** Android apps borrow the icon of this App Store app. */
+  icon_bundle_id?: string;
   tweak: string;
   summary: string;
   experimental?: boolean;
@@ -37,8 +40,16 @@ interface Recipe {
   packages: RecipePackage[];
 }
 
-/** The server's own recipes, so the mock offers the same apps and options. */
-const recipes: Recipe[] = JSON.parse(readFileSync(new URL("../../automation/recipes.json", import.meta.url), "utf8")).apps;
+/** The server's own recipes, iPhone apps first, so the mock offers the same apps and options. */
+const recipes: Recipe[] = ["recipes.json", "android.json"].flatMap(
+  (file) => JSON.parse(readFileSync(new URL(`../../automation/${file}`, import.meta.url), "utf8")).apps as Recipe[],
+);
+
+/** The App Store app whose icon a build shows. */
+export const iconBundleId = (id: string): string => {
+  const recipe = recipes.find((r) => r.id === id)!;
+  return recipe.icon_bundle_id ?? recipe.bundle_id;
+};
 
 const features = (packages: RecipePackage[]): BuildFeature[] =>
   packages.flatMap((p) => (p.name ? [{ id: p.id, name: p.name, description: p.description ?? "" }] : []));
@@ -57,7 +68,7 @@ export function defaultPreferences(app: AutomationState): AutomationPreferences 
 export function createBuilds(now: string): AutomationState[] {
   return recipes.map((r) => {
     const app: AutomationState = {
-      id: r.id, name: r.name, bundle_id: r.bundle_id, icon_url: null, tweak: r.tweak, summary: r.summary,
+      id: r.id, platform: r.platform ?? "ios", name: r.name, bundle_id: r.bundle_id, icon_url: null, tweak: r.tweak, summary: r.summary,
       experimental: !!r.experimental, warning: r.warning ?? null, names: r.names ?? [], app_version: r.app_version ?? null,
       limitations: r.limitations,
       included: features(r.packages.filter((p) => !p.optional)),
@@ -82,6 +93,15 @@ export function catalogOf(id: string, name?: string): RecipeCatalog & { retain: 
 
 /** The stages the Mac reports while it builds an app, in the runner's order (cached sources). */
 export function buildStages(app: AutomationState): string[] {
+  if (app.platform === "android") {
+    return [
+      "Fetching the pinned Java runtime",
+      `Fetching ${app.tweak}`,
+      `Downloading original ${app.name}`,
+      `Patching ${app.name}`,
+      "Validating the patched app",
+    ];
+  }
   return [
     "Checking build setup",
     "Checking the App Store",

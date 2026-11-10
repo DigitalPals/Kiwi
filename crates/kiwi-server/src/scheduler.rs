@@ -410,7 +410,7 @@ pub async fn process_updates(kiwi: &Arc<Kiwi>, settings: &Settings) -> ApiResult
                     continue;
                 };
                 let release = &a.releases[target];
-                let signed = view.signed_id(&a.bundle_id);
+                let signed = view.signed_id(a);
                 let update = Update {
                     device_id: &device.id,
                     signed_bundle_id: &signed,

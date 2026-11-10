@@ -1,7 +1,8 @@
-//! Durable builds of patched App Store apps from the recipes in automation/recipes.json. One
-//! worker builds one app at a time; other apps' jobs wait in a queue. The runner never
-//! receives credentials over HTTP. Candidates enter the catalogue only after Kiwi's normal
-//! signer has verified them.
+//! Durable builds of patched apps: App Store apps from the recipes in
+//! automation/recipes.json, Android apps from those in automation/android.json. One worker
+//! builds one app at a time; other apps' jobs wait in a queue. The runners never receive
+//! credentials over HTTP. iOS candidates enter the catalogue only after Kiwi's normal
+//! signer has verified them; an Android runner verifies and signs its own.
 use std::{
     collections::{BTreeMap, HashSet},
     io::Read,
@@ -32,6 +33,9 @@ const META: &str = "automation_v2";
 const LEGACY_META: &str = "youtube_automation_v1";
 const RECIPES: &str = include_str!("../../../automation/recipes.json");
 const RUNNER: &str = include_str!("../../../automation/runner.py");
+const ANDROID_RECIPES: &str = include_str!("../../../automation/android.json");
+const ANDROID_RUNNER: &str = include_str!("../../../automation/android.py");
+const APK_READER: &str = include_str!("../../../automation/apk.py");
 
 mod view;
 pub use view::{AppView, Overview, app_view, overview};
@@ -41,12 +45,28 @@ struct Recipes {
     apps: Vec<Recipe>,
 }
 
+/// What a recipe's app runs on, and so which runner builds it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    #[default]
+    Ios,
+    Android,
+}
+
 /// The parts of an app recipe the server uses; the runner reads the rest.
 #[derive(Debug, Deserialize)]
 pub struct Recipe {
     pub id: String,
+    #[serde(default)]
+    pub platform: Platform,
     pub name: String,
+    /// The id the app has in Kiwi. For an Android app it is the package the patched app
+    /// installs as, which can differ from the package it was downloaded as.
     pub bundle_id: String,
+    /// The App Store app whose icon stands for this app, when `bundle_id` is not one.
+    #[serde(default)]
+    pub icon_bundle_id: Option<String>,
     pub tweak: String,
     pub summary: String,
     #[serde(default)]
@@ -97,8 +117,17 @@ pub struct Limitation {
     pub detail: String,
 }
 
-static PARSED: LazyLock<Recipes> =
-    LazyLock::new(|| serde_json::from_str(RECIPES).expect("valid embedded recipes"));
+static PARSED: LazyLock<Recipes> = LazyLock::new(|| {
+    let mut recipes: Recipes = serde_json::from_str(RECIPES).expect("valid embedded recipes");
+    let android: Recipes =
+        serde_json::from_str(ANDROID_RECIPES).expect("valid embedded Android recipes");
+    assert!(
+        android.apps.iter().all(|r| r.platform == Platform::Android),
+        "android.json holds Android recipes only"
+    );
+    recipes.apps.extend(android.apps);
+    recipes
+});
 
 /// Every app Kiwi can build, in display order.
 pub fn recipes() -> &'static [Recipe] {
@@ -113,6 +142,15 @@ pub fn recipe(id: &str) -> ApiResult<&'static Recipe> {
 }
 
 impl Recipe {
+    pub fn android(&self) -> bool {
+        self.platform == Platform::Android
+    }
+
+    /// The bundle id Kiwi's App Store cache has this app's icon under.
+    pub fn icon_id(&self) -> &str {
+        self.icon_bundle_id.as_deref().unwrap_or(&self.bundle_id)
+    }
+
     fn optional(&self) -> impl Iterator<Item = &Package> {
         self.packages.iter().filter(|p| p.optional)
     }
@@ -287,6 +325,8 @@ pub struct Automation {
     running: Mutex<Option<(String, CancellationToken)>>,
     /// Injectable runner for integration tests. Only local code can set this path.
     pub runner: RwLock<PathBuf>,
+    /// The runner of Android recipes; injectable like `runner`.
+    pub android_runner: RwLock<PathBuf>,
 }
 impl Automation {
     pub fn load(db: &Db, data: &std::path::Path) -> Result<Self, String> {
@@ -333,7 +373,13 @@ impl Automation {
         .map_err(|e| e.to_string())?;
         let root = data.join("automation");
         std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-        for (name, text) in [("runner.py", RUNNER), ("recipes.json", RECIPES)] {
+        for (name, text) in [
+            ("runner.py", RUNNER),
+            ("recipes.json", RECIPES),
+            ("android.py", ANDROID_RUNNER),
+            ("apk.py", APK_READER),
+            ("android.json", ANDROID_RECIPES),
+        ] {
             let path = root.join(name);
             if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
                 let temporary = root.join(format!("{name}.new"));
@@ -350,6 +396,7 @@ impl Automation {
             state: Mutex::new(state),
             running: Mutex::new(None),
             runner: RwLock::new(root.join("runner.py")),
+            android_runner: RwLock::new(root.join("android.py")),
         })
     }
     pub fn snapshot(&self) -> State {
@@ -598,6 +645,9 @@ async fn work(kiwi: Arc<Kiwi>, job: Job, token: CancellationToken) {
         Err(e) => Err(failed(e)),
     };
     let (status, stage, error) = match result {
+        Ok(true) if recipe(&job.app).is_ok_and(Recipe::android) => {
+            ("ready", "Available in Kiwi", None)
+        }
         Ok(true) => ("ready", "Signed and available in Kiwi", None),
         Ok(false) => ("unchanged", "Already up to date", None),
         Err((_, _)) if token.is_cancelled() => (
@@ -695,7 +745,14 @@ async fn runner(
     tokio::fs::write(&path, serde_json::to_vec(request).map_err(failed)?)
         .await
         .map_err(failed)?;
-    let program = kiwi.automation.runner.read().unwrap().clone();
+    let program = if recipe(&job.app).is_ok_and(Recipe::android) {
+        &kiwi.automation.android_runner
+    } else {
+        &kiwi.automation.runner
+    }
+    .read()
+    .unwrap()
+    .clone();
     // Apple's /usr/bin/python3 is 3.9; the builder uses Python 3.13 from setup.
     let python = if cfg!(target_os = "macos") {
         "/opt/homebrew/bin/python3.13"
@@ -843,7 +900,7 @@ async fn execute(
         .ok_or_else(|| failed(format!("Missing {} version", recipe.name)))?;
     let external = plan["external_id"]
         .as_str()
-        .ok_or_else(|| failed("Missing Apple build identifier"))?;
+        .ok_or_else(|| failed("Missing store build identifier"))?;
     kiwi.automation
         .job(&kiwi.db, id, |j| {
             j.version = Some(version.into());
@@ -877,7 +934,7 @@ async fn execute(
     let artifact = events
         .iter()
         .find(|e| e["event"] == "artifact")
-        .ok_or_else(|| failed("The builder returned no patched IPA"))?;
+        .ok_or_else(|| failed("The builder returned no patched app"))?;
     let release = validate_artifact(kiwi, recipe, artifact, version, job.sequence, token).await?;
     let update = (recipe, preferences.name.as_deref(), release.clone());
     let row = source_row(kiwi, Some(update.clone()))
@@ -885,7 +942,11 @@ async fn execute(
         .ok_or_else(|| failed(format!("{} is no longer in Kiwi Builds", recipe.name)))?;
     kiwi.automation
         .job(&kiwi.db, id, |j| {
-            j.stage = "Signing and verifying with Kiwi".into()
+            j.stage = if recipe.android() {
+                "Adding to Kiwi".into()
+            } else {
+                "Signing and verifying with Kiwi".into()
+            }
         })
         .map_err(failed)?;
     let index = row
@@ -996,7 +1057,7 @@ pub async fn cleanup(kiwi: &Kiwi) -> ApiResult<()> {
                 if valid_sha(stem)
                     && matches!(
                         path.extension().and_then(|s| s.to_str()),
-                        Some("ipa" | "json")
+                        Some("ipa" | "apk" | "json")
                     )
                     && !keep.contains(stem)
                     && old(&path, 7)
@@ -1035,7 +1096,11 @@ pub fn artifact_path(kiwi: &Kiwi, release: &Release) -> ApiResult<PathBuf> {
         .config
         .data_dir
         .join("automation/artifacts")
-        .join(format!("{sha}.ipa")))
+        .join(format!("{sha}.{}", extension(builds::android(release)))))
+}
+
+fn extension(android: bool) -> &'static str {
+    if android { "apk" } else { "ipa" }
 }
 
 pub async fn restore_artifact(
@@ -1047,9 +1112,14 @@ pub async fn restore_artifact(
     let expected = release.sha256.clone().unwrap();
     let checked = path.clone();
     let token = cancel.clone();
+    let kind = if builds::android(release) {
+        "app"
+    } else {
+        "IPA"
+    };
     let actual = tokio::task::spawn_blocking(move || {
         let mut file = std::fs::File::open(&checked).map_err(|_| {
-            "The local patched IPA is missing. Rebuild it in Kiwi Builds.".to_owned()
+            format!("The local patched {kind} is missing. Rebuild it in Kiwi Builds.")
         })?;
         let mut hash = Sha256::new();
         let mut buffer = vec![0; 1024 * 1024];
@@ -1068,9 +1138,9 @@ pub async fn restore_artifact(
     .await
     .map_err(|e| e.to_string())??;
     if actual != expected {
-        return Err(
-            "The local patched IPA failed its integrity check. Rebuild it in Kiwi Builds.".into(),
-        );
+        return Err(format!(
+            "The local patched {kind} failed its integrity check. Rebuild it in Kiwi Builds."
+        ));
     }
     Ok((path, actual))
 }
@@ -1107,16 +1177,31 @@ async fn validate_artifact(
         ),
         date: Some(Utc::now().to_rfc3339()),
         notes: artifact["notes"].as_str().map(str::to_owned),
-        download_url: Url::parse(&format!("https://kiwi.invalid/automation/{sha}.ipa")).unwrap(),
+        download_url: Url::parse(&format!(
+            "https://kiwi.invalid/automation/{sha}.{}",
+            extension(recipe.android())
+        ))
+        .unwrap(),
         size: artifact["size"].as_u64(),
         sha256: Some(sha.into()),
         min_os: artifact["min_os"].as_str().map(str::to_owned),
         max_os: None,
-        platforms: vec!["iOS".into()],
+        platforms: vec![if recipe.android() { "Android" } else { "iOS" }.into()],
     };
     let (path, _) = restore_artifact(kiwi, &release, token)
         .await
         .map_err(failed)?;
+    if recipe.android() {
+        // The Android runner checked the patched app's manifest and signature itself; Kiwi
+        // serves the file as built, so its digest and declared identity are what count.
+        if artifact["package"].as_str() != Some(recipe.bundle_id.as_str()) {
+            return Err(failed("The patched app is not the one in the recipe"));
+        }
+        if release.min_os.is_some() {
+            return Err(failed("Android builds declare no minimum OS version"));
+        }
+        return Ok(release);
+    }
     let expected = release.clone();
     let token = token.clone();
     let bundle_id = recipe.bundle_id.clone();
@@ -1179,7 +1264,7 @@ fn source_row(kiwi: &Kiwi, update: Option<Update<'_>>) -> ApiResult<Option<Sourc
         if releases.is_empty() {
             continue;
         }
-        let icon = store_icon(kiwi, &recipe.bundle_id)
+        let icon = store_icon(kiwi, recipe.icon_id())
             .or_else(|| previous.and_then(|a| a.icon_url.as_ref().map(Url::to_string)));
         let c = &recipe.catalog;
         apps.push(json!({

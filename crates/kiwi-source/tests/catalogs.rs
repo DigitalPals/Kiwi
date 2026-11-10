@@ -428,6 +428,29 @@ fn real_ytlite_feed_parses_releases_and_metadata_in_publisher_order() {
         release_change(app, 0, &app.releases[1]),
         ReleaseChange::Newer
     );
+
+    // Sources list iOS apps: a release that names no platform is not for Android.
+    let android = DeviceProfile {
+        os_version: String::new(),
+        platform: "android".into(),
+        family: 1,
+    };
+    assert!(app.releases[0].platforms.is_empty());
+    assert!(app.supports_platform("ios") && !app.supports_platform("android"));
+    assert_eq!(app.newest_eligible(Some(&android)), None);
+    assert_eq!(
+        app.releases[0].incompatibility(&android).as_deref(),
+        Some("Made for iPhone and iPad")
+    );
+    // An Android release names its platform and no OS version.
+    let mut built = app.releases[0].clone();
+    built.platforms = vec!["Android".into()];
+    built.min_os = None;
+    assert_eq!(built.incompatibility(&android), None);
+    assert_eq!(
+        built.incompatibility(&ios("27.0")).as_deref(),
+        Some("Made for Android devices")
+    );
 }
 #[test]
 fn permission_forms_merge_and_malformed_entries_become_diagnostics() {

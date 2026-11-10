@@ -10,7 +10,7 @@ import {
 import { formatDateTime, formatRelative, formatVersion } from "../lib/format";
 import { useOnForeground, useResource, useTask } from "../lib/hooks";
 import { BUILDS_PATH } from "../lib/routes";
-import { ExperimentalTag, SetupCells } from "./Builds";
+import { AndroidTag, ExperimentalTag, SetupCells } from "./Builds";
 
 type Edit = (patch: Partial<AutomationPreferences>) => void;
 
@@ -19,7 +19,7 @@ function Hero({ data }: { data: AutomationState }) {
     <div class="build-hero">
       <AppIcon url={data.icon_url} name={data.name} size={64} />
       <div class="build-hero-text">
-        <h1 class="build-hero-title">{data.name} {data.experimental && <ExperimentalTag />}</h1>
+        <h1 class="build-hero-title">{data.name} {data.platform === "android" && <AndroidTag />} {data.experimental && <ExperimentalTag />}</h1>
         <p class="cell-sub">{heroLine(data)}</p>
       </div>
     </div>
@@ -89,7 +89,9 @@ function AddApp({ data, onAdded }: { data: AutomationState; onAdded: (state: Aut
         {add.pending ? <Spinner /> : `Add ${data.name} to Kiwi Builds`}
       </button>
       <p class="build-caption">
-        Downloads {data.name} from the App Store, then checks for updates {intervalLabel(preferences.interval_minutes).toLowerCase()}.
+        {data.platform === "android"
+          ? `Downloads ${data.name} from Google Play, patches it and signs it with this Kiwi's own key.`
+          : `Downloads ${data.name} from the App Store, then checks for updates ${intervalLabel(preferences.interval_minutes).toLowerCase()}.`}
       </p>
     </>
   );
@@ -111,9 +113,10 @@ function Added({ data, state }: { data: AutomationState; state: ReturnType<typeo
     await api.updateSource("kiwi-youtube", { enabled: true });
     await state.reload();
   });
+  const android = data.platform === "android";
   const remove = useTask(async () => {
     const ok = window.confirm(
-      `Remove ${data.name} from Kiwi Builds?\n\nInstalled copies keep working until they expire, but won't get updates.`,
+      `Remove ${data.name} from Kiwi Builds?\n\nInstalled copies keep working${android ? "" : " until they expire"}, but won't get updates.`,
     );
     if (ok) state.mutate(await api.removeAutomation(data.id));
   });
@@ -166,7 +169,9 @@ function Added({ data, state }: { data: AutomationState; state: ReturnType<typeo
       </Section>
 
       <form onSubmit={(e) => { e.preventDefault(); if (dirty && !save.pending) void save.run(preferences); }}>
-        <Section title="Schedule" footer={`The Mac checks Apple for new ${data.name} versions, applies your saved patches and signs the result. Installation still needs your confirmation on the iPhone.`}>
+        <Section title="Schedule" footer={android
+          ? `The Mac builds the ${data.name} version its pinned patches support, and rebuilds when a Kiwi update changes them. Installation still needs your confirmation on the Android device.`
+          : `The Mac checks Apple for new ${data.name} versions, applies your saved patches and signs the result. Installation still needs your confirmation on the iPhone.`}>
           <Cell label="Build Updates Automatically">
             <Toggle checked={preferences.enabled} onChange={(enabled) => edit({ enabled })} label={`Build ${data.name} updates automatically`} disabled={save.pending} />
           </Cell>
@@ -191,9 +196,9 @@ function Added({ data, state }: { data: AutomationState; state: ReturnType<typeo
 
       <Limitations data={data} title="Known Limitations" />
 
-      <Section title="Mac Setup" footer="Apple account sign-in and enrollment stay on the Mac. Choose Check Now or Build Now above to refresh these checks.">
+      {!android && <Section title="Mac Setup" footer="Apple account sign-in and enrollment stay on the Mac. Choose Check Now or Build Now above to refresh these checks.">
         <SetupCells checks={data.checks} />
-      </Section>
+      </Section>}
 
       <Section title="Build History">
         {data.jobs.length === 0 && <Cell label="No jobs yet" sub="Start a build after saving your settings." />}

@@ -1857,7 +1857,11 @@ async fn apps_are_compared_with_their_app_store_original() {
 
     // One lookup for the bundle id both sources use, in the US store by default, batched
     // with the apps Kiwi Builds offers.
-    let built = kiwi_server::automation::recipes().len();
+    let built = kiwi_server::automation::recipes()
+        .iter()
+        .map(|r| r.icon_id())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     assert_eq!(
         kiwi_server::store::refresh(&k.kiwi).await.unwrap(),
         1 + built

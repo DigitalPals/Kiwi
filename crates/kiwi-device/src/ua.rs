@@ -7,14 +7,17 @@ pub enum UaSource {
     Safari,
     /// The iOS OTA installer (`itunesstored`/`appstored`/...): exact OS version and model.
     Installer,
+    /// An Android browser: the platform, and the OS version when the browser reports it.
+    Android,
 }
 
 impl UaSource {
-    /// Matches the `os_version_source` names of the API ("safari", "installer").
+    /// Matches the `os_version_source` names of the API ("safari", "installer", "android").
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Safari => "safari",
             Self::Installer => "installer",
+            Self::Android => "android",
         }
     }
 }
@@ -22,22 +25,51 @@ impl UaSource {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UaInfo {
     pub os_version: Option<String>,
-    /// Hardware identifier, e.g. "iPhone19,4" (installer only).
+    /// Hardware identifier, e.g. "iPhone19,4" (installer only); [`ANDROID_MODEL`] for every
+    /// Android browser, whose User-Agent names no reliable hardware.
     pub model: Option<String>,
     /// OS build, e.g. "24A434" (installer only).
     pub build: Option<String>,
     pub source: UaSource,
 }
 
-/// Extracts the iOS version/model from an iOS Safari or OTA installer User-Agent. Returns
-/// `None` for other clients or when nothing useful is present.
+/// The model recorded for Android devices.
+pub const ANDROID_MODEL: &str = "Android";
+
+/// Extracts the iOS version/model from an iOS Safari or OTA installer User-Agent, or the
+/// platform from an Android browser's. Returns `None` for other clients or when nothing
+/// useful is present.
 pub fn parse_user_agent(ua: &str) -> Option<UaInfo> {
     let ua = ua.trim();
     if ua.starts_with("Mozilla/") {
-        safari(ua)
+        safari(ua).or_else(|| android(ua))
     } else {
         installer(ua)
     }
+}
+
+/// `Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 ... Chrome/141.0.0.0 Mobile Safari/537.36`
+///
+/// Chrome and the browsers built on it always report `Android 10; K`, whatever the phone
+/// runs, so that pair says nothing about the OS version. Firefox reports the real one.
+fn android(ua: &str) -> Option<UaInfo> {
+    let (_, rest) = ua.split_once('(')?;
+    let (comment, _) = rest.split_once(')')?;
+    let parts: Vec<&str> = comment.split(';').map(str::trim).collect();
+    let index = parts
+        .iter()
+        .position(|p| *p == "Android" || p.starts_with("Android "))?;
+    let version = parts[index]
+        .strip_prefix("Android ")
+        .map(str::trim)
+        .filter(|v| is_version(v));
+    let frozen = version == Some("10") && parts.get(index + 1) == Some(&"K");
+    Some(UaInfo {
+        os_version: version.filter(|_| !frozen).map(str::to_owned),
+        model: Some(ANDROID_MODEL.to_owned()),
+        build: None,
+        source: UaSource::Android,
+    })
 }
 
 /// `itunesstored/1.0 iOS/27.0.1 model/iPhone19,4 hwp/t8150 build/24A434 (6; dt:332) AMS/1`

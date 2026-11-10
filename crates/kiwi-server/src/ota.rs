@@ -1,4 +1,4 @@
-//! Over-the-air install endpoints: manifest, IPA (with Range) and icon.
+//! Over-the-air install endpoints: manifest, IPA or APK (with Range) and icon.
 
 use std::{
     collections::HashMap,
@@ -37,6 +37,12 @@ pub fn install_url(public_url: &str, token: &str) -> String {
     );
     let encoded: String = url::form_urlencoded::byte_serialize(manifest.as_bytes()).collect();
     format!("itms-services://?action=download-manifest&url={encoded}")
+}
+
+/// The download link of an Android build for a token (api.md). Android has no install
+/// manifest: the browser downloads the APK and the phone's installer opens it.
+pub fn apk_url(public_url: &str, token: &str) -> String {
+    format!("{}/ota/{token}/app.apk", public_url.trim_end_matches('/'))
 }
 
 /// The OTA manifest plist (XML).
@@ -283,6 +289,10 @@ pub async fn manifest_handler(
     let Some((attempt, build)) = lookup(&kiwi, &token) else {
         return not_found();
     };
+    // An Android build is a plain download; there is no manifest to install it from.
+    if crate::builds::android(&build.release) {
+        return not_found();
+    }
     let ua = user_agent(&headers);
     if let Err(e) = kiwi.db.attempt_manifest(&token, ua.as_deref(), Utc::now()) {
         tracing::warn!("could not record manifest fetch: {e}");
@@ -310,9 +320,50 @@ pub async fn ipa_handler(
     method: Method,
     headers: HeaderMap,
 ) -> Response {
+    package(kiwi, token, method, headers, false).await
+}
+
+pub async fn apk_handler(
+    State(kiwi): State<Arc<Kiwi>>,
+    UrlPath(token): UrlPath<String>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
+    package(kiwi, token, method, headers, true).await
+}
+
+/// The name a browser saves an Android build under, e.g. `YouTube-21.30.216.apk`.
+fn apk_file_name(build: &BuildRow) -> String {
+    let safe = |text: &str| -> String {
+        text.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            .take(48)
+            .collect()
+    };
+    let name = Some(safe(&build.app_name))
+        .filter(|n| !n.trim_matches('.').is_empty())
+        .unwrap_or_else(|| "App".into());
+    match safe(&build.version) {
+        version if version.is_empty() => format!("{name}.apk"),
+        version => format!("{name}-{version}.apk"),
+    }
+}
+
+/// Serves a build's app file: the signed IPA to the iOS installer, or the APK to an
+/// Android browser. Each has its own path, so neither is ever served as the other.
+async fn package(
+    kiwi: Arc<Kiwi>,
+    token: String,
+    method: Method,
+    headers: HeaderMap,
+    android: bool,
+) -> Response {
     let Some((attempt, build)) = lookup(&kiwi, &token) else {
         return not_found();
     };
+    if crate::builds::android(&build.release) != android {
+        return not_found();
+    }
     let Some(path) = build.ipa_path.as_ref().map(PathBuf::from) else {
         return not_found();
     };
@@ -341,12 +392,25 @@ pub async fn ipa_handler(
     let count = end - start + 1;
     let mut response = Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            header::CONTENT_TYPE,
+            if android {
+                "application/vnd.android.package-archive"
+            } else {
+                "application/octet-stream"
+            },
+        )
         .header(header::CONTENT_LENGTH, count)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CACHE_CONTROL, "no-store");
     if status == StatusCode::PARTIAL_CONTENT {
         response = response.header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"));
+    }
+    if android {
+        response = response.header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", apk_file_name(&build)),
+        );
     }
     if method == Method::HEAD {
         return response.body(Body::empty()).unwrap_or_else(|_| not_found());
@@ -357,7 +421,7 @@ pub async fn ipa_handler(
     if let Err(e) = kiwi.db.attempt_download_started(&token, Utc::now()) {
         tracing::warn!("could not record download start: {e}");
     }
-    tracing::info!(build = %build.id, device = %attempt.device_id, start, end, len, "IPA download started");
+    tracing::info!(build = %build.id, device = %attempt.device_id, start, end, len, "app download started");
     // A full response completes the download once its last byte is written; ranges only
     // once those served for this token cover the whole file (not e.g. just the zip tail).
     let full = status == StatusCode::OK;
@@ -380,7 +444,7 @@ pub async fn ipa_handler(
         .unwrap_or_else(|_| not_found())
 }
 
-/// The whole IPA was sent: the install is recorded for the device.
+/// The whole IPA or APK was sent: the install is recorded for the device.
 fn complete_download(kiwi: &Kiwi, token: &str, ua: Option<&str>) {
     let now = Utc::now();
     let result = (|| -> rusqlite::Result<()> {
@@ -415,7 +479,7 @@ fn complete_download(kiwi: &Kiwi, token: &str, ua: Option<&str>) {
             last_seen_at: None,
             removed_at: None,
         })?;
-        tracing::info!(build = %build.id, device = %attempt.device_id, "IPA download completed; install recorded");
+        tracing::info!(build = %build.id, device = %attempt.device_id, "app download completed; install recorded");
         observe_device(kiwi, &attempt.device_id, ua);
         Ok(())
     })();

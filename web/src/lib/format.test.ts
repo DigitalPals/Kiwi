@@ -6,6 +6,7 @@ import {
   formatPercent,
   formatRelative,
   formatVersion,
+  deviceName,
   osRequirement,
   parseDate,
   serverLabel,
@@ -104,6 +105,9 @@ describe("small formatters", () => {
     expect(osRequirement({ min_os: "15.0", max_os: null })).toBe("iOS 15.0+");
     expect(osRequirement({ min_os: "15.0", max_os: "17.0" })).toBe("iOS 15.0–17.0");
     expect(osRequirement({ min_os: null, max_os: null })).toBe("Any iOS");
+    expect(osRequirement({ min_os: null, max_os: null }, "android")).toBe("Android");
+    expect(osRequirement({ min_os: "12", max_os: null }, "android")).toBe("Android 12+");
+    expect([deviceName("android"), deviceName("ios"), deviceName(undefined)]).toEqual(["Android device", "iPhone", "iPhone"]);
   });
 
   it("names privacy keys", () => {

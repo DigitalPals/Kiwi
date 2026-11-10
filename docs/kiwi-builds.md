@@ -5,6 +5,10 @@ Kiwi Builds patches App Store apps with open-source tweaks and signs them on you
 **X** (NeoFreeBird) and **Reddit** (RedditFilter). Signed releases appear in the built-in
 **Kiwi Builds** source and install and update like any other app in Kiwi.
 
+It also builds **Android** apps: YouTube, YouTube Music and Reddit, patched with
+[Morphe](https://morphe.software)'s open-source patches and signed with a key of your own.
+They need no Apple account, Xcode or Mac setup; see [Android apps](#android-apps).
+
 It is optional and off by default. Kiwi itself works without it; see the
 [README](../README.md) and [installation guide](install.md) first.
 
@@ -16,6 +20,10 @@ tweaks into them. Modified apps may violate the apps' terms of service; X's term
 modified clients outright. Use it only for apps you may use, on your own devices, at your
 own risk. Kiwi publishes nothing outside your tailnet: builds are only offered to the
 iPhones Kiwi serves.
+
+Android builds download the original apps from Google Play through an anonymous session
+and patch them; the same caution applies. [Android apps](#android-apps) says which
+services that involves.
 
 ## Turn it on
 
@@ -99,6 +107,118 @@ rather than a `.deb`; both are in the recipe.
 
 Every app loses push notifications, widgets, share and other app extensions (a wildcard
 development profile cannot grant their entitlements, and injection removes extensions).
+
+## Android apps
+
+Kiwi Builds makes patched Android apps on the same Mac and serves them to your Android
+phones and tablets as APK downloads. Add them under **Kiwi Builds › Add an Android App**.
+
+| App | Patches (pinned) | Installs as | Notes |
+|---|---|---|---|
+| YouTube 21.30.216 | Morphe Patches 2.1.0 | `app.morphe.android.youtube` | Installs beside the original app. Signing in to a Google account needs [MicroG RE](https://github.com/MorpheApp/MicroG-RE); the app links to it the first time it opens |
+| YouTube Music 9.30.53 | Morphe Patches 2.1.0 | `app.morphe.android.apps.youtube.music` | As YouTube |
+| Reddit 2026.40.0 | Morphe Patches 2.1.0 | `com.reddit.frontpage` | Keeps Reddit's own package name: uninstall the Play Store version first. Its version code is raised to the maximum so that a store never replaces it |
+
+All three need Android 12L or later on a 64-bit ARM device. The patches' options
+(SponsorBlock, layout, feed filters and so on) are set inside each app.
+
+The apps keep their own name and icon: the recipes leave out the patch that would replace
+them (`disabled_patches` in `automation/android.json`). YouTube and YouTube Music install
+beside the original apps under a different package name, so a phone that still has the
+original shows two apps with the same name and icon; disable or uninstall the original to
+tell them apart.
+
+### What a build does
+
+1. **Fetches the pinned tools**, once: a Java runtime (Eclipse Temurin 21), the Morphe
+   patcher and the patch bundle. Each is checked against the SHA-256 and size in
+   `automation/android.json` before use.
+2. **Downloads the original app** at the exact version the recipe pins (below).
+3. **Proves who signed it.** Kiwi verifies the APK Signature Scheme v2/v3 signature over
+   every byte of each file and compares the signing certificate with the publisher's
+   certificate pinned in the recipe (Google's for YouTube and YouTube Music, Reddit's for
+   Reddit). The package name, version and version code must match as well. A file that
+   fails is discarded and the next source is tried.
+4. **Patches and signs it** with the pinned patcher and this Kiwi's own key, keeping only
+   the 64-bit ARM code.
+5. **Checks the result**: every patch applied, the expected package, version and version
+   code, Kiwi's own signature over the whole file. Only then is it published.
+
+### Where the original app comes from
+
+Kiwi tries these in order and takes the first that supplies the pinned version:
+
+1. **A folder on the Mac**, `automation/android/originals/` in the data directory. Put an
+   `.apk`, `.apks`, `.xapk` or `.apkm` there yourself and no download is needed.
+2. **Google Play**, with an anonymous session. Play serves any published version of a free
+   app to a session that asks for its version code. The session comes from the public
+   token dispenser of the open-source [Aurora Store](https://auroraoss.com)
+   (`auroraoss.com/api/auth`), so no Google account of yours is involved. The dispenser
+   receives the generic device profile in `automation/android.json` (a Pixel 9a) and sees
+   the Mac's IP address; Google sees the same profile and the download. The session is
+   kept for 30 minutes in `automation/android/play-session.json` (mode 0600).
+3. **APKPure**, at the same version.
+
+A source is only a transport: whatever it returns is accepted solely because its signature
+verifies against the pinned publisher certificate, so a mirror cannot hand Kiwi a modified
+app. The verified original is kept in `automation/tools/android/originals/` and reused by
+later builds of the same version. When no source has it, the job fails with each source's
+reason and Kiwi retries on the next check.
+
+The dispenser limits how many sessions an address may request. A build needs one, and
+rebuilds of a cached version need none.
+
+### What is not compiled by Kiwi
+
+The Java runtime, the patcher (`morphe-desktop`, GPL-3.0) and the patch bundle
+(`morphe-patches`) are downloaded as their publishers' release files and run as separate
+programs; they are not part of Kiwi and are not redistributed with it. MicroG RE, which
+YouTube and YouTube Music need for signing in, is installed by you from its own project.
+The patched apps talk to the services their patches use (for example SponsorBlock and
+Return YouTube Dislike when those are on).
+
+### The signing key
+
+The first Android build creates a 4096-bit RSA key in
+`automation/android/keystore.p12`, with its password beside it in `keystore.pass` (both
+mode 0600). It never leaves the Mac and no API returns it. Android installs an update over
+an app only when both carry the same signature, so **back these two files up** with the
+rest of the data directory: without them, every Android app Kiwi built has to be
+uninstalled before a build signed with a new key can be installed.
+
+The patcher takes the keystore password as a command-line argument, so it is visible to
+other processes of the same user on the Mac while a build runs.
+
+### Install on Android
+
+Install [Tailscale](https://tailscale.com/download/android) on the device, sign in as the
+owner and open Kiwi's address in the browser. Kiwi recognises Android devices: Browse
+shows them Android apps only, and iPhones the iPhone apps.
+
+1. Open the app in Kiwi and tap **Install**. The browser downloads the APK.
+2. Open the download. The first time, Android asks you to allow that browser to install
+   apps; Play Protect may ask to scan an app it doesn't know.
+3. For an update, tap **Update** and open the new download. Android installs it over the
+   old build and keeps your data.
+
+Kiwi can't see which apps an Android device has installed. It records an install when the
+download completes, so My Apps shows what you downloaded; use **Reinstall** on the app's
+page for a fresh copy, and **Forget** when you removed the app. Android apps don't expire,
+and Kiwi's signing warnings don't apply to them.
+
+### Requirements and limits
+
+- Python 3.13 on the Mac (`brew install python@3.13`). Nothing else: the setup below, the
+  Apple account, Xcode and enrollment are for iPhone apps only.
+- About 1 GB of disk for the tools and cached originals, plus 75 to 180 MB for each
+  retained release (the newest 5 per app), and network access to GitHub, `auroraoss.com`,
+  Google Play and APKPure.
+- Each recipe pins one app version, the one the pinned patches support. A newer version
+  follows with a Kiwi update that moves the pins; a Kiwi update that changes the recipe,
+  the patches or the runner rebuilds the app once.
+- Builds are inspected, not run: package, version, signature and applied patches are
+  checked, playback and sign-in are not. The apps above were built and inspected on Linux
+  and have not been installed on a physical Android device yet.
 
 ## Configure in Kiwi
 
@@ -210,6 +330,11 @@ Paths under `automation/` are in the data directory, `~/Library/Application Supp
 |---|---|
 | `kiwi.db` meta `automation_v2` | Per-app preferences, revisions and health, and job history. Migrated once from `youtube_automation_v1`, which is left in place for a rollback |
 | `automation/runner.py`, `automation/recipes.json` | The runner and pinned recipes built into Kiwi, rewritten at every start |
+| `automation/android.py`, `automation/apk.py`, `automation/android.json` | The Android runner, its APK signature verifier and the pinned Android recipes, rewritten at every start |
+| `automation/android/keystore.p12`, `keystore.pass` | This Kiwi's Android signing key and its password, mode 0600. Back them up |
+| `automation/android/originals/` | Original Android apps you supply by hand (optional) |
+| `automation/android/play-session.json` | The anonymous Google Play session, mode 0600 |
+| `automation/tools/android/` | The pinned Java runtime, patcher and patch bundle, and verified originals |
 | `~/.kiwi-builder-tools` | Space-free private toolchain and transient build workspaces; `automation/tools` links here |
 | `~/.kiwi-builder-tools/sources/<owner>__<repo>/<commit>` | Pinned source cache (a `.complete` file marks a finished fetch) |
 | `~/.kiwi-builder-tools/cache/ffmpeg-kit/<key>` | NeoFreeBird's compiled FFmpeg stack, keyed by its inputs and the SDK |
@@ -217,6 +342,7 @@ Paths under `automation/` are in the data directory, `~/Library/Application Supp
 | `automation/models/*.bin` | Private account-specific decryption model, mode 0600 |
 | `automation/jobs/<id>/build.log`, `automation/setup.log`, `automation/enrollment.log` | Private diagnostics; raw tool output is never served over HTTP |
 | `automation/artifacts/<sha>.ipa`, `<sha>.json` | Retained patched input and build provenance, addressed by SHA-256 |
+| `automation/artifacts/<sha>.apk`, `<sha>.json` | A patched, signed Android app as it is served, and its provenance (source of the original, its digest, the applied patches) |
 
 Original account-personalized downloads and decrypted intermediates are removed after each
 build, including after a failure or cancellation. Do not publish models, originals or
@@ -238,6 +364,14 @@ To update a tweak or the build tooling, review and change the full commit hashes
 `app_version`), compile it (below), and install Kiwi again with `./install.sh`. Run setup
 again when the toolchain changed. Existing releases stay usable. The runner and recipes are
 built into the Kiwi binary, so editing the installed copies alone does not last.
+
+For Android, change `automation/android.json`: the patcher and patch bundle (URL, SHA-256,
+size), and per app the `app_version` and `version_code` the patches support, the
+publisher's `certificate` (SHA-256 of the signing certificate) and the package the patched
+app carries (`bundle_id`, and `patched_version_code` when a patch changes the version
+code). `python3 automation/apk.py <file.apk>` prints a package's verified certificate,
+version and version code. The Android runner works on Linux as well as macOS, so a changed
+recipe can be built anywhere before Kiwi is installed again.
 
 To add another app, add a recipe: App Store id and bundle id, packages with their pinned
 repositories and build flags (`make`, `submodules`, `siblings`, `patches`, `target` and
@@ -275,6 +409,12 @@ check on the phone.
   Details are in `automation/enrollment.log`.
 - **A build fails:** its log is `automation/jobs/<id>/build.log`. The current release stays
   available; fix the cause and use **Rebuild**.
+- **"No source could supply the original …"** (Android): the message lists each source's
+  reason. A rate-limited anonymous sign-in clears by itself; otherwise download the named
+  version yourself and put it in `automation/android/originals/`, then use **Rebuild**.
+- **Android says "App not installed"**: an app with the same package signed by someone
+  else is installed (the Play Store's Reddit, or a build from another patcher). Uninstall
+  it first.
 
 More in [troubleshooting.md](troubleshooting.md). The HTTP endpoints are described in
 [api.md](api.md#kiwi-builds-automation).

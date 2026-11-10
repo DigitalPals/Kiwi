@@ -77,12 +77,12 @@ export function RowDetail({ app }: { app: AppSummary }) {
 }
 
 /** What a running or failed action says instead of the second line. */
-function actionDetail(view: ButtonView): ComponentChildren {
+function actionDetail(view: ButtonView, app: AppSummary): ComponentChildren {
   switch (view.kind) {
     case "progress":
       return `${view.caption ?? "Preparing"}…`;
     case "installing":
-      return "Installing… confirm on your iPhone";
+      return app.platform === "android" ? "Downloading… open the file to install" : "Installing… confirm on your iPhone";
     case "prepare":
       return view.error ? <span class="tone-danger">Couldn't prepare{view.caption ? `: ${view.caption}` : ""}</span> : null;
     default:
@@ -125,7 +125,7 @@ export function AppRow({ app, onState, detail, trailing, children, linkable = tr
           app={app}
           onState={onState}
           caption={false}
-          render={(view, button) => top(actionDetail(view), button)}
+          render={(view, button) => top(actionDetail(view, app), button)}
         />
       )}
       {children}

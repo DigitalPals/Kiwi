@@ -55,7 +55,7 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install pytest
-      - run: python -m pytest automation/test_runner.py
+      - run: python -m pytest automation/test_runner.py automation/test_android.py
 
   shell:
     name: Scripts

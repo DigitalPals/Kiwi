@@ -30,6 +30,7 @@ const app = (name: string, date: string | null, state: Partial<AppState> = {}, o
   source_id: "s",
   source_name: "Source",
   bundle_id: `com.example.${name}`,
+  platform: "ios",
   name,
   developer: null,
   subtitle: null,

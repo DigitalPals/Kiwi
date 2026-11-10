@@ -2,13 +2,17 @@
 
 export type Timestamp = string;
 
+/** What a device installs: signed IPAs, or the APKs of Kiwi Builds' Android apps. */
+export type Platform = "ios" | "android";
+
 export interface Device {
   id: string; // "ts:<StableID>" | "local:<random>"
   name: string;
   kind: "tailscale" | "browser";
+  platform: Platform;
   tailscale_name: string | null;
   os_version: string | null;
-  os_version_source: "devicectl" | "installer" | "manual" | "safari" | null;
+  os_version_source: "devicectl" | "installer" | "manual" | "safari" | "android" | null;
   model: string | null;
   devicectl: LinkedCoreDevice | null;
   last_seen: Timestamp;
@@ -153,6 +157,8 @@ export interface AppSummary {
   source_id: string;
   source_name: string;
   bundle_id: string;
+  /** "android": an APK, installed as the package named by `bundle_id`. */
+  platform: Platform;
   name: string;
   developer: string | null;
   subtitle: string | null;
@@ -351,7 +357,9 @@ export interface SetupCheck {
 /** One app Kiwi can patch and sign on the Mac (`GET /api/automation/:app`). */
 export interface AutomationState {
   id: string;
+  platform: Platform;
   name: string;
+  /** The built app's bundle id, or the package of an Android app. */
   bundle_id: string;
   icon_url: string | null;
   /** The tweak and its version, e.g. "NeoFreeBird 7.3.0". */
@@ -360,7 +368,7 @@ export interface AutomationState {
   experimental: boolean;
   warning: string | null;
   names: string[];
-  /** The App Store version the tweak supports, when it isn't the newest. */
+  /** The version of the original app the tweak supports, when it isn't the newest. */
   app_version: string | null;
   limitations: BuildLimitation[];
   included: BuildFeature[];

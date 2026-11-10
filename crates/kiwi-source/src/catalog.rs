@@ -546,16 +546,30 @@ pub fn platform_matches(platform: &str, device: &str) -> bool {
     normalized(platform) == normalized(device)
 }
 impl Release {
+    /// Whether the release is made for `platform`. Sources list iOS apps, so a release
+    /// that names no platform runs on anything but Android.
+    pub fn runs_on(&self, platform: &str) -> bool {
+        if self.platforms.is_empty() {
+            return !platform_matches("android", platform);
+        }
+        self.platforms.iter().any(|p| platform_matches(p, platform))
+    }
     pub fn incompatibility(&self, device: &DeviceProfile) -> Option<String> {
-        if !self.platforms.is_empty()
-            && !self
-                .platforms
-                .iter()
-                .any(|p| platform_matches(p, &device.platform))
-        {
+        if !self.runs_on(&device.platform) {
+            // The two platforms Kiwi installs on get plain words.
+            let android = |p: &str| platform_matches("android", p);
+            if android(&device.platform) {
+                return Some("Made for iPhone and iPad".into());
+            }
+            if !self.platforms.is_empty() && self.platforms.iter().all(|p| android(p)) {
+                return Some("Made for Android devices".into());
+            }
+            let required = match self.platforms.is_empty() {
+                true => "iOS".to_owned(),
+                false => self.platforms.join(", "),
+            };
             return Some(format!(
-                "Requires platform {} (selected: {})",
-                self.platforms.join(", "),
+                "Requires platform {required} (selected: {})",
                 device.platform
             ));
         }
@@ -598,6 +612,11 @@ impl Release {
     }
 }
 impl App {
+    /// Whether any release is made for `platform` (see [`Release::runs_on`]). An app
+    /// without releases is not tied to one.
+    pub fn supports_platform(&self, platform: &str) -> bool {
+        self.releases.is_empty() || self.releases.iter().any(|r| r.runs_on(platform))
+    }
     pub fn newest_eligible(&self, device: Option<&DeviceProfile>) -> Option<usize> {
         if self.unavailable.is_some() {
             return None;

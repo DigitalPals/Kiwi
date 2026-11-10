@@ -4,7 +4,7 @@ import type { AppSummary, BrowseMode, Source } from "../api/types";
 import { AppIcon } from "../components/AppIcon";
 import { BackBar, Banner, Cell, Empty, ErrorState, LinkCell, Loading, Section, Spinner, Toggle } from "../components/ui";
 import { appKey } from "../lib/action";
-import { formatRelative, plural } from "../lib/format";
+import { deviceName, formatRelative, plural } from "../lib/format";
 import { useResource, useTask } from "../lib/hooks";
 import { useMe } from "../lib/me";
 import { navigate } from "../lib/router";
@@ -132,7 +132,8 @@ function SourceSettings({ source, onChange }: { source: Source; onChange: (sourc
 export function SourceApps({ sourceId }: { sourceId: string }) {
   const sources = useResource("sources", api.sources);
   const apps = useResource(`source-apps/${sourceId}`, () => api.apps({ source: sourceId, hidden: true }));
-  const { reload: reloadMe } = useMe();
+  const { me, reload: reloadMe } = useMe();
+  const device = deviceName(me?.device.platform);
   const [error, setError] = useState<string | null>(null);
   const source = sources.data?.find((s) => s.id === sourceId);
 
@@ -148,7 +149,7 @@ export function SourceApps({ sourceId }: { sourceId: string }) {
   const remove = useTask(async () => {
     if (!source) return;
     const ok = window.confirm(
-      `Remove ${source.name}?\n\nInstalled apps stay on your iPhone but won't get updates from this source.`,
+      `Remove ${source.name}?\n\nInstalled apps stay on your ${device} but won't get updates from this source.`,
     );
     if (!ok) return;
     await api.removeSource(source.id);
@@ -243,7 +244,7 @@ export function SourceApps({ sourceId }: { sourceId: string }) {
         )}
         {appList}
         {source.kind !== "local_build" && (
-          <Section footer={remove.error ? <span class="danger">{remove.error}</span> : "Installed apps stay on your iPhone but stop getting updates."}>
+          <Section footer={remove.error ? <span class="danger">{remove.error}</span> : `Installed apps stay on your ${device} but stop getting updates.`}>
             <button type="button" class="cell cell-button" onClick={() => void remove.run()} disabled={remove.pending}>
               <div class="cell-main cell-label danger">Remove Source</div>
               {remove.pending && <Spinner />}

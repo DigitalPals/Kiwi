@@ -152,7 +152,10 @@ export function useInstallFlow({ app, onState, mode, prepareBody, isDone }: Opti
   return { local, prepare, installTapped };
 }
 
-/** Mock mode only: desktop browsers ignore itms-services links, so fetch the manifest like iOS would. */
+/**
+ * Mock mode only: desktop browsers ignore itms-services links, so fetch the manifest like iOS
+ * would. An Android install link is the APK itself, which the browser downloads on its own.
+ */
 function simulateManifestFetch(href: string) {
   try {
     const manifest = new URL(href).searchParams.get("url");

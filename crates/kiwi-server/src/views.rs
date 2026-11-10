@@ -144,11 +144,17 @@ pub enum OriginalMatch {
     Pending,
 }
 
+fn platform(android: bool) -> &'static str {
+    if android { "android" } else { "ios" }
+}
+
 #[derive(Debug, Serialize)]
 pub struct AppSummary {
     pub source_id: String,
     pub source_name: String,
     pub bundle_id: String,
+    /// `ios` or `android`: what the app runs on.
+    pub platform: &'static str,
     pub name: String,
     pub developer: Option<String>,
     pub subtitle: Option<String>,
@@ -245,7 +251,11 @@ fn install_url(
     let token = kiwi
         .db
         .attempt_token(&build.id, device_id, random_token, now)?;
-    Ok(ota::install_url(public_url, &token))
+    Ok(if crate::builds::android(&build.release) {
+        ota::apk_url(public_url, &token)
+    } else {
+        ota::install_url(public_url, &token)
+    })
 }
 
 /// One build needs no catalog, signing snapshot or unrelated device/app state. In
@@ -357,8 +367,21 @@ impl<'a> View<'a> {
         !app.source.shows(self.prefs(app))
     }
 
+    /// Whether the app has a release for this device's platform: an iPhone's Browse leaves
+    /// out Android apps, and an Android phone's leaves out iOS apps. A device Kiwi knows
+    /// nothing about sees everything.
+    pub fn on_platform(&self, app: &CatalogApp) -> bool {
+        self.profile
+            .as_ref()
+            .is_none_or(|p| app.app().supports_platform(&p.platform))
+    }
+
     /// The App Store app this app is based on, and how it was found.
     pub fn original(&self, app: &CatalogApp) -> (OriginalMatch, Option<&StoreApp>) {
+        // An Android app has no counterpart in Apple's store.
+        if crate::builds::android_app(app.app()) {
+            return (OriginalMatch::None, None);
+        }
         let choice = self.prefs(app).map(|p| &p.original);
         let (wanted, linked) = match choice {
             None | Some(OriginalChoice::Auto) => (app.app().bundle_id.as_str(), false),
@@ -404,10 +427,14 @@ impl<'a> View<'a> {
         })
     }
 
-    pub fn signed_id(&self, bundle_id: &str) -> String {
+    /// The id the app is installed under: Kiwi's signed id of an iOS app, the package
+    /// name itself of an Android app.
+    pub fn signed_id(&self, app: &kiwi_source::App) -> String {
         match &self.team {
-            Some(team) => kiwi_signer::signed_bundle_id(bundle_id, team),
-            None => bundle_id.to_owned(),
+            Some(team) if !crate::builds::android_app(app) => {
+                kiwi_signer::signed_bundle_id(&app.bundle_id, team)
+            }
+            _ => app.bundle_id.clone(),
         }
     }
 
@@ -415,7 +442,7 @@ impl<'a> View<'a> {
     /// "App actions"). Other sources often ship different apps with the same bundle id.
     pub fn installed_for(&self, app: &CatalogApp) -> Option<&InstallRow> {
         let a = app.app();
-        let signed = self.signed_id(&a.bundle_id);
+        let signed = self.signed_id(a);
         self.installs_by_signed_id
             .get(&signed)
             .map(|&index| &self.installs[index])
@@ -425,7 +452,7 @@ impl<'a> View<'a> {
     /// Another source's app installed under the signed id this app would use.
     pub fn replaced_by(&self, app: &CatalogApp) -> Option<&InstallRow> {
         let a = app.app();
-        let signed = self.signed_id(&a.bundle_id);
+        let signed = self.signed_id(a);
         self.installs_by_signed_id
             .get(&signed)
             .map(|&index| &self.installs[index])
@@ -451,7 +478,7 @@ impl<'a> View<'a> {
         installed: Option<&'v InstallRow>,
     ) -> Decision<'v> {
         let a = app.app();
-        let signed = self.signed_id(&a.bundle_id);
+        let signed = self.signed_id(a);
         actions::decide(&Inputs {
             app: a,
             device: self.profile.as_ref(),
@@ -517,6 +544,7 @@ impl<'a> View<'a> {
             source_id: app.source.id.clone(),
             source_name: app.source.source.catalog.name.clone(),
             bundle_id: a.bundle_id.clone(),
+            platform: platform(crate::builds::android_app(a)),
             name: a.name.clone(),
             developer: a.developer.clone(),
             subtitle: a.subtitle.clone(),
@@ -549,7 +577,7 @@ impl<'a> View<'a> {
     pub fn detail(&self, app: &CatalogApp) -> ApiResult<AppDetail> {
         let a = app.app();
         let summary = self.summary(app, None)?;
-        let signed = self.signed_id(&a.bundle_id);
+        let signed = self.signed_id(a);
         let dropped = match summary.state.build.as_ref() {
             Some(b) if b.status == BuildStatus::Ready => b.dropped_entitlements.clone(),
             _ => self
@@ -632,6 +660,7 @@ impl<'a> View<'a> {
             source_id: install.source_id.clone(),
             source_name,
             bundle_id: install.bundle_id.clone(),
+            platform: platform(install.release.as_ref().is_some_and(crate::builds::android)),
             name: install.name.clone(),
             developer: install.developer.clone(),
             subtitle: None,
@@ -682,7 +711,7 @@ impl<'a> View<'a> {
                 .catalog
                 .app(&install.source_id, &install.bundle_id);
             out.push(match app {
-                Some(app) if install.signed_bundle_id == self.signed_id(&install.bundle_id) => {
+                Some(app) if install.signed_bundle_id == self.signed_id(app.app()) => {
                     self.summary(&app, Some(install))?
                 }
                 Some(_) => self.plain_summary(install, false),

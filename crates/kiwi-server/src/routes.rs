@@ -86,6 +86,7 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .nest("/api", api)
         .route("/ota/{token}/manifest.plist", get(ota::manifest_handler))
         .route("/ota/{token}/app.ipa", get(ota::ipa_handler))
+        .route("/ota/{token}/app.apk", get(ota::apk_handler))
         .route("/ota/{token}/icon.png", get(ota::icon_handler))
         .fallback(web)
         .layer(middleware::from_fn_with_state(kiwi.clone(), host_guard))
@@ -323,19 +324,29 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
         .filter(|s| s.enabled && s.source.error.is_some())
         .count();
     let mut warnings = Vec::new();
-    if view.signing.identities.is_empty() {
-        let message = view.signing.error(now).unwrap_or_default();
-        warnings.push(warning("error", "no_identity", message, "/settings"));
-    } else if let Some(message) = view.signing.error(now) {
-        warnings.push(warning("error", "no_profile", message, "/settings"));
-    } else if let Some(active) = view.signing.active(now)
-        && active.expires_at - now < Duration::days(30)
-    {
+    // An Android device installs what Kiwi Builds signed itself, at any Android version
+    // the app supports: Apple signing and the OS version don't concern it.
+    let android = crate::devices::is_android(&ctx.device);
+    let signing = || {
+        if view.signing.identities.is_empty() {
+            let message = view.signing.error(now).unwrap_or_default();
+            return Some(warning("error", "no_identity", message, "/settings"));
+        }
+        if let Some(message) = view.signing.error(now) {
+            return Some(warning("error", "no_profile", message, "/settings"));
+        }
+        let active = view
+            .signing
+            .active(now)
+            .filter(|a| a.expires_at - now < Duration::days(30))?;
         let message = format!(
             "The signing certificate or profile expires {}. Renew it in Xcode, then rescan.",
             days_until(active.expires_at, now)
         );
-        warnings.push(warning("warning", "expiring", message, "/settings"));
+        Some(warning("warning", "expiring", message, "/settings"))
+    };
+    if !android {
+        warnings.extend(signing());
     }
     if errors > 0 {
         let what = if errors == 1 {
@@ -366,7 +377,7 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
             warnings.push(warning("warning", "expiring", message, "/apps"));
         }
     }
-    if ctx.device.os_version.is_none() {
+    if ctx.device.os_version.is_none() && !android {
         warnings.push(warning(
             "info",
             "unknown_os",
@@ -635,7 +646,7 @@ async fn list_apps(
     kiwi.catalog
         .apps(source.as_deref(), q.as_deref())
         .iter()
-        .filter(|app| hidden || !view.hidden(app))
+        .filter(|app| hidden || (!view.hidden(app) && view.on_platform(app)))
         .map(|app| view.summary(app, None))
         .collect::<ApiResult<_>>()
         .map(Json)

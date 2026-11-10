@@ -1,4 +1,4 @@
-import type { Device, Release } from "../api/types";
+import type { Device, Platform, Release } from "../api/types";
 import { BoundedCache } from "./cache";
 
 const DAY = 86_400_000;
@@ -184,17 +184,29 @@ export function osVersionSourceLabel(source: Device["os_version_source"]): strin
       return "set manually";
     case "safari":
       return "estimated from Safari";
+    case "android":
+      return "reported by the browser";
     default:
       return "unknown";
   }
 }
 
+const OS_NAMES: Record<Platform, string> = { ios: "iOS", android: "Android" };
+
+/** The operating system of a platform: "iOS" or "Android". */
+export const osName = (platform: Platform | undefined): string => OS_NAMES[platform ?? "ios"];
+
+/** What copy calls the device of a platform: "iPhone" or "Android device". */
+export const deviceName = (platform: Platform | undefined): string => (platform === "android" ? "Android device" : "iPhone");
+
 /** Short, human summary for a release's OS requirement. */
-export function osRequirement(release: Pick<Release, "min_os" | "max_os">): string {
-  if (release.min_os && release.max_os) return `iOS ${release.min_os}–${release.max_os}`;
-  if (release.min_os) return `iOS ${release.min_os}+`;
-  if (release.max_os) return `Up to iOS ${release.max_os}`;
-  return "Any iOS";
+export function osRequirement(release: Pick<Release, "min_os" | "max_os">, platform?: Platform): string {
+  const os = osName(platform);
+  if (release.min_os && release.max_os) return `${os} ${release.min_os}–${release.max_os}`;
+  if (release.min_os) return `${os} ${release.min_os}+`;
+  if (release.max_os) return `Up to ${os} ${release.max_os}`;
+  // An Android browser doesn't tell Kiwi the OS version, so Android releases name none.
+  return platform === "android" ? os : `Any ${os}`;
 }
 
 const PRIVACY_LABELS: Record<string, string> = {

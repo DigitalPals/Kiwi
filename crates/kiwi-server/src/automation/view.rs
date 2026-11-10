@@ -1,6 +1,6 @@
 //! Product-facing state derived from the recipes, the durable job history and the published
 //! source.
-use super::{AppState, Job, Limitation, Recipe, SOURCE_ID, recipe, recipes, store_icon};
+use super::{AppState, Job, Limitation, Platform, Recipe, SOURCE_ID, recipe, recipes, store_icon};
 use crate::{Kiwi, db::Time, error::ApiResult};
 use chrono::{Duration, Utc};
 use kiwi_source::Url;
@@ -28,6 +28,7 @@ pub struct Published {
 #[derive(Serialize)]
 pub struct AppView {
     id: String,
+    platform: Platform,
     name: String,
     bundle_id: String,
     icon_url: Option<String>,
@@ -156,9 +157,10 @@ fn build_view(
         });
     AppView {
         id: recipe.id.clone(),
+        platform: recipe.platform,
         name: recipe.name.clone(),
         bundle_id: recipe.bundle_id.clone(),
-        icon_url: store_icon(kiwi, &recipe.bundle_id)
+        icon_url: store_icon(kiwi, recipe.icon_id())
             .or_else(|| app.and_then(|a| a.icon_url.as_ref().map(Url::to_string))),
         tweak: recipe.tweak.clone(),
         summary: recipe.summary.clone(),

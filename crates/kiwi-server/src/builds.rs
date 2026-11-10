@@ -165,6 +165,82 @@ pub async fn prepare(
     prepare_release(kiwi, &app, index).await
 }
 
+/// Whether a release is an Android app. Kiwi serves those as Kiwi Builds made them: an
+/// Android runner signs its own apps, and nothing about them expires.
+pub fn android(release: &Release) -> bool {
+    release
+        .platforms
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case("android"))
+}
+
+/// Whether every release of an app is an Android app.
+pub fn android_app(app: &kiwi_source::App) -> bool {
+    !app.releases.is_empty() && app.releases.iter().all(android)
+}
+
+/// The ready build of an Android release: the file Kiwi Builds made, once its digest has
+/// been checked again. There is nothing to download or sign.
+async fn prepare_android(kiwi: &Arc<Kiwi>, app: &CatalogApp, index: usize) -> ApiResult<BuildRow> {
+    let a = app.app();
+    let release = &a.releases[index];
+    if app.source.id != crate::automation::SOURCE_ID {
+        return Err(ApiError::bad_request(
+            "Kiwi installs only the Android apps it builds itself.",
+        ));
+    }
+    let now = Utc::now();
+    let _guard = kiwi.jobs.prepare.lock().await;
+    for b in kiwi.db.app_builds(&app.source.id, &a.bundle_id)? {
+        if same_release(&b, release)
+            && b.usable(now)
+            && b.ipa_path.as_ref().is_some_and(|p| Path::new(p).is_file())
+        {
+            return Ok(b);
+        }
+    }
+    let (path, sha) =
+        crate::automation::restore_artifact(kiwi, release, &kiwi.cancel.child_token())
+            .await
+            .map_err(ApiError::conflict)?;
+    let size = tokio::fs::metadata(&path)
+        .await
+        .ok()
+        .and_then(|m| i64::try_from(m.len()).ok());
+    let row = BuildRow {
+        id: new_build_id(),
+        source_id: app.source.id.clone(),
+        bundle_id: a.bundle_id.clone(),
+        app_name: a.name.clone(),
+        icon_url: a.icon_url.as_ref().map(Url::to_string),
+        version: release.version.clone(),
+        build: release.build.clone(),
+        release: release.clone(),
+        artifact_sha256: Some(sha),
+        url_scheme: None,
+        // An Android app installs under its own package name.
+        signed_bundle_id: a.bundle_id.clone(),
+        identity_sha1: None,
+        profile_uuids: Vec::new(),
+        signing_key: None,
+        expires_at: None,
+        ipa_path: Some(path.to_string_lossy().into_owned()),
+        size,
+        status: BuildStatus::Ready,
+        step: None,
+        progress: None,
+        error: None,
+        retryable: false,
+        dropped_entitlements: Vec::new(),
+        created_at: now,
+        finished_at: Some(now),
+        app_version: None,
+    };
+    kiwi.db.save_build(&row)?;
+    tracing::info!(build = %row.id, app = %a.name, version = %row.version, "Android build ready");
+    Ok(row)
+}
+
 /// Returns a running or reusable ready build of the release, or queues a new one.
 pub async fn prepare_release(
     kiwi: &Arc<Kiwi>,
@@ -173,6 +249,9 @@ pub async fn prepare_release(
 ) -> ApiResult<BuildRow> {
     let a = app.app();
     let release = &a.releases[index];
+    if android(release) {
+        return prepare_android(kiwi, app, index).await;
+    }
     let now = Utc::now();
     let signing = kiwi.signing_info();
     let unavailable = || {

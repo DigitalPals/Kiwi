@@ -15,6 +15,7 @@ import type {
   Original,
   OriginalMatch,
   OtherVersion,
+  Platform,
   Release,
   Settings,
   SetupCheck,
@@ -36,7 +37,7 @@ import {
   type MockSource,
   type MockStoreApp,
 } from "./fixtures.ts";
-import { buildStages, catalogOf, createBuilds } from "./builds.ts";
+import { buildStages, catalogOf, createBuilds, iconBundleId } from "./builds.ts";
 
 export interface MockRequest {
   method: string;
@@ -53,6 +54,8 @@ export interface MockOptions {
    * through the Mac's stages and publishes a signed release in the Kiwi Builds source.
    */
   builds?: "blocked" | "simulated";
+  /** The device the mock answers as: an iPhone (default) or an Android phone. */
+  device?: Platform;
 }
 
 export interface MockResponse {
@@ -119,20 +122,27 @@ function newerThanInstalled(target: Release, installed: Installed): boolean {
 }
 
 export function createMockApi(clock: () => number = Date.now, options: MockOptions = {}) {
-  const db: MockDb = createDb(clock());
+  const db: MockDb = createDb(clock(), options.device);
   const vapid = vapidPublicKey();
   const builds = createBuilds(iso(clock()));
   const simulated = options.builds === "simulated";
 
   // ---- derived state ------------------------------------------------------------------
 
-  function release(r: MockRelease): Release {
+  const platformOf = (app: Pick<MockApp, "platform">): Platform => app.platform ?? "ios";
+  const onDevice = (app: MockApp) => platformOf(app) === db.device.platform;
+  const isAndroidKey = (key: string) => db.apps.find((a) => appKey(a) === key)?.platform === "android";
+
+  function release(app: MockApp, r: MockRelease): Release {
     const os = db.device.os_version;
     let incompatibility: string | null = null;
-    if (os && r.min_os && compareVersions(os, r.min_os) < 0) incompatibility = `Requires iOS ${r.min_os} or later`;
-    if (os && r.max_os && compareVersions(os, r.max_os) > 0) incompatibility = `Requires iOS ${r.max_os} or earlier`;
+    if (!onDevice(app)) incompatibility = platformOf(app) === "android" ? "Made for Android devices" : "Made for iPhone and iPad";
+    else if (os && r.min_os && compareVersions(os, r.min_os) < 0) incompatibility = `Requires iOS ${r.min_os} or later`;
+    else if (os && r.max_os && compareVersions(os, r.max_os) > 0) incompatibility = `Requires iOS ${r.max_os} or earlier`;
     return { ...r, compatible: incompatibility === null, incompatibility };
   }
+
+  const releasesOf = (app: MockApp): Release[] => app.releases.map((r) => release(app, r));
 
   function sourceName(sourceId: string): string {
     return db.sources.find((s) => s.id === sourceId)?.name ?? ORPHAN_SOURCE_NAME;
@@ -175,7 +185,8 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
   }
 
   function originalOf(app: MockApp): { match: OriginalMatch; store: MockStoreApp | null } {
-    if (app.original === null) return { match: "none", store: null };
+    // An Android app has no counterpart in Apple's store.
+    if (app.original === null || app.platform === "android") return { match: "none", store: null };
     const store = findStore(app.original ?? app.bundle_id) ?? null;
     if (!store) return { match: "not_found", store: null };
     return { match: app.original === undefined ? "bundle_id" : "linked", store };
@@ -238,13 +249,16 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     return { status: "packaging", step: "Packaging", progress: t, error: null, finished_at: null };
   }
 
-  function installUrl(token: string, origin: string): string {
+  /** An iPhone installs from a manifest; an Android phone downloads the APK itself. */
+  function installUrl(token: string, origin: string, android: boolean): string {
+    if (android) return `${origin}/ota/${token}/app.apk`;
     return `itms-services://?action=download-manifest&url=${encodeURIComponent(`${origin}/ota/${token}/manifest.plist`)}`;
   }
 
   function buildJson(b: MockBuild, now: number, origin: string): Build {
     const [sourceId = "", bundleId = ""] = b.app_key.split(/\/(.*)/);
     const status = buildStatus(b, now);
+    const android = isAndroidKey(b.app_key);
     return {
       id: b.id,
       source_id: sourceId,
@@ -252,12 +266,13 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       version: b.version,
       build: b.build,
       ...status,
-      signed_bundle_id: `${bundleId}.${TEAM_ID}`,
+      // An APK keeps its package name and never expires.
+      signed_bundle_id: android ? bundleId : `${bundleId}.${TEAM_ID}`,
       size: b.size,
-      expires_at: iso(Math.min(PROFILE_EXPIRES, CERT_EXPIRES)),
+      expires_at: android ? null : iso(Math.min(PROFILE_EXPIRES, CERT_EXPIRES)),
       dropped_entitlements: b.dropped,
       created_at: iso(b.started),
-      install_url: status.status === "ready" ? installUrl(b.token, origin) : null,
+      install_url: status.status === "ready" ? installUrl(b.token, origin, android) : null,
     };
   }
 
@@ -279,7 +294,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       version: i.version,
       build: i.build,
       ...(i.revision === undefined ? {} : { revision: i.revision }),
-      signed_bundle_id: i.origin === "kiwi" ? `${bundleId}.${TEAM_ID}` : bundleId,
+      signed_bundle_id: i.origin === "kiwi" && !isAndroidKey(key) ? `${bundleId}.${TEAM_ID}` : bundleId,
       origin: i.origin,
       verified: i.verified,
       installed_at: iso(i.installed_at),
@@ -312,7 +327,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     const openUrl = install?.kiwi_scheme
       ? `kiwi-${createHash("sha256").update(`${app.bundle_id}.${TEAM_ID}`).digest("hex").slice(0, 12)}://`
       : null;
-    const releases = app.releases.map(release);
+    const releases = releasesOf(app);
     const target = releases.find((r) => r.compatible) ?? null;
     const base = {
       installed: inst,
@@ -360,13 +375,14 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       source_id: app.source_id,
       source_name: sourceName(app.source_id),
       bundle_id: app.bundle_id,
+      platform: platformOf(app),
       name: app.name,
       developer: app.developer,
       subtitle: app.subtitle,
       icon_url: `/__mock/icon/${app.slug}.svg`,
       tint_color: app.tint_color,
       category: app.category,
-      unavailable: state.action === "unavailable" && newest ? release(newest).incompatibility : null,
+      unavailable: state.action === "unavailable" && newest ? release(app, newest).incompatibility : null,
       orphaned: !db.sources.some((s) => s.id === app.source_id),
       hidden: !isShown(app),
       is_new: isNew(app),
@@ -380,10 +396,10 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       ...summary(app, now, origin),
       description: app.description,
       screenshots: Array.from({ length: app.screenshots }, (_, i) => `/__mock/shot/${app.slug}-${i + 1}.svg`),
-      releases: app.releases.map(release),
+      releases: releasesOf(app),
       permissions: app.permissions,
       dropped_entitlements: app.dropped_entitlements,
-      signed_bundle_id: `${app.bundle_id}.${TEAM_ID}`,
+      signed_bundle_id: app.platform === "android" ? app.bundle_id : `${app.bundle_id}.${TEAM_ID}`,
       source_url: db.sources.find((s) => s.id === app.source_id)?.url ?? "",
       original_match: originalOf(app).match,
       other_versions: otherVersions(app),
@@ -394,7 +410,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     const key = appKey(app);
     const inst = installed(key);
     if (!inst) return false;
-    const target = app.releases.map(release).find((r) => r.compatible);
+    const target = releasesOf(app).find((r) => r.compatible);
     return (!!target && newerThanInstalled(target, inst)) || needsResign(key, now);
   }
 
@@ -459,23 +475,29 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       attempt.completed_at = now;
       const build = db.builds.find((b) => b.id === attempt.build_id);
       if (!build) continue;
-      // Kiwi installs share the signed bundle id of every source's app with this bundle id.
-      db.installs = db.installs.filter(
-        (i) => i.app_key !== build.app_key && !(i.origin === "kiwi" && bundleOf(i.app_key) === bundleOf(build.app_key)),
-      );
-      db.installs.push({
-        app_key: build.app_key,
-        version: build.version,
-        build: build.build,
-        ...(build.revision === undefined ? {} : { revision: build.revision }),
-        origin: "kiwi",
-        verified: false,
-        installed_at: now,
-        expires_at: Math.min(PROFILE_EXPIRES, CERT_EXPIRES),
-        kiwi_scheme: true,
-      });
+      recordInstall(build, now);
       db.device.os_version_source = db.device.os_version_source === "manual" ? "manual" : "installer";
     }
+  }
+
+  /** The device has the build: an IPA signed until the profile expires, or an APK that doesn't expire. */
+  function recordInstall(build: MockBuild, now: number) {
+    const android = isAndroidKey(build.app_key);
+    // Kiwi installs share the signed bundle id of every source's app with this bundle id.
+    db.installs = db.installs.filter(
+      (i) => i.app_key !== build.app_key && !(i.origin === "kiwi" && bundleOf(i.app_key) === bundleOf(build.app_key)),
+    );
+    db.installs.push({
+      app_key: build.app_key,
+      version: build.version,
+      build: build.build,
+      ...(build.revision === undefined ? {} : { revision: build.revision }),
+      origin: "kiwi",
+      verified: false,
+      installed_at: now,
+      expires_at: android ? null : Math.min(PROFILE_EXPIRES, CERT_EXPIRES),
+      kiwi_scheme: !android,
+    });
   }
 
   // ---- Kiwi Builds ----------------------------------------------------------------------
@@ -502,7 +524,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       || (app.names.length > 0 && published.name !== null && published.name !== (app.preferences.name ?? null)));
     view.source_enabled = db.sources.find((s) => s.id === BUILD_SOURCE)?.enabled ?? null;
     // The server shows the App Store icon.
-    const store = simulated ? findStore(app.bundle_id) : undefined;
+    const store = simulated ? findStore(iconBundleId(app.id)) : undefined;
     if (store) view.icon_url = `/__mock/icon/${store.slug}.svg`;
     return view;
   }
@@ -521,9 +543,10 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       jobStarts.set(job.id, start);
       const stages = buildStages(app);
       const step = Math.floor((now - start) / BUILD_STAGE_MS);
-      if (step >= 1 && setupChecks.length === 0) {
+      // Android builds need no Mac setup: no Apple account, no decryption.
+      if (step >= 1 && setupChecks.length === 0 && app.platform !== "android") {
         setupChecks = SETUP_CHECKS.map((name) => ({ name, ready: true }));
-        for (const b of builds) b.checks = structuredClone(setupChecks);
+        for (const b of builds) if (b.platform !== "android") b.checks = structuredClone(setupChecks);
       }
       if (step >= 2 && job.recipe_key === null) {
         const version = buildVersion(app);
@@ -556,12 +579,15 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       job.stage = "Cancelled";
       job.error = "The build was cancelled. The previous release is still available.";
     } else {
-      job.stage = "Signed and available in Kiwi";
+      job.stage = app.platform === "android" ? "Available in Kiwi" : "Signed and available in Kiwi";
       publishBuild(app, job, at);
     }
   }
 
-  const BUILD_SIZES: Record<string, number> = { youtube: 152.6, "youtube-music": 98.4, twitch: 121.7, x: 164.2, reddit: 139.5 };
+  const BUILD_SIZES: Record<string, number> = {
+    youtube: 152.6, "youtube-music": 98.4, twitch: 121.7, x: 164.2, reddit: 139.5,
+    "android-youtube": 187.3, "android-youtube-music": 81.9, "android-reddit": 96.2,
+  };
 
   /** Signs a finished build and lists it in the Kiwi Builds source, like the Mac does. */
   function publishBuild(app: AutomationState, job: AutomationJob, at: number) {
@@ -579,13 +605,15 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     }
     source.last_attempt_at = source.last_success_at = iso(at);
     let entry = db.apps.find((a) => a.source_id === BUILD_SOURCE && a.bundle_id === app.bundle_id);
+    const android = app.platform === "android";
     if (!entry) {
       entry = {
-        source_id: BUILD_SOURCE, bundle_id: app.bundle_id, slug: findStore(app.bundle_id)?.slug ?? `kiwi-${app.id}`,
+        source_id: BUILD_SOURCE, bundle_id: app.bundle_id, slug: findStore(iconBundleId(app.id))?.slug ?? `kiwi-${app.id}`,
         name: catalog.name, developer: null, subtitle: null, tint_color: null, category: null, description: null,
         screenshots: 0, releases: [],
-        permissions: { entitlements: ["application-identifier", "keychain-access-groups", "aps-environment"], privacy: [] },
-        dropped_entitlements: ["aps-environment"],
+        permissions: { entitlements: android ? [] : ["application-identifier", "keychain-access-groups", "aps-environment"], privacy: [] },
+        dropped_entitlements: android ? [] : ["aps-environment"],
+        ...(android ? { platform: "android" as const } : {}),
       };
       db.apps.push(entry);
     }
@@ -594,10 +622,13 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       category: catalog.category, description: catalog.description,
     });
     const size = Math.round((BUILD_SIZES[app.id] ?? 100) * 1e6);
-    const notes = `${app.name} ${version} · Apple build ${job.external_id}\n${app.tweak.split(" ")[0]} and tweaks compiled from pinned sources.\n`
-      + `Recipe ${(job.recipe_key ?? "").slice(0, 12)}. Not yet tested on a physical device.`;
+    const recipe = `Recipe ${(job.recipe_key ?? "").slice(0, 12)}. Not yet tested on a physical device.`;
+    const notes = android
+      ? `${app.name} ${version} · Android build ${job.external_id}\nOriginal from Google Play, verified against the publisher’s signing certificate.\n`
+        + `Patched with ${app.tweak}; signed with this Kiwi’s own key.\n${recipe}`
+      : `${app.name} ${version} · Apple build ${job.external_id}\n${app.tweak.split(" ")[0]} and tweaks compiled from pinned sources.\n${recipe}`;
     entry.releases = [
-      { version, build: version, revision: job.sequence, date: iso(at), notes, size, min_os: "15.0", max_os: null },
+      { version, build: version, revision: job.sequence, date: iso(at), notes, size, min_os: android ? null : "15.0", max_os: null },
       ...entry.releases,
     ].slice(0, catalog.retain);
     const signed: MockBuild = {
@@ -637,7 +668,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
   }
 
   function prepare(app: MockApp, body: { version?: unknown; build?: unknown; revision?: unknown }, now: number): MockBuild {
-    const releases = app.releases.map(release);
+    const releases = releasesOf(app);
     const wanted =
       typeof body.version === "string"
         ? releases.find((r) => r.version === body.version && (typeof body.build !== "string" || r.build === body.build)
@@ -685,7 +716,18 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       const attempt = db.attempts.find((a) => a.token === parts[1]) ?? null;
       const build = db.builds.find((b) => b.token === parts[1]);
       if (!build) throw new HttpError(404, "not_found", "Unknown install token.");
-      if (parts[2] === "manifest.plist") {
+      const android = isAndroidKey(build.app_key);
+      if (parts[2] === "app.apk" && android) {
+        // Downloading the whole APK counts as the install; Android shows nothing more to Kiwi.
+        recordInstall(build, now);
+        return {
+          status: 200,
+          contentType: "application/vnd.android.package-archive",
+          text: "PK mock",
+          headers: { "Content-Disposition": `attachment; filename="${bundleOf(build.app_key)}-${build.version}.apk"` },
+        };
+      }
+      if (parts[2] === "manifest.plist" && !android) {
         if (attempt) attempt.manifest_at = now;
         else {
           db.attempts.push({
@@ -761,11 +803,11 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
           advanceBuilds(now);
           return;
         }
-        build.checks = [{ name: "Mac build tools", ready: false }];
+        if (build.platform !== "android") build.checks = [{ name: "Mac build tools", ready: false }];
         build.jobs.unshift({
           id: `mock-${build.id}-${build.sequence}`, app: build.id, sequence: build.sequence, status: "blocked",
           stage: "Needs attention", version: null, external_id: null, recipe_key: null, signed_build_id: null,
-          error: "Mock mode cannot build IPAs. Connect to Kiwi on your Mac to run the pipeline.",
+          error: "Mock mode cannot build apps. Connect to Kiwi on your Mac to run the pipeline.",
           created_at: iso(now), finished_at: iso(now), preferences: structuredClone(build.preferences),
         });
         build.jobs = build.jobs.slice(0, 30);
@@ -865,7 +907,8 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         return ok(
           visibleApps()
             .filter((a) => !sourceFilter || a.source_id === sourceFilter)
-            .filter((a) => withHidden || isShown(a))
+            // Browse leaves out the other platform's apps; a source's own page lists them all.
+            .filter((a) => withHidden || (isShown(a) && onDevice(a)))
             .filter((a) => !q || [a.name, a.developer, a.subtitle, a.bundle_id].some((f) => f?.toLowerCase().includes(q)))
             .sort((a, b) => a.name.localeCompare(b.name))
             .map((a) => summary(a, now, origin)),

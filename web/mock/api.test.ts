@@ -47,8 +47,11 @@ describe("mock api", () => {
   it("lists the apps Kiwi builds and saves each app's settings", () => {
     const { request } = setup();
     const overview = request("GET", "/api/automation").json as AutomationOverview;
-    expect(overview.apps.map((a) => a.id)).toEqual(["youtube", "youtube-music", "twitch", "x", "reddit"]);
-    expect(overview.apps.map((a) => a.added)).toEqual([true, false, false, false, false]);
+    expect(overview.apps.map((a) => a.id)).toEqual([
+      "youtube", "youtube-music", "twitch", "x", "reddit", "android-youtube", "android-youtube-music", "android-reddit",
+    ]);
+    expect(overview.apps.map((a) => a.platform)).toEqual(["ios", "ios", "ios", "ios", "ios", "android", "android", "android"]);
+    expect(overview.apps.map((a) => a.added)).toEqual([true, false, false, false, false, false, false, false]);
     const initial = request("GET", "/api/automation/youtube").json as AutomationState;
     expect(initial.available_tweaks.map((t) => t.id)).toContain("youpip");
     expect(initial.included.map((t) => t.name)).toEqual(["YouMod"]);
@@ -137,6 +140,82 @@ describe("mock api", () => {
     request("POST", "/api/automation/youtube/check", { force: true });
     request("POST", "/api/automation/youtube/cancel");
     expect(youtube().jobs[0]).toMatchObject({ status: "cancelled", stage: "Cancelled" });
+  });
+
+  it("builds Android apps that an Android phone installs as APK downloads", () => {
+    let now = Date.parse("2026-10-29T12:00:00Z");
+    const api = createMockApi(() => now, { builds: "simulated", device: "android" });
+    const request = (method: string, path: string, body?: unknown) => {
+      const url = new URL(path, "http://localhost:5173");
+      return api.handle({
+        method,
+        path: url.pathname,
+        query: url.searchParams,
+        headers: method === "GET" ? {} : { "x-kiwi": "1", "content-type": "application/json" },
+        body: body === undefined ? "" : JSON.stringify(body),
+        origin: "http://localhost:5173",
+      });
+    };
+    const me = request("GET", "/api/me").json as Me;
+    expect(me.device).toMatchObject({ platform: "android", model: "Android", os_version: null });
+    expect(me.counts.installed).toBe(0);
+    // AltStore sources list iPhone apps, which Browse leaves out on Android.
+    expect(request("GET", "/api/apps").json).toEqual([]);
+    const other = request("GET", "/api/apps/ytlite/com.google.ios.youtube").json as AppDetail;
+    expect(other).toMatchObject({ platform: "ios", unavailable: "Made for iPhone and iPad", state: { action: "unavailable" } });
+
+    const recipe = request("GET", "/api/automation/android-youtube").json as AutomationState;
+    expect(recipe).toMatchObject({ platform: "android", bundle_id: "app.morphe.android.youtube", added: false });
+    request("POST", "/api/automation/android-youtube/add", recipe.preferences);
+    now += 3 * 2600;
+    const running = request("GET", "/api/automation/android-youtube").json as AutomationState;
+    expect(running.jobs[0]).toMatchObject({ status: "running", stage: "Patching YouTube", version: "21.30.216" });
+    // No Apple account or decryption: the Mac's setup checks stay untouched.
+    expect(running.checks).toEqual([]);
+    now += 2 * 2600;
+    const built = request("GET", "/api/automation/android-youtube").json as AutomationState;
+    expect(built.jobs[0]).toMatchObject({ status: "ready", stage: "Available in Kiwi" });
+
+    const apps = request("GET", "/api/apps").json as AppSummary[];
+    expect(apps.map((a) => a.bundle_id)).toEqual(["app.morphe.android.youtube"]);
+    const app = request("GET", "/api/apps/kiwi-youtube/app.morphe.android.youtube").json as AppDetail;
+    expect(app).toMatchObject({
+      platform: "android", name: "YouTube", original: null, original_match: "none",
+      signed_bundle_id: "app.morphe.android.youtube", dropped_entitlements: [],
+    });
+    expect(app.releases[0]).toMatchObject({ min_os: null, compatible: true });
+    // Published builds are ready: the button is the APK itself.
+    expect(app.state.action).toBe("install");
+    const link = new URL(app.state.install_url ?? "");
+    expect(link.pathname).toMatch(/^\/ota\/[^/]+\/app\.apk$/);
+    expect(request("GET", link.pathname.replace("app.apk", "manifest.plist")).status).toBe(404);
+    const download = request("GET", link.pathname);
+    expect(download).toMatchObject({ status: 200, contentType: "application/vnd.android.package-archive" });
+    const installed = request("GET", "/api/apps/kiwi-youtube/app.morphe.android.youtube").json as AppDetail;
+    expect(installed.state).toMatchObject({
+      action: "open", open_url: null,
+      installed: { version: "21.30.216", signed_bundle_id: "app.morphe.android.youtube", expires_at: null },
+    });
+    expect((request("GET", "/api/me").json as Me).warnings.filter((w) => w.code === "expiring")).toEqual([]);
+  });
+
+  it("shows an iPhone the Android apps as made for Android", () => {
+    let now = Date.parse("2026-10-29T12:00:00Z");
+    const api = createMockApi(() => now, { builds: "simulated" });
+    const request = (method: string, path: string, body?: unknown) =>
+      api.handle({
+        method, path, query: new URLSearchParams(),
+        headers: method === "GET" ? {} : { "x-kiwi": "1", "content-type": "application/json" },
+        body: body === undefined ? "" : JSON.stringify(body),
+        origin: "http://localhost:5173",
+      });
+    const recipe = request("GET", "/api/automation/android-reddit").json as AutomationState;
+    request("POST", "/api/automation/android-reddit/add", recipe.preferences);
+    now += 5 * 2600;
+    expect((request("GET", "/api/apps").json as AppSummary[]).some((a) => a.platform === "android")).toBe(false);
+    const app = request("GET", "/api/apps/kiwi-youtube/com.reddit.frontpage").json as AppDetail;
+    expect(app).toMatchObject({ platform: "android", unavailable: "Made for Android devices", state: { action: "unavailable" } });
+    expect((request("GET", "/api/me").json as Me).device.platform).toBe("ios");
   });
 
   it("covers every action in the fixtures", () => {

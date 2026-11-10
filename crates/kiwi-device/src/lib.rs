@@ -16,7 +16,7 @@ pub use tailscale::{
     TAILSCALED_SOCKET, Tailscale, TailscalePeer, TailscaleUser, parse_dns_name, parse_owner,
     parse_whois, tailscale_owner, tailscale_whois,
 };
-pub use ua::{UaInfo, UaSource, parse_user_agent};
+pub use ua::{ANDROID_MODEL, UaInfo, UaSource, parse_user_agent};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

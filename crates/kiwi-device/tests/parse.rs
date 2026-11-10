@@ -469,16 +469,10 @@ fn safari_user_agents() {
         ),
         None
     );
-    // Not iOS (desktop Safari, iPad desktop mode, Android).
+    // Not a phone or tablet (desktop Safari, iPad desktop mode).
     assert_eq!(
         ua(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15"
-        ),
-        None
-    );
-    assert_eq!(
-        ua(
-            "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Mobile Safari/537.36"
         ),
         None
     );
@@ -543,4 +537,53 @@ fn installer_user_agents() {
     assert_eq!(ua(""), None);
     assert_eq!(UaSource::Installer.as_str(), "installer");
     assert_eq!(UaSource::Safari.as_str(), "safari");
+}
+
+#[test]
+fn android_user_agents() {
+    let android = |version: Option<&str>| {
+        info(
+            version.map(str::to_owned),
+            some("Android"),
+            None,
+            UaSource::Android,
+        )
+    };
+    // Chrome freezes the OS and model: nothing about the version can be learned.
+    assert_eq!(
+        ua(
+            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36"
+        ),
+        android(None)
+    );
+    // Firefox and WebViews report the real version.
+    assert_eq!(
+        ua("Mozilla/5.0 (Android 15; Mobile; rv:143.0) Gecko/143.0 Firefox/143.0"),
+        android(Some("15"))
+    );
+    assert_eq!(
+        ua(
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ3A.230901.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.0.0 Mobile Safari/537.36"
+        ),
+        android(Some("13"))
+    );
+    // A real Android 10 phone names its model, not "K".
+    assert_eq!(
+        ua(
+            "Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.0.0 Mobile Safari/537.36"
+        ),
+        android(Some("10"))
+    );
+    // Desktop browsers and "Android" outside the platform comment are not Android devices.
+    assert_eq!(
+        ua(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+        ),
+        None
+    );
+    assert_eq!(
+        ua("Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 (not Android 14) Firefox/143.0"),
+        None
+    );
+    assert_eq!(ua("okhttp/4.12.0 Android 14"), None);
 }

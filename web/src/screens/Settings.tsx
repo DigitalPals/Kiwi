@@ -19,13 +19,14 @@ import {
   formatDate,
   formatDateTime,
   formatRelative,
+  osName,
   osVersionSourceLabel,
   plural,
   serverLabel,
 } from "../lib/format";
 import { useResource, useTask } from "../lib/hooks";
 import { useMe } from "../lib/me";
-import { pushSupport, subscribe, subscriptionBody, usableSubscription, type PushSupport } from "../lib/push";
+import { blockedMessage, pushSupport, subscribe, subscriptionBody, usableSubscription, type PushSupport } from "../lib/push";
 import { BUILDS_PATH, DEVICE_PATH, NOTIFICATIONS_PATH, SIGNING_PATH } from "../lib/routes";
 import { countryName } from "../lib/store";
 
@@ -90,6 +91,8 @@ function DeviceSection({ me, setMe }: { me: Me; setMe: (me: Me) => void }) {
   });
   const clearManual = useTask(async () => setMe(await api.updateMe({ os_version: null })));
 
+  const android = device.platform === "android";
+  const os = osName(device.platform);
   const linked = device.devicectl;
   const cores = devices.data?.core_devices ?? [];
   const physicalFirst = [...cores].sort((a, b) => Number(b.physical) - Number(a.physical));
@@ -97,25 +100,32 @@ function DeviceSection({ me, setMe }: { me: Me; setMe: (me: Me) => void }) {
   return (
     <Section
       footer={
-        me.server.devicectl_available
-          ? "Linking this device to the iPhone paired with the Mac lets Kiwi read its iOS version and installed apps."
-          : "devicectl is not available on the Mac, so Kiwi can't see the iPhone directly."
+        android
+          ? "Kiwi can't see which apps an Android device has installed, so it tracks what you download here."
+          : me.server.devicectl_available
+            ? "Linking this device to the iPhone paired with the Mac lets Kiwi read its iOS version and installed apps."
+            : "devicectl is not available on the Mac, so Kiwi can't see the iPhone directly."
       }
     >
       <Cell label="Name">
         <InlineField value={device.name} label="Device name" onSave={async (name) => setMe(await api.updateMe({ name }))} />
       </Cell>
-      <Cell label="iOS Version" sub={device.os_version ? osVersionSourceLabel(device.os_version_source) : "Not known yet; all releases are offered"}>
+      <Cell
+        label={`${os} Version`}
+        sub={device.os_version
+          ? osVersionSourceLabel(device.os_version_source)
+          : android ? "Not reported by the browser; Android apps install without it" : "Not known yet; all releases are offered"}
+      >
         <InlineField
           value={device.os_version ?? ""}
-          label="iOS version"
-          placeholder="e.g. 27.0.1"
+          label={`${os} version`}
+          placeholder={android ? "e.g. 16" : "e.g. 27.0.1"}
           inputMode="decimal"
           onSave={async (os_version) => setMe(await api.updateMe({ os_version }))}
         />
       </Cell>
       {device.os_version_source === "manual" && (
-        <Cell label="Manual Version" sub="Use the version reported by the iPhone instead">
+        <Cell label="Manual Version" sub={android ? "Use the version the browser reports instead" : "Use the version reported by the iPhone instead"}>
           <button type="button" class="text-button" onClick={() => void clearManual.run()} disabled={clearManual.pending}>
             Clear
           </button>
@@ -127,7 +137,7 @@ function DeviceSection({ me, setMe }: { me: Me; setMe: (me: Me) => void }) {
         </Cell>
       )}
       <Cell label="Tailscale">{device.tailscale_name ?? (device.kind === "browser" ? "Not identified (browser cookie)" : "—")}</Cell>
-      <Cell label="Linked Mac Device" sub={linked ? linkStatus(linked) : null}>
+      {!android && <Cell label="Linked Mac Device" sub={linked ? linkStatus(linked) : null}>
         {devices.data ? (
           <select
             class="select"
@@ -150,8 +160,8 @@ function DeviceSection({ me, setMe }: { me: Me; setMe: (me: Me) => void }) {
         ) : (
           <Spinner />
         )}
-      </Cell>
-      <Cell label="Sync with Mac" sub={linked?.last_sync_at ? `Last synced ${formatRelative(linked.last_sync_at)}` : "Reads the iOS version and installed apps"}>
+      </Cell>}
+      {!android && <Cell label="Sync with Mac" sub={linked?.last_sync_at ? `Last synced ${formatRelative(linked.last_sync_at)}` : "Reads the iOS version and installed apps"}>
         <button
           type="button"
           class="text-button"
@@ -160,7 +170,7 @@ function DeviceSection({ me, setMe }: { me: Me; setMe: (me: Me) => void }) {
         >
           {sync.pending ? <Spinner /> : "Sync Now"}
         </button>
-      </Cell>
+      </Cell>}
       {(link.error || sync.error || clearManual.error) && (
         <div class="cell">
           <p class="form-error">{link.error ?? sync.error ?? clearManual.error}</p>
@@ -175,11 +185,10 @@ function linkStatus(linked: NonNullable<Me["device"]["devicectl"]>): string {
   return linked.reachable ? "Reachable" : "Not reachable (connect the iPhone to the Mac's network)";
 }
 
-const SUPPORT_MESSAGES: Record<Exclude<PushSupport, "supported">, string> = {
+const SUPPORT_MESSAGES: Record<Exclude<PushSupport, "supported" | "denied">, string> = {
   "needs-home-screen": "Add Kiwi to your Home Screen (Share › Add to Home Screen) and open it from there to turn on notifications.",
   unsupported: "This browser doesn't support web push notifications.",
   "no-service-worker": "The service worker isn't running (it is only registered in production builds).",
-  denied: "Notifications are blocked. Allow them in the iOS Settings app under Notifications › Kiwi.",
 };
 
 function NotificationsSection({ me, reloadMe }: { me: Me; reloadMe: () => void }) {
@@ -245,7 +254,7 @@ function NotificationsSection({ me, reloadMe }: { me: Me; reloadMe: () => void }
     );
   } else if (support !== "supported") {
     body = (
-      <Cell label="Notifications" sub={SUPPORT_MESSAGES[support]}>
+      <Cell label="Notifications" sub={support === "denied" ? blockedMessage() : SUPPORT_MESSAGES[support]}>
         {me.push.subscribed ? "On elsewhere" : "Off"}
       </Cell>
     );
@@ -629,6 +638,9 @@ function DeviceSyncSection() {
   );
 }
 
+/** A browser Kiwi can't place on the tailnet, or an Android phone or tablet, is "This Device". */
+const deviceTitle = (me: Me) => (me.device.kind === "browser" || me.device.platform === "android" ? "This Device" : "This iPhone");
+
 /** This iPhone (name and iOS version) and its notifications. */
 function DeviceRows({ me }: { me: Me }) {
   const { device } = me;
@@ -638,7 +650,11 @@ function DeviceRows({ me }: { me: Me }) {
         href={DEVICE_PATH}
         icon="phone"
         label={device.name}
-        value={device.os_version ? `iOS ${device.os_version}` : <span class="tone-warn">iOS unknown</span>}
+        value={
+          device.platform === "android"
+            ? [osName(device.platform), device.os_version].filter(Boolean).join(" ")
+            : device.os_version ? `iOS ${device.os_version}` : <span class="tone-warn">iOS unknown</span>
+        }
       />
       <LinkCell href={NOTIFICATIONS_PATH} icon="bell" label="Notifications" value={me.push.subscribed ? "On" : "Off"} />
     </>
@@ -692,11 +708,10 @@ export function Settings() {
 
   let content;
   if (me) {
-    const browser = me.device.kind === "browser";
     content = (
       <>
         <AboutCard me={me} />
-        <Section title={browser ? "This Device" : "This iPhone"}>
+        <Section title={deviceTitle(me)}>
           <DeviceRows me={me} />
         </Section>
         <MacSections me={me} />
@@ -720,7 +735,7 @@ export function DeviceScreen() {
     content = (
       <>
         <DeviceSection me={me} setMe={setMe} />
-        <DeviceSyncSection />
+        {me.device.platform !== "android" && <DeviceSyncSection />}
         <Section title="Details">
           <Cell label="Device ID">
             <span class="mono small">{me.device.id}</span>
@@ -734,7 +749,7 @@ export function DeviceScreen() {
     <main class="page">
       <BackBar label="Settings" fallback="/settings" />
       <header class="page-header">
-        <h1 class="large-title">{me?.device.kind === "browser" ? "This Device" : "This iPhone"}</h1>
+        <h1 class="large-title">{me ? deviceTitle(me) : "This iPhone"}</h1>
       </header>
       {content}
     </main>

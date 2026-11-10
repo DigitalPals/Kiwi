@@ -219,7 +219,7 @@ fn priority(source: Option<&str>) -> u8 {
         Some("devicectl") => 4,
         Some("installer") => 3,
         Some("manual") => 2,
-        Some("safari") => 1,
+        Some("safari" | "android") => 1,
         _ => 0,
     }
 }
@@ -237,7 +237,13 @@ pub fn observe_os(device: &mut DeviceRow, version: &str, source: &str) -> bool {
     true
 }
 
-/// Takes the OS version and model from a Safari or OTA installer User-Agent.
+/// Whether the device is an Android phone or tablet (architecture.md "Android devices").
+pub fn is_android(device: &DeviceRow) -> bool {
+    device.model.as_deref() == Some(kiwi_device::ANDROID_MODEL)
+}
+
+/// Takes the OS version and model from a Safari, OTA installer or Android browser
+/// User-Agent.
 pub fn observe_user_agent(device: &mut DeviceRow, user_agent: Option<&str>) -> bool {
     let Some(info) = user_agent.and_then(kiwi_device::parse_user_agent) else {
         return false;
@@ -246,7 +252,14 @@ pub fn observe_user_agent(device: &mut DeviceRow, user_agent: Option<&str>) -> b
     if let Some(version) = &info.os_version {
         changed |= observe_os(device, version, info.source.as_str());
     }
-    if info.source == UaSource::Installer
+    // An installer names the exact hardware. An Android browser only tells the platform,
+    // which never replaces a model Apple's tools reported.
+    let trusted = match info.source {
+        UaSource::Installer => true,
+        UaSource::Android => device.model.is_none(),
+        UaSource::Safari => false,
+    };
+    if trusted
         && let Some(model) = info.model
         && device.model.as_ref() != Some(&model)
     {
@@ -281,7 +294,18 @@ pub fn record_user_agent(
     Ok(())
 }
 
+/// What the device can install; `None` while nothing is known about it (every release is
+/// then offered).
 pub fn device_profile(device: &DeviceRow) -> Option<DeviceProfile> {
+    if is_android(device) {
+        // Android browsers rarely report the OS version, so Android releases declare no
+        // minimum; the platform alone decides.
+        return Some(DeviceProfile {
+            os_version: device.os_version.clone().unwrap_or_default(),
+            platform: "android".into(),
+            family: 1,
+        });
+    }
     let os_version = device.os_version.clone()?;
     let ipad = device
         .model
@@ -323,6 +347,11 @@ pub async fn resolve(kiwi: &Kiwi, req: &Requester) -> ApiResult<(DeviceRow, Opti
         },
     };
     let user = peer.as_ref().map(user_of);
+    // Tailscale knows a peer's OS even when its browser asks for desktop sites.
+    let android_peer = peer
+        .as_ref()
+        .and_then(|p| p.os.as_deref())
+        .is_some_and(|os| os.eq_ignore_ascii_case("android"));
     let mut device = match kiwi.db.device(&id)? {
         Some(d) => d,
         None => {
@@ -349,6 +378,10 @@ pub async fn resolve(kiwi: &Kiwi, req: &Requester) -> ApiResult<(DeviceRow, Opti
         if name.is_some() {
             device.tailscale_name = name;
         }
+    }
+    if android_peer && device.model.is_none() {
+        kiwi.db.set_device_model(&id, kiwi_device::ANDROID_MODEL)?;
+        device.model = Some(kiwi_device::ANDROID_MODEL.into());
     }
     record_user_agent(&kiwi.db, &mut device, req.user_agent.as_deref())?;
     Ok((device, set_cookie))
@@ -389,6 +422,8 @@ pub struct DeviceJson {
     pub os_version: Option<String>,
     pub os_version_source: Option<String>,
     pub model: Option<String>,
+    /// `ios` or `android`: what the device installs.
+    pub platform: &'static str,
     pub devicectl: Option<LinkedJson>,
     pub last_seen: Time,
 }
@@ -441,6 +476,7 @@ pub fn device_json(d: &DeviceRow) -> DeviceJson {
         os_version: d.os_version.clone(),
         os_version_source: d.os_version_source.clone(),
         model: d.model.clone(),
+        platform: if is_android(d) { "android" } else { "ios" },
         devicectl: d.devicectl_id.as_ref().map(|id| LinkedJson {
             id: id.clone(),
             name: d.devicectl_name.clone().unwrap_or_else(|| id.clone()),
@@ -918,6 +954,33 @@ mod tests {
         assert!(!observe_user_agent(&mut d, Some("curl/8.7.1")));
         let profile = device_profile(&d).unwrap();
         assert_eq!((profile.os_version.as_str(), profile.family), ("27.1", 1));
+        assert_eq!(profile.platform, "ios");
+        // An Android browser never turns an iPhone into an Android device.
+        let chrome = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36";
+        assert!(!observe_user_agent(&mut d, Some(chrome)));
+        assert!(!is_android(&d));
+    }
+
+    #[test]
+    fn android_browsers_set_the_platform() {
+        let mut d = device();
+        assert!(device_profile(&d).is_none());
+        let chrome = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36";
+        assert!(observe_user_agent(&mut d, Some(chrome)));
+        assert!(is_android(&d) && d.os_version.is_none());
+        assert!(!observe_user_agent(&mut d, Some(chrome)));
+        let profile = device_profile(&d).unwrap();
+        assert_eq!((profile.platform.as_str(), profile.family), ("android", 1));
+        let firefox = "Mozilla/5.0 (Android 15; Mobile; rv:143.0) Gecko/143.0 Firefox/143.0";
+        assert!(observe_user_agent(&mut d, Some(firefox)));
+        assert_eq!(
+            (d.os_version.as_deref(), d.os_version_source.as_deref()),
+            (Some("15"), Some("android"))
+        );
+        // Desktop mode sends a Linux User-Agent; the device stays an Android one.
+        let desktop = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+        assert!(!observe_user_agent(&mut d, Some(desktop)));
+        assert!(is_android(&d));
     }
 
     fn core(id: &str, physical: bool, paired: bool) -> CoreDevice {

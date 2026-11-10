@@ -11,7 +11,7 @@ const job = (over: Partial<AutomationJob> = {}): AutomationJob => ({
 });
 
 const state = (over: Partial<AutomationState> = {}): AutomationState => ({
-  id: "youtube", name: "YouTube", bundle_id: "com.google.ios.youtube", icon_url: null, tweak: "YouMod",
+  id: "youtube", platform: "ios", name: "YouTube", bundle_id: "com.google.ios.youtube", icon_url: null, tweak: "YouMod",
   summary: "No ads", experimental: false, warning: null, names: [], app_version: null, limitations: [],
   included: [{ id: "youmod", name: "YouMod", description: "" }],
   available_tweaks: [{ id: "ryd", name: "Return YouTube Dislikes", description: "" }, { id: "youpip", name: "Picture in Picture", description: "" }],

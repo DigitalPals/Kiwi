@@ -29,6 +29,13 @@ async function registration(): Promise<ServiceWorkerRegistration | null> {
   return (await navigator.serviceWorker.getRegistration("/")) ?? null;
 }
 
+/** Where to allow notifications again once they were blocked. */
+export function blockedMessage(): string {
+  return isIOS()
+    ? "Notifications are blocked. Allow them in the iOS Settings app under Notifications › Kiwi."
+    : "Notifications are blocked. Allow them for Kiwi in your browser's site settings.";
+}
+
 export async function pushSupport(): Promise<PushSupport> {
   const hasApis = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
   if (!hasApis) return isIOS() && !isStandalone() ? "needs-home-screen" : "unsupported";
@@ -64,9 +71,7 @@ export async function subscribe(vapidPublicKey: string): Promise<PushSubscriptio
   const permission = await Notification.requestPermission();
   if (permission !== "granted") {
     throw new Error(
-      permission === "denied"
-        ? "Notifications are blocked. Allow them in the iOS Settings app under Notifications › Kiwi."
-        : "Notification permission was not granted.",
+      permission === "denied" ? blockedMessage() : "Notification permission was not granted.",
     );
   }
   const serverKey = base64UrlToBytes(vapidPublicKey);

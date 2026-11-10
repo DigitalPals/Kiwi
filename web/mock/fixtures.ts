@@ -3,6 +3,7 @@ import type {
   CoreDevice,
   Device,
   Identity,
+  Platform,
   Profile,
   Settings,
   Source,
@@ -47,6 +48,8 @@ export interface MockApp {
   is_new?: boolean;
   /** Original app: undefined matches by bundle id, null is none, a string links that App Store app. */
   original?: string | null;
+  /** "android": an APK built by Kiwi Builds, whose `bundle_id` is its package. */
+  platform?: Platform;
 }
 
 /** Counts are computed from the apps. */
@@ -158,7 +161,8 @@ function rel(version: string, build: string | null, daysAgo: number, now: number
   };
 }
 
-export function createDb(now: number): MockDb {
+/** `platform`: the device the mock answers as; an Android one starts with nothing installed. */
+export function createDb(now: number, platform: Platform = "ios"): MockDb {
   const sources: MockSource[] = [
     {
       id: "ytlite",
@@ -683,17 +687,33 @@ export function createDb(now: number): MockDb {
     { token: "t-provenance", build_id: "b-provenance", manifest_at: now - 2000, install_ms: 25_000, completed_at: null },
   ];
 
-  const device: Device = {
-    id: "ts:nPHONE1CNTRL",
-    name: "Alex’s iPhone",
-    kind: "tailscale",
-    tailscale_name: "iphone194",
-    os_version: "27.0.1",
-    os_version_source: "installer",
-    model: "iPhone19,4",
-    devicectl: null,
-    last_seen: iso(now),
-  };
+  const android = platform === "android";
+  const device: Device = android
+    ? {
+        id: "ts:nANDROID1CNTRL",
+        name: "Pixel 9a",
+        kind: "tailscale",
+        platform: "android",
+        tailscale_name: "pixel-9a",
+        // Chrome doesn't report the Android version.
+        os_version: null,
+        os_version_source: null,
+        model: "Android",
+        devicectl: null,
+        last_seen: iso(now),
+      }
+    : {
+        id: "ts:nPHONE1CNTRL",
+        name: "Alex’s iPhone",
+        kind: "tailscale",
+        platform: "ios",
+        tailscale_name: "iphone194",
+        os_version: "27.0.1",
+        os_version_source: "installer",
+        model: "iPhone19,4",
+        devicectl: null,
+        last_seen: iso(now),
+      };
 
   const core_devices: CoreDevice[] = [
     {
@@ -841,9 +861,10 @@ export function createDb(now: number): MockDb {
     },
     sources,
     apps,
-    installs,
+    // The fixture installs are the iPhone's.
+    installs: android ? [] : installs,
     builds,
-    attempts,
+    attempts: android ? [] : attempts,
     subscriptions: new Set(),
     core_devices,
     identities: [

@@ -448,7 +448,21 @@ async fn apps_are_added_queued_behind_each_other_published_together_and_removed(
         .iter()
         .map(|a| a["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, ["youtube", "youtube-music", "twitch", "x", "reddit"]);
+    assert_eq!(
+        ids,
+        [
+            "youtube",
+            "youtube-music",
+            "twitch",
+            "x",
+            "reddit",
+            "android-youtube",
+            "android-youtube-music",
+            "android-reddit"
+        ]
+    );
+    assert_eq!(overview["apps"][0]["platform"], "ios");
+    assert_eq!(overview["apps"][5]["platform"], "android");
     assert_eq!(overview["apps"][0]["added"], true);
     assert_eq!(overview["apps"][2]["added"], false);
     assert_eq!(overview["apps"][3]["experimental"], true);
@@ -709,4 +723,213 @@ async fn upgrading_drops_apps_kiwi_no_longer_builds() {
             .all(|j| j["app"] != "gboard")
     );
     assert!(!native.exists());
+}
+
+const ANDROID_IP: &str = "100.64.0.9";
+
+/// An Android builder: a signed APK is whatever the runner says it is, so the fixture's
+/// is a few bytes with the package the recipe names.
+fn fake_android_runner(k: &TestKiwi, package: &str) {
+    let script = k.dir.path().join("fake-android-builder.py");
+    let text = format!(
+        r#"
+import sys,json,pathlib,hashlib
+command=sys.argv[1]
+recipe=sys.argv[sys.argv.index('--recipe')+1]
+root=pathlib.Path(sys.argv[sys.argv.index('--data-dir')+1])/'automation'
+request=json.loads(pathlib.Path(sys.argv[sys.argv.index('--request')+1]).read_text())
+def emit(kind,**data):print(json.dumps(dict(event=kind,**data)),flush=True)
+if command=='plan':
+ emit('health',checks=[dict(name='Fixture',ready=True)],ready=True)
+ key=hashlib.sha256(recipe.encode()).hexdigest()
+ emit('plan',plan=dict(app=recipe,platform='android',key=key,version='21.30.216',external_id='1561187872',tweaks=[],name=None))
+else:
+ data=b'PK'+recipe.encode()+bytes(str(request['sequence']),'ascii')+b'x'*300000
+ sha=hashlib.sha256(data).hexdigest()
+ dest=root/'artifacts'
+ dest.mkdir(exist_ok=True)
+ (dest/(sha+'.apk')).write_bytes(data)
+ emit('artifact',sha256=sha,version='21.30.216',build='1561187872',revision=request['sequence'],min_os=None,size=len(data),package='{package}',signer='c'*64,notes='Fixture')
+"#
+    );
+    std::fs::write(&script, text).unwrap();
+    *k.kiwi.automation.android_runner.write().unwrap() = script;
+}
+
+#[tokio::test]
+async fn android_apps_are_built_without_signing_and_install_as_apk_downloads() {
+    const PACKAGE: &str = "app.morphe.android.youtube";
+    let k = TestKiwi::start_building().await;
+    fake_runner(&k, false);
+    fake_android_runner(&k, PACKAGE);
+    k.devices.add_android(ANDROID_IP);
+    let phone = k.phone();
+    let android = k.android(ANDROID_IP);
+
+    let initial = phone.ok("/api/automation/android-youtube").await;
+    assert_eq!(initial["platform"], "android");
+    assert_eq!(initial["added"], false);
+    assert_eq!(initial["app_version"], "21.30.216");
+    let added = phone
+        .post(
+            "/api/automation/android-youtube/add",
+            initial["preferences"].clone(),
+        )
+        .await;
+    assert_eq!(added.status, StatusCode::ACCEPTED, "{}", added.body);
+    let ready = finished_app(&k, "android-youtube").await;
+    assert_eq!(ready["jobs"][0]["status"], "ready", "{ready}");
+    assert_eq!(ready["jobs"][0]["stage"], "Available in Kiwi");
+    assert_eq!(ready["published"]["version"], "21.30.216");
+    assert_eq!(
+        k.signer.signed.load(Ordering::SeqCst),
+        0,
+        "an Android app is signed by its builder, not with the Apple identity"
+    );
+
+    // The Android phone is recognised from its browser and its Tailscale client.
+    let me = android.ok("/api/me").await;
+    assert_eq!(me["device"]["model"], "Android");
+    assert_eq!(me["device"]["platform"], "android");
+    assert_eq!(phone.ok("/api/me").await["device"]["platform"], "ios");
+
+    // Browse shows each device the apps made for it.
+    let names = |v: Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["bundle_id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    phone.post("/api/automation/youtube/check", json!({})).await;
+    assert_eq!(finished(&k).await["jobs"][0]["status"], "ready");
+    assert_eq!(k.signer.signed.load(Ordering::SeqCst), 1);
+    assert_eq!(names(android.ok("/api/apps").await), [PACKAGE]);
+    assert_eq!(
+        names(phone.ok("/api/apps").await),
+        ["com.google.ios.youtube"]
+    );
+    let other = phone.ok(&format!("/api/apps/kiwi-youtube/{PACKAGE}")).await;
+    assert_eq!(other["state"]["action"], "unavailable", "{other}");
+    assert_eq!(other["unavailable"], "Made for Android devices");
+    let other = android
+        .ok("/api/apps/kiwi-youtube/com.google.ios.youtube")
+        .await;
+    assert_eq!(other["unavailable"], "Made for iPhone and iPad");
+
+    // The install link is the APK itself, under the app's own package name.
+    let path = format!("/api/apps/kiwi-youtube/{PACKAGE}");
+    let app = android.ok(&path).await;
+    assert_eq!(app["platform"], "android");
+    assert_eq!(app["original_match"], "none");
+    assert_eq!(
+        app["state"]["action"], "install",
+        "the build Kiwi Builds published is ready for every Android device: {app}"
+    );
+    let prepared = android.post(&format!("{path}/prepare"), json!({})).await;
+    assert_eq!(prepared.status, StatusCode::ACCEPTED, "{}", prepared.body);
+    assert_eq!(prepared.body["status"], "ready", "{}", prepared.body);
+    assert_eq!(prepared.body["signed_bundle_id"], PACKAGE);
+    assert!(prepared.body["expires_at"].is_null());
+    let url = prepared.body["install_url"].as_str().unwrap();
+    let ota = url.strip_prefix("https://kiwi.test").unwrap();
+    assert!(
+        ota.starts_with("/ota/") && ota.ends_with("/app.apk"),
+        "{url}"
+    );
+    assert_eq!(
+        android.ok(&path).await["state"]["install_url"],
+        url,
+        "one link per build and device"
+    );
+
+    // An APK is never served as an IPA, or the other way around.
+    let token = ota
+        .strip_prefix("/ota/")
+        .unwrap()
+        .strip_suffix("/app.apk")
+        .unwrap();
+    for wrong in ["app.ipa", "manifest.plist"] {
+        let r = android.get(&format!("/ota/{token}/{wrong}")).await;
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "{wrong}");
+    }
+    let partial = android
+        .request(Method::GET, ota)
+        .header("Range", "bytes=0-1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(&partial.bytes().await.unwrap()[..], b"PK");
+    assert!(android.ok(&path).await["state"]["installed"].is_null());
+
+    let response = android.request(Method::GET, ota).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/vnd.android.package-archive"
+    );
+    assert_eq!(
+        response.headers()["content-disposition"],
+        "attachment; filename=\"YouTube-21.30.216.apk\""
+    );
+    let bytes = response.bytes().await.unwrap();
+    assert!(bytes.starts_with(b"PKandroid-youtube"));
+
+    // The whole download records the install; nothing expires.
+    let mut state = Value::Null;
+    for _ in 0..100 {
+        state = android.ok(&path).await["state"].clone();
+        if state["installed"].is_object() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(state["installed"]["version"], "21.30.216", "{state}");
+    assert!(state["installed"]["expires_at"].is_null());
+    let me = android.ok("/api/me").await;
+    assert_eq!(me["counts"]["updates"], 0);
+    assert_eq!(
+        me["warnings"],
+        json!([]),
+        "Apple signing and the iOS version don't concern an Android phone"
+    );
+    assert_eq!(names(android.ok("/api/library").await), [PACKAGE]);
+    assert!(names(phone.ok("/api/library").await).is_empty());
+
+    // A rebuild is an update for the Android phone only.
+    phone
+        .post(
+            "/api/automation/android-youtube/check",
+            json!({"force":true}),
+        )
+        .await;
+    let rebuilt = finished_app(&k, "android-youtube").await;
+    assert_eq!(rebuilt["jobs"][0]["status"], "ready", "{rebuilt}");
+    assert_eq!(names(android.ok("/api/updates").await), [PACKAGE]);
+    assert!(names(phone.ok("/api/updates").await).is_empty());
+    assert_eq!(k.signer.signed.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn android_builds_must_be_the_app_in_the_recipe() {
+    let k = TestKiwi::start_building().await;
+    fake_runner(&k, false);
+    fake_android_runner(&k, "com.example.other");
+    let phone = k.phone();
+    let initial = phone.ok("/api/automation/android-youtube").await;
+    phone
+        .post(
+            "/api/automation/android-youtube/add",
+            initial["preferences"].clone(),
+        )
+        .await;
+    let failed = finished_app(&k, "android-youtube").await;
+    assert_eq!(failed["jobs"][0]["status"], "failed", "{failed}");
+    assert_eq!(
+        failed["jobs"][0]["error"],
+        "The patched app is not the one in the recipe"
+    );
+    assert!(failed["published"].is_null());
+    assert!(k.kiwi.db.builds().unwrap().is_empty());
 }

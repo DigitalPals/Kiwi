@@ -8,6 +8,7 @@ import { KiwiLogo } from "../components/KiwiLogo";
 import { Banner, Empty, ErrorState, MenuPicker, Page, SkeletonRows, Spinner } from "../components/ui";
 import { withAppState } from "../lib/action";
 import { plural } from "../lib/format";
+import { BUILDS_PATH } from "../lib/routes";
 import { useDebounced, useResource, useStoredFlag, useTask } from "../lib/hooks";
 import { useMe } from "../lib/me";
 import { shouldSuggestHomeScreen } from "../lib/pwa";
@@ -192,7 +193,21 @@ export function Browse() {
       </>
     );
   } else if (apps.data.length === 0) {
-    if (sources.data && enabledSources.length === 0) {
+    if (me?.device.platform === "android" && !q) {
+      // AltStore sources list iPhone apps; an Android device installs what Kiwi Builds makes.
+      content = (
+        <Empty
+          icon="wrench"
+          art={<KiwiLogo size={72} />}
+          title="No Android Apps Yet"
+          message="Kiwi Builds makes Android apps on your Mac. Add one there and it shows up here."
+        >
+          <a class="button" href={BUILDS_PATH}>
+            Open Kiwi Builds
+          </a>
+        </Empty>
+      );
+    } else if (sources.data && enabledSources.length === 0) {
       content = (
         <Empty
           icon="sources"

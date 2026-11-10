@@ -31,8 +31,8 @@ npm test
 npm run build
 cd ..
 
-# Kiwi Builds runner
-python3 -m pytest automation/test_runner.py
+# Kiwi Builds runners
+python3 -m pytest automation/test_runner.py automation/test_android.py
 
 # Scripts
 shellcheck install.sh uninstall.sh deploy/deploy.sh
@@ -91,6 +91,10 @@ Kiwi Builds jobs in the demo stop at the Mac's setup. Start it with
 (about 20 seconds each) and publish signed releases in the Kiwi Builds source, ready to install
 and update. For a new version to build, release one in the demo's App Store with
 `POST /__mock/app-store` and `{"bundle_id": "com.google.ios.youtube", "version": "21.45.0"}`.
+
+The demo answers as an iPhone. Add `KIWI_MOCK_DEVICE=android` and it answers as an Android
+phone: Browse lists Android apps only, and a simulated Android build installs as an APK
+download.
 
 ## Running the server locally
 

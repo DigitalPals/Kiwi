@@ -19,13 +19,18 @@ export function ExperimentalTag() {
   return <span class="tag tag-warn">Experimental</span>;
 }
 
+/** Tells an Android app from the iPhone app of the same name. */
+export function AndroidTag() {
+  return <span class="tag">Android</span>;
+}
+
 function BuildRow({ app }: { app: AutomationState }) {
   const active = activeJob(app);
   return (
     <a class="cell has-icon cell-link build-row" href={buildPath(app.id)}>
       <AppIcon url={app.icon_url} name={app.name} size={40} />
       <div class="cell-main">
-        <div class="cell-label">{app.name} {app.experimental && <ExperimentalTag />}</div>
+        <div class="cell-label">{app.name} {app.platform === "android" && <AndroidTag />} {app.experimental && <ExperimentalTag />}</div>
         <div class="cell-sub">
           {app.added ? (
             <span class="build-status">{active?.status === "running" && <Spinner />}{statusLine(app)}</span>
@@ -77,7 +82,8 @@ export function Builds() {
     content = overview.error ? <ErrorState error={overview.error} onRetry={overview.reload} /> : <Loading />;
   } else {
     const added = data.apps.filter((a) => a.added);
-    const available = data.apps.filter((a) => !a.added);
+    const available = data.apps.filter((a) => !a.added && a.platform !== "android");
+    const android = data.apps.filter((a) => !a.added && a.platform === "android");
     const ready = data.checks.length > 0 && data.checks.every((c) => c.ready);
     content = (
       <>
@@ -91,6 +97,11 @@ export function Builds() {
             {available.map((app) => <BuildRow key={app.id} app={app} />)}
           </Section>
         )}
+        {android.length > 0 && (
+          <Section title="Add an Android App" footer="Downloaded from Google Play, patched with pinned open-source patches and signed with this Kiwi's own key. Installs on Android phones and tablets.">
+            {android.map((app) => <BuildRow key={app.id} app={app} />)}
+          </Section>
+        )}
         {source && (
           <Section title="In Kiwi">
             <LinkCell
@@ -101,7 +112,7 @@ export function Builds() {
             />
           </Section>
         )}
-        <Section title="Mac" footer="Apple account sign-in and enrollment stay on the Mac.">
+        <Section title="Mac" footer="Apple account sign-in and enrollment stay on the Mac. Android apps need neither.">
           {ready ? (
             <Cell label="Mac Setup" sub="Build tools, App Store sign-in, enrollment" icon="server">
               <span class="tone-ok">Ready</span>

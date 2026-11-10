@@ -5,7 +5,7 @@ import { AppRow, ExpiryLabel, SignedIcon } from "../components/AppRow";
 import { Icon } from "../components/Icon";
 import { Banner, Empty, ErrorState, ExpandableText, Page, SkeletonRows, Spinner, VersionChange } from "../components/ui";
 import { libraryKey, needsPrepare, versionChange, withAppState, withLibraryState } from "../lib/action";
-import { expiryInfo, formatBytes, formatDate, formatRelative, formatVersion } from "../lib/format";
+import { deviceName, expiryInfo, formatBytes, formatDate, formatRelative, formatVersion } from "../lib/format";
 import { useOnForeground, useResource, useTask } from "../lib/hooks";
 import { useMe, useOnUpdateCountChange } from "../lib/me";
 
@@ -53,7 +53,9 @@ export function MyApps() {
   const updates = useResource("updates", api.updates);
   const library = useResource("library", api.library);
   const sources = useResource("sources", api.sources);
-  const { reload: reloadMe } = useMe();
+  const { me, reload: reloadMe } = useMe();
+  const android = me?.device.platform === "android";
+  const device = deviceName(me?.device.platform);
   const [editing, setEditing] = useState(false);
   const [forgetError, setForgetError] = useState<string | null>(null);
   const [forgetting, setForgetting] = useState<string | null>(null);
@@ -94,7 +96,7 @@ export function MyApps() {
     const signedId = app.state.installed?.signed_bundle_id;
     if (!signedId) return;
     const ok = window.confirm(
-      `Forget ${app.name}?\n\nKiwi stops tracking it. The app stays on your iPhone until you delete it there.`,
+      `Forget ${app.name}?\n\nKiwi stops tracking it. The app stays on your ${device} until you delete it there.`,
     );
     if (!ok) return;
     setForgetError(null);
@@ -191,7 +193,7 @@ export function MyApps() {
                 </AppRow>
               ))}
             </ul>
-            {ready && <p class="footnote">iOS asks you to confirm each install, so tap Update on every app that's ready.</p>}
+            {ready && <p class="footnote">{android ? "Android" : "iOS"} asks you to confirm each install, so tap Update on every app that's ready.</p>}
           </>
         )}
 
@@ -219,7 +221,7 @@ export function MyApps() {
           </>
         )}
         {!installed && library.error && <Banner level="error">Couldn't load installed apps: {library.error.message}</Banner>}
-        {editing && <p class="footnote">Forget stops tracking an app. It stays on your iPhone until you delete it there.</p>}
+        {editing && <p class="footnote">Forget stops tracking an app. It stays on your {device} until you delete it there.</p>}
       </>
     );
   }

@@ -18,7 +18,8 @@ Apple ID sign-in, anisette server or pairing file in the install path:
 
 Optionally, Kiwi Builds patches App Store apps with open-source tweaks on the same Mac and
 publishes them as a built-in source ([kiwi-builds.md](kiwi-builds.md)). It is off until the
-owner turns it on in Settings.
+owner turns it on in Settings. It can also patch Android apps, which Kiwi serves to the
+owner's Android devices as APK downloads (see "Android devices").
 
 ```
 iPhone (Safari / Home Screen app)
@@ -248,6 +249,39 @@ devices on the Mac get in), so other people on the tailnet can't browse, install
 change anything. The message names the owner, or says to pass `--owner` for a tagged Mac.
 The scheduler likewise prepares updates and sends notifications only for the owner's devices.
 
+### Android devices
+
+Kiwi installs on Android only what Kiwi Builds made: a patched app the Android runner
+(`automation/android.py`) signed with this Kiwi's own key. Nothing of the iOS path applies
+to it (no `codesign`, profiles, expiry, manifest or URL scheme), and the model is kept
+small:
+
+- **Which device.** `devices.model` is `Android` (`kiwi_device::ANDROID_MODEL`) for a
+  device that Tailscale reports as Android or whose browser sends an Android User-Agent,
+  set only while no model is recorded. Chrome's User-Agent hides the OS version
+  ("Android 10; K"), so `os_version` usually stays empty; Firefox reports it (source
+  `android`, the priority of `safari`). The device profile's platform is `android`.
+- **Which apps.** A release names its platforms; one that names none is an iOS release.
+  Kiwi Builds publishes Android releases with platform `Android`, no `min_os` and the
+  artifact `automation/artifacts/<sha256>.apk`. Browse leaves out the apps of the other
+  platform; opened anyway, they are unavailable ("Made for Android devices", "Made for
+  iPhone and iPad").
+- **The build.** `builds::prepare_release` gives an Android release a `ready` build row
+  that points at the artifact, after checking its digest again: no download, signing or
+  expiry, and `signed_bundle_id` is the package itself. Kiwi Builds creates it at
+  publication, so the app is installable at once. Android releases of any other source
+  are refused.
+- **The install.** `install_url` is `<public>/ota/<token>/app.apk`. The browser downloads
+  the APK and the owner opens it with Android's installer. Kiwi cannot observe that step,
+  so the completed download is the install, as for an IPA. There is no `open_url`.
+- **Updates.** A newer revision is an `update` like any other; Android accepts it over the
+  installed app because every build carries the same signature.
+
+The Android runner needs no Mac-specific tool: it downloads a pinned Java runtime, patcher
+and patch bundle, fetches the original app, verifies the publisher's signature over the
+whole file with its own verifier (`automation/apk.py`, standard library only) and emits
+the same events as `runner.py`. Details are in [kiwi-builds.md](kiwi-builds.md#android-apps).
+
 ### App actions
 
 Computed per device; see `AppState` in api.md.
@@ -324,6 +358,10 @@ without one, the same bundle id).
   the zip is not an install. Then record `download_completed_at`, upsert `installs`
   (origin `kiwi`), and parse the installer User-Agent into the device record.
 - `GET /ota/<token>/icon.png`: cached source icon (fetched with size limits).
+- `GET /ota/<token>/app.apk`: an Android build's file, streamed like `app.ipa` with
+  `Content-Type: application/vnd.android.package-archive` and a `Content-Disposition`
+  file name. `manifest.plist` and `app.ipa` answer 404 for an Android build, and `app.apk`
+  for an iOS one.
 
 ### Jobs and scheduler
 

@@ -170,4 +170,34 @@ class ModelsTest {
          "signed_bundle_id":"app.morphe.android.youtube","source_url":"kiwi://local-build","original_match":"none","other_versions":[]}
         """
     }
+
+    @Test
+    fun parsesTheKiwiBuildsOverview() {
+        val text = """
+            {"apps":[{"id":"android-youtube","platform":"android","name":"YouTube","bundle_id":"app.morphe.android.youtube",
+              "icon_url":null,"tweak":"Morphe Patches 2.1.0","summary":"No ads","experimental":false,"warning":null,"names":[],
+              "app_version":"21.30.216","limitations":[{"icon":"key","title":"Your key","detail":"Signed by Kiwi"}],
+              "included":[{"id":"ads","name":"Remove ads","description":"No ads"}],
+              "available_tweaks":[{"id":"sb","name":"SponsorBlock","description":"Skips sponsors"}],
+              "added":true,"preferences":{"enabled":true,"interval_minutes":360,"tweaks":["sb"]},
+              "jobs":[{"id":"j1","app":"android-youtube","sequence":4,"status":"running","stage":"Patching","version":"21.31.0",
+                "external_id":"1561187872","recipe_key":null,"signed_build_id":null,"error":null,
+                "created_at":"2026-11-10T08:00:00Z","finished_at":null}],
+              "checks":[],"last_checked_at":"2026-11-10T08:00:00Z","last_success_key":null,"failed_recipe":null,
+              "failed_attempts":0,"sequence":4,"published":{"version":"21.30.216","build":null,"revision":null,
+              "date":"2026-11-09T10:00:00Z","tweaks":["sb"],"name":null},"source_enabled":true,
+              "configuration_changed":false,"next_check_at":null}],
+             "checks":[{"name":"macOS","ready":false}]}
+        """.trimIndent()
+        val overview = KiwiJson.decodeFromString(AutomationOverview.serializer(), text)
+        val app = overview.apps.single()
+        assertEquals("app.morphe.android.youtube", app.bundleId)
+        assertEquals(listOf("sb"), app.preferences.tweaks)
+        assertEquals(360, app.preferences.intervalMinutes)
+        assertEquals("Patching", app.jobs.single().stage)
+        assertTrue(app.jobs.single().isActive)
+        assertEquals(listOf("sb"), app.published?.tweaks)
+        assertEquals("SponsorBlock", app.availableTweaks.single().name)
+        assertEquals(false, overview.checks.single().ready)
+    }
 }

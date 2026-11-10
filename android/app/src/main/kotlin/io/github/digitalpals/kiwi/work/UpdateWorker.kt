@@ -11,9 +11,11 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import io.github.digitalpals.kiwi.BuildConfig
 import io.github.digitalpals.kiwi.KiwiApplication
 import io.github.digitalpals.kiwi.api.AppSummary
+import io.github.digitalpals.kiwi.api.KiwiApi
 import io.github.digitalpals.kiwi.api.KiwiException
 import io.github.digitalpals.kiwi.api.Platforms
 import io.github.digitalpals.kiwi.install.InstallOutcome
@@ -24,7 +26,8 @@ import java.util.concurrent.TimeUnit
 /**
  * Checks Kiwi for updates in the background, about every two hours while there is a network:
  * reports the installed packages, notifies new updates, and (with "Install updates
- * automatically") installs those Android lets this app install without asking.
+ * automatically") installs those Android lets this app install without asking. With "Notify
+ * when a build finishes" it also notifies finished Kiwi Builds jobs.
  */
 class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
@@ -34,10 +37,13 @@ class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         return try {
             container.packageReporter.report()
             val updates = kiwi.updates().filter { it.platform == Platforms.ANDROID }
+            container.settings.setLastChecked(System.currentTimeMillis())
             val autoUpdate = container.settings.autoUpdate.first()
             val installed = if (autoUpdate) installSilently(updates) else emptySet()
             notify(updates.filter { it.libraryKey !in installed })
             selfUpdate(autoUpdate)
+            // A finished build of an installed app is already news as an update.
+            checkBuilds(kiwi, updated = updates.map { it.packageName }.toSet())
             Result.success()
         } catch (error: CancellationException) {
             throw error
@@ -81,6 +87,28 @@ class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         container.settings.setNotified(remember)
     }
 
+    /**
+     * Notifies Kiwi Builds jobs that finished since the last look ("Notify when a build
+     * finishes"), and looks again soon while a build is still running.
+     */
+    private suspend fun checkBuilds(kiwi: KiwiApi, updated: Set<String>) {
+        val container = (applicationContext as KiwiApplication).container
+        if (!container.settings.notifyBuilds.first() || !Notifications.allowed(applicationContext)) return
+        val apps = try {
+            kiwi.automation().apps
+        } catch (error: KiwiException.Http) {
+            if (error.isBuildsOff) return
+            throw error
+        }
+        val (notices, seen) = BuildNotices.fresh(apps, container.settings.notifiedBuilds(), updated)
+        Notifications.showBuilds(applicationContext, notices)
+        container.settings.setNotifiedBuilds(seen)
+        if (apps.any { app -> app.added && app.jobs.any { it.isActive } }) {
+            // A follow-up run chains itself after this one; other callers keep a pending one.
+            watchBuilds(applicationContext, chain = inputData.getBoolean(WATCH, false))
+        }
+    }
+
     /** Offers (or installs) a newer version of this app when Kiwi has one. */
     private suspend fun selfUpdate(autoUpdate: Boolean) {
         val container = (applicationContext as KiwiApplication).container
@@ -106,6 +134,9 @@ class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         private const val TAG = "KiwiUpdates"
         private const val PERIODIC = "kiwi-update-check"
         private const val NOW = "kiwi-update-check-now"
+        private const val BUILD_WATCH = "kiwi-build-watch"
+        private const val WATCH = "watch_builds"
+        private const val BUILD_WATCH_MINUTES = 5L
 
         private val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
@@ -126,9 +157,25 @@ class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker
             WorkManager.getInstance(context).enqueueUniqueWork(NOW, ExistingWorkPolicy.REPLACE, request)
         }
 
+        /**
+         * Checks again in a few minutes while a Kiwi Builds job runs, so its build is notified (and
+         * installed, where that needs no confirmation) soon after it finishes; the periodic check
+         * comes only every two hours.
+         */
+        fun watchBuilds(context: Context, chain: Boolean = false) {
+            val request = OneTimeWorkRequestBuilder<UpdateWorker>()
+                .setConstraints(constraints)
+                .setInitialDelay(BUILD_WATCH_MINUTES, TimeUnit.MINUTES)
+                .setInputData(workDataOf(WATCH to true))
+                .build()
+            val policy = if (chain) ExistingWorkPolicy.APPEND_OR_REPLACE else ExistingWorkPolicy.KEEP
+            WorkManager.getInstance(context).enqueueUniqueWork(BUILD_WATCH, policy, request)
+        }
+
         fun cancel(context: Context) {
             WorkManager.getInstance(context).cancelUniqueWork(PERIODIC)
             WorkManager.getInstance(context).cancelUniqueWork(NOW)
+            WorkManager.getInstance(context).cancelUniqueWork(BUILD_WATCH)
         }
     }
 }

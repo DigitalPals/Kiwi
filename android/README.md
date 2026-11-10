@@ -5,7 +5,8 @@ A native Android client for Kiwi. It talks to the same JSON API as the web app
 PackageInstaller, tells Kiwi which packages are installed, checks for updates in the
 background and installs them without asking where Android allows it.
 
-Status: foundation. The screens work but are plain Material 3; their final design follows.
+Screens: Connect, Browse, an app's page, My Apps, Builds (Kiwi Builds) and Settings, in
+Material 3 with Kiwi's Evergreen accent (light and dark) and each app's own colour.
 
 - Application id `io.github.digitalpals.kiwi`, minSdk 26 (Android 8.0), target and compile
   SDK 37.
@@ -48,9 +49,22 @@ Outputs:
   them (Kiwi or a release process), with `apksigner` and a key kept outside the repository.
   Every release of the app must be signed with the same key, or Android refuses the update.
 
-The unit tests (`./gradlew test`) run on the JVM: API models, the User-Agent, server
-addresses and `kiwi://connect` links, the app button's states, the package report, install
-outcomes and update notifications. Nothing needs an emulator.
+The unit tests (`./gradlew test`) run on the JVM: API models and the Kiwi Builds endpoints,
+the User-Agent, server addresses and `kiwi://connect` links, the app button's states, the app
+colours and the "Fresh this week" shelf (ported from the web app, with its test cases), Kiwi
+Builds' wording, the package report, install outcomes, and update and build notifications.
+Nothing needs an emulator.
+
+`testDebugUnitTest` also renders every screen with made-up data (`ui/preview/PreviewData.kt`)
+in light and dark, in Robolectric with native graphics and Roborazzi, to
+`app/build/outputs/roborazzi/*.png` (C1–C6 of the design, the Builds sheets, the launcher
+icon). They are records to look at, not golden images: the test fails only when a screen can't
+be composed. Every screen also has Compose previews for Android Studio.
+
+The launcher, notification and in-app logo icons are vector drawables generated from the web
+app's icon: `python3 android/scripts/make-icons.py web/public/icons/icon.svg
+android/app/src/main/res`. The launcher icon is adaptive (gradient background, the kiwi slice
+inside the safe zone) with a monochrome layer for themed icons.
 
 ## Connecting
 
@@ -82,8 +96,18 @@ app/src/main/kotlin/io/github/digitalpals/kiwi/
   packages/   PackageManager scan and the PUT /api/me/packages report
   install/    APK download (Range resume), PackageInstaller sessions, the install flow
   work/       WorkManager update check, notifications
-  ui/         Compose screens (Connect, Browse, App, My Apps, Settings), app button states
+  ui/         Compose screens (Connect, Browse, App, My Apps, Builds, Settings), theme and
+              icons, app colours, the Fresh shelf, Kiwi Builds wording, app button states
 ```
+
+- **Design.** Material 3 with a fixed scheme seeded from Evergreen (`#1E6B4D`, dark `#5BBF94`);
+  no dynamic colour, so the brand stays. Roboto (the system font), Material 3 app bars and a
+  navigation bar with Browse, My Apps (badge: the number of updates, Kiwi's own included),
+  Builds and Settings. Filled buttons only install or update in one tap; everything else is
+  tonal. Apps bring their own colour (the source's tint, else one picked from the name, as in
+  the web app): tinted icon glows, the top of an app's page with a white button that fills
+  while Kiwi downloads, update cards washed with the app's colour, and the "Fresh this week"
+  carousel (Material 3's multi-browse carousel) of releases from the last week.
 
 - **Installed packages.** `PackageScanner` lists every installed package with its version,
   signing certificates (SHA-256 of each DER certificate: all signers of a multi-signer APK,
@@ -103,7 +127,13 @@ app/src/main/kotlin/io/github/digitalpals/kiwi/
 - **Confirmation.** On Android 12 and later every session asks for
   `USER_ACTION_NOT_REQUIRED`. Android honours this for an update of an app whose installer
   of record (or, on Android 14, update owner) is Kiwi, so apps Kiwi installed update
-  silently afterwards. Otherwise the session reports `STATUS_PENDING_USER_ACTION`: the app
+  silently afterwards.
+- **Update ownership.** On Android 14 and later every session also calls
+  `setRequestUpdateOwnership(true)`. Android applies it to the first install of a package
+  (it is a no-op for updates): Kiwi becomes the app's update owner, so another installer, such
+  as a store, can't replace Kiwi's build of it without the user's confirmation, and Kiwi's own
+  updates of it stay silent. An app installed before (by Kiwi or anyone else) keeps its
+  current owner until it is removed and installed again. Otherwise the session reports `STATUS_PENDING_USER_ACTION`: the app
   shows Android's confirmation at once while it is on screen, or posts a notification that
   opens it when it is in the background. The final status maps to success, cancelled, a
   signature conflict or a failure with Android's message, and the app reports its packages
@@ -119,6 +149,27 @@ app/src/main/kotlin/io/github/digitalpals/kiwi/
   next period.
 - **Opening apps.** Kiwi's API has no `open_url` for Android; the app opens installed apps
   with their launcher intent.
+- **Kiwi Builds.** The Builds tab manages Kiwi Builds' Android apps through `/api/automation`
+  (docs/api.md, "Kiwi Builds (automation)"): the added apps with their version, schedule and
+  running job (polled every 3 seconds while a job runs, else every 30 seconds, while the tab is
+  open), the + sheet to add one of the Android recipes not added yet (its patches and schedule
+  first), and for each app Build now / Check now, Rebuild, Cancel, its patches and schedule,
+  and Remove. "Build now" in Schedule checks every added app that has no job. iOS recipes are
+  not shown. While Kiwi Builds is off (`409 builds_off`), the tab says so and offers to turn it
+  on (`PATCH /api/settings {"kiwi_builds": true}`) after a confirmation of what it does, as the
+  web app's Settings does. An app's page shows its patches when it comes from Kiwi Builds.
+- **Build notifications.** With "Notify when a build finishes" (on by default) each update
+  check also reads `/api/automation` and notifies builds that finished or failed since the
+  last look (the first look only remembers what it saw); a ready build opens the app's page,
+  a failed one the Builds tab. A ready build of an app that is installed is left to the
+  update notification (or the silent update). While a build runs,
+  the app checks again 5 minutes later, so a build is notified (and installed, where Android
+  needs no confirmation) soon after it finishes.
+- **Settings.** The server, this phone, "Install updates automatically" (on by default),
+  Android's notification settings for the app's channels (Updates, Kiwi Builds, Installs),
+  the Kiwi app's own update, "Show setup again" (the Connect screen with the current address)
+  and Disconnect. Connecting marks the device as set up on Kiwi (`PATCH /api/me
+  {"onboarded": true}`), since the web app's onboarding isn't needed in the native app.
 
 ## Permissions
 
@@ -128,6 +179,7 @@ app/src/main/kotlin/io/github/digitalpals/kiwi/
 | `QUERY_ALL_PACKAGES` | See every installed package, so Kiwi knows what is installed and with which signature. The app is not distributed through Google Play, whose policy restricts this permission. |
 | `REQUEST_INSTALL_PACKAGES` | Install APKs with PackageInstaller. The user also has to allow "Install unknown apps" for Kiwi once; the app links to that setting. |
 | `UPDATE_PACKAGES_WITHOUT_USER_ACTION` | Android 12+: update apps Kiwi installed without a confirmation (`USER_ACTION_NOT_REQUIRED`). |
+| `ENFORCE_UPDATE_OWNERSHIP` | Android 14+: become the update owner of the apps Kiwi installs (`setRequestUpdateOwnership`). |
 | `REQUEST_DELETE_PACKAGES` | Open Android's uninstall dialog for a copy of an app that has another signature. The app never uninstalls anything itself. |
 | `POST_NOTIFICATIONS` | Android 13+: update notifications and installs waiting for a tap. Asked once after connecting, and from Settings. |
 | `ACCESS_NETWORK_STATE`, `WAKE_LOCK`, `RECEIVE_BOOT_COMPLETED`, `FOREGROUND_SERVICE` | Added by WorkManager for its scheduling (the app itself starts no foreground service). |
@@ -138,7 +190,10 @@ that exclude everything): it stores only the server address and its switches.
 
 ## Not verified yet
 
-The app has been built and unit-tested; it has not run on a device or emulator yet. To
-check on a phone: connecting (and the error pages), the package report, a first install
-(confirmation), a silent update of an app Kiwi installed, the signature-conflict path, the
-self-update, background checks and notifications.
+The app has been built, unit-tested and its screens rendered on the JVM; it has not run on a
+device or emulator yet. To check on a phone: connecting (and the error pages), the package
+report, a first install (confirmation), update ownership on Android 14+, a silent update of an
+app Kiwi installed, the signature-conflict path, the self-update, background checks and
+notifications (updates and builds), the Builds tab against a real Kiwi (adding, patches,
+schedule, Build now, cancel, remove, turning Kiwi Builds on), the carousel and pull to refresh
+by touch, the bottom sheets and menus, and the themed launcher icon.

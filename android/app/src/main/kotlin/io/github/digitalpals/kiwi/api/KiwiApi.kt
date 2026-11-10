@@ -5,7 +5,10 @@ import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl
@@ -94,6 +97,31 @@ class KiwiApi(
         send<Unit>(mutate("PUT", "api/me/packages", body), null)
     }
 
+    /** `GET /api/automation`: every app Kiwi Builds can build. `409 builds_off` while it is off. */
+    suspend fun automation(): AutomationOverview = send(get("api/automation"), AutomationOverview.serializer())
+
+    /** `POST /api/automation/:app/add`: adds the app with [preferences] and queues its first build. */
+    suspend fun addAutomation(app: String, preferences: AutomationPreferences): AutomationState =
+        send(mutate("POST", automationUrl(app, "add"), preferencesJson(preferences)), AutomationState.serializer())
+
+    /** `PATCH /api/automation/:app`: replaces the app's preferences. */
+    suspend fun updateAutomation(app: String, preferences: AutomationPreferences): AutomationState =
+        send(mutate("PATCH", automationUrl(app), preferencesJson(preferences)), AutomationState.serializer())
+
+    /** `DELETE /api/automation/:app`: removes the app from Kiwi Builds. */
+    suspend fun removeAutomation(app: String): AutomationState =
+        send(mutate("DELETE", automationUrl(app), "{}"), AutomationState.serializer())
+
+    /** `POST /api/automation/:app/check`: looks for a new version now; [force] rebuilds. */
+    suspend fun checkAutomation(app: String, force: Boolean = false): AutomationState {
+        val body = buildJsonObject { put("force", JsonPrimitive(force)) }.toString()
+        return send(mutate("POST", automationUrl(app, "check"), body), AutomationState.serializer())
+    }
+
+    /** `POST /api/automation/:app/cancel`: cancels the app's queued or running job. */
+    suspend fun cancelAutomation(app: String): AutomationState =
+        send(mutate("POST", automationUrl(app, "cancel"), "{}"), AutomationState.serializer())
+
     /** An absolute URL for a path or URL from the API (icons may be `/api/icons/<sha>.png`). */
     fun resolve(url: String): HttpUrl? = baseUrl.resolve(url)
 
@@ -105,6 +133,9 @@ class KiwiApi(
 
     private fun appUrl(sourceId: String, bundleId: String): HttpUrl =
         url("api/apps").newBuilder().addPathSegment(sourceId).addPathSegment(bundleId).build()
+
+    private fun automationUrl(app: String, action: String? = null): HttpUrl =
+        url("api/automation").newBuilder().addPathSegment(app).apply { if (action != null) addPathSegment(action) }.build()
 
     private fun get(path: String): Request = Request.Builder().url(url(path)).build()
 
@@ -155,6 +186,17 @@ class KiwiApi(
     }
 
     companion object {
+        /**
+         * Preferences as the server wants them: every field, and `name` only when there is one
+         * (Kiwi rejects a name for apps without a choice).
+         */
+        fun preferencesJson(preferences: AutomationPreferences): String = buildJsonObject {
+            put("enabled", JsonPrimitive(preferences.enabled))
+            put("interval_minutes", JsonPrimitive(preferences.intervalMinutes))
+            put("tweaks", JsonArray(preferences.tweaks.map(::JsonPrimitive)))
+            preferences.name?.let { put("name", JsonPrimitive(it)) }
+        }.toString()
+
         const val REQUEST_TIMEOUT_SECONDS = 30L
         private val JSON = "application/json".toMediaType()
         private const val NOT_KIWI = "This doesn't look like a Kiwi server. Check the address."

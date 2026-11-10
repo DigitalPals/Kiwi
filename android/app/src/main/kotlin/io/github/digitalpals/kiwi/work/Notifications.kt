@@ -14,10 +14,11 @@ import androidx.core.content.ContextCompat
 import io.github.digitalpals.kiwi.MainActivity
 import io.github.digitalpals.kiwi.R
 
-/** The app's notifications: available updates and installs that need a tap. */
+/** The app's notifications: available updates, finished builds and installs that need a tap. */
 object Notifications {
     private const val CHANNEL_UPDATES = "updates"
     private const val CHANNEL_INSTALLS = "installs"
+    private const val CHANNEL_BUILDS = "builds"
     private const val TAG_CONFIRM = "confirm"
     private const val TAG_SELF = "self-update"
 
@@ -31,6 +32,11 @@ object Notifications {
         manager.createNotificationChannel(
             NotificationChannel(CHANNEL_INSTALLS, "Installs", NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Installs waiting for you to confirm them"
+            },
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(CHANNEL_BUILDS, "Kiwi Builds", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                description = "Builds of your patched apps that finished or failed"
             },
         )
     }
@@ -54,6 +60,21 @@ object Notifications {
                 .setContentIntent(openMyApps(context))
                 .setAutoCancel(true)
                 .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
+                .build()
+            post(context, notice.tag, 0, notification)
+        }
+    }
+
+    fun showBuilds(context: Context, notices: List<BuildNotice>) {
+        for (notice in notices) {
+            val notification = NotificationCompat.Builder(context, CHANNEL_BUILDS)
+                .setSmallIcon(R.drawable.ic_stat_kiwi)
+                .setContentTitle(notice.title)
+                .setContentText(notice.body)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(notice.body))
+                .setContentIntent(if (notice.bundleId != null) openApp(context, notice.bundleId, notice.appName) else open(context, MainActivity.ACTION_OPEN_BUILDS))
+                .setAutoCancel(true)
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
                 .build()
             post(context, notice.tag, 0, notification)
         }
@@ -102,10 +123,25 @@ object Notifications {
         NotificationManagerCompat.from(context).notify(tag, id, notification)
     }
 
-    private fun openMyApps(context: Context): PendingIntent {
+    private fun openMyApps(context: Context): PendingIntent = open(context, MainActivity.ACTION_OPEN_MY_APPS)
+
+    /** Opens a Kiwi Builds app's page. */
+    private fun openApp(context: Context, bundleId: String, name: String): PendingIntent {
         val intent = Intent(context, MainActivity::class.java)
-            .setAction(MainActivity.ACTION_OPEN_MY_APPS)
+            .setAction(MainActivity.ACTION_OPEN_APP)
+            .putExtra(MainActivity.EXTRA_SOURCE, io.github.digitalpals.kiwi.ui.KiwiBuilds.SOURCE_ID)
+            .putExtra(MainActivity.EXTRA_BUNDLE, bundleId)
+            .putExtra(MainActivity.EXTRA_NAME, name)
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        return PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        // One request code per app, so each notification opens its own page.
+        return PendingIntent.getActivity(context, bundleId.hashCode(), intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    }
+
+    private fun open(context: Context, action: String): PendingIntent {
+        val intent = Intent(context, MainActivity::class.java)
+            .setAction(action)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        // One request code per action, so the two intents don't replace each other.
+        return PendingIntent.getActivity(context, action.hashCode(), intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     }
 }

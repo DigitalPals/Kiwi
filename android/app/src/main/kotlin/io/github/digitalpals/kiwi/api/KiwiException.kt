@@ -14,6 +14,9 @@ sealed class KiwiException(message: String, cause: Throwable? = null) : Exceptio
 
         /** Tailscale could not tell Kiwi which device this is (503). */
         val isDeviceUnidentified: Boolean get() = code == DEVICE_UNIDENTIFIED
+
+        /** Kiwi Builds is turned off in Kiwi's settings (409 from `/api/automation`). */
+        val isBuildsOff: Boolean get() = code == BUILDS_OFF
     }
 
     /** The answer was not what Kiwi sends: probably not a Kiwi server, or a proxy's error page. */
@@ -23,6 +26,7 @@ sealed class KiwiException(message: String, cause: Throwable? = null) : Exceptio
         const val NOT_OWNER = "not_owner"
         const val DEVICE_UNIDENTIFIED = "device_unidentified"
         const val BAD_HOST = "bad_host"
+        const val BUILDS_OFF = "builds_off"
     }
 }
 

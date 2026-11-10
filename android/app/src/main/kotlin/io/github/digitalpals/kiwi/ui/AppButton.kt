@@ -26,8 +26,11 @@ sealed interface ButtonView {
     data class Disabled(val label: String, val caption: String? = null) : ButtonView
 }
 
-/** What this phone knows about the app's package. */
-data class LocalPackage(val installed: Boolean, val launchable: Boolean)
+/**
+ * What this phone knows about the app's package; [silentUpdate] when Android lets Kiwi update it
+ * without asking (Kiwi is its installer of record or update owner).
+ */
+data class LocalPackage(val installed: Boolean, val launchable: Boolean, val silentUpdate: Boolean = false)
 
 /**
  * The button for [app] from the server's state, this app's own [job] for it, and whether the
@@ -80,6 +83,16 @@ fun appButton(app: AppSummary, job: InstallJob?, local: LocalPackage): ButtonVie
         Action.Unavailable -> ButtonView.Disabled("Get", app.unavailable ?: state.target?.incompatibility)
         Action.Unknown -> ButtonView.Disabled("Get", app.unavailable)
     }
+}
+
+/** The button of Kiwi's own update (`Me.android_app`), from its install job. */
+fun selfUpdateButton(job: InstallJob?): ButtonView = when {
+    job == null -> ButtonView.Install("Update")
+    job.phase == InstallJob.Phase.Preparing -> ButtonView.Progress("Preparing", null, cancellable = true)
+    job.phase == InstallJob.Phase.Downloading -> ButtonView.Progress("Downloading", job.progress, cancellable = true)
+    job.phase == InstallJob.Phase.Installing -> ButtonView.Progress("Installing", null, cancellable = true)
+    job.phase == InstallJob.Phase.NeedsPermission -> ButtonView.AllowInstalls("Allow Kiwi to install apps, then try again.")
+    else -> ButtonView.Install("Retry", job.message ?: "Updating Kiwi failed", error = true)
 }
 
 /** "Remove the other YouTube first": the package is installed with another signature. */

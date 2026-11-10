@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -28,14 +29,25 @@ class SettingsStore(context: Context) {
     /** Post a notification when an update is available. */
     val notifyUpdates: Flow<Boolean> = store.data.map { it[NOTIFY_UPDATES] ?: true }.distinctUntilChanged()
 
+    /** Post a notification when a Kiwi Builds build finishes or fails. */
+    val notifyBuilds: Flow<Boolean> = store.data.map { it[NOTIFY_BUILDS] ?: true }.distinctUntilChanged()
+
+    /** When the app last checked Kiwi for updates (milliseconds since the epoch), or null. */
+    val lastChecked: Flow<Long?> = store.data.map { it[LAST_CHECKED] }.distinctUntilChanged()
+
     /** Whether the app has asked for the notification permission once already. */
     val askedNotifications: Flow<Boolean> = store.data.map { it[ASKED_NOTIFICATIONS] ?: false }
 
     suspend fun setServerUrl(url: String?) {
         store.edit {
+            val changed = it[SERVER_URL] != url
             if (url == null) it.remove(SERVER_URL) else it[SERVER_URL] = url
-            // Notifications already sent belong to the old server.
-            it.remove(NOTIFIED)
+            if (changed) {
+                // Notifications already sent and the last check belong to the old server.
+                it.remove(NOTIFIED)
+                it.remove(NOTIFIED_BUILDS)
+                it.remove(LAST_CHECKED)
+            }
         }
     }
 
@@ -45,6 +57,14 @@ class SettingsStore(context: Context) {
 
     suspend fun setNotifyUpdates(enabled: Boolean) {
         store.edit { it[NOTIFY_UPDATES] = enabled }
+    }
+
+    suspend fun setNotifyBuilds(enabled: Boolean) {
+        store.edit { it[NOTIFY_BUILDS] = enabled }
+    }
+
+    suspend fun setLastChecked(millis: Long) {
+        store.edit { it[LAST_CHECKED] = millis }
     }
 
     suspend fun setAskedNotifications() {
@@ -58,11 +78,21 @@ class SettingsStore(context: Context) {
         store.edit { it[NOTIFIED] = keys }
     }
 
+    /** Ids of the finished Kiwi Builds jobs already seen, or null before the first look. */
+    suspend fun notifiedBuilds(): Set<String>? = store.data.first()[NOTIFIED_BUILDS]
+
+    suspend fun setNotifiedBuilds(ids: Set<String>) {
+        store.edit { it[NOTIFIED_BUILDS] = ids }
+    }
+
     private companion object {
         val SERVER_URL = stringPreferencesKey("server_url")
         val AUTO_UPDATE = booleanPreferencesKey("auto_update")
         val NOTIFY_UPDATES = booleanPreferencesKey("notify_updates")
         val ASKED_NOTIFICATIONS = booleanPreferencesKey("asked_notifications")
         val NOTIFIED = stringSetPreferencesKey("notified_updates")
+        val NOTIFY_BUILDS = booleanPreferencesKey("notify_builds")
+        val NOTIFIED_BUILDS = stringSetPreferencesKey("notified_builds")
+        val LAST_CHECKED = longPreferencesKey("last_checked")
     }
 }

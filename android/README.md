@@ -33,11 +33,11 @@ android/scripts/build-in-docker.sh test            # any Gradle tasks
 The script uses `ghcr.io/cirruslabs/android-sdk:36` pinned by digest, caches Gradle and the
 SDK packages the build adds in `android/.cache/` (ignored by git) and runs Gradle as your
 user. The build downloads Gradle, the dependencies and the compileSdk platform, so the
-container needs internet access. On a host with the `agent-resource` helper it runs the
-container through it (bounded CPU and memory, removed when the build ends). Where the local
-containers have no internet access, `KIWI_BUILD_HELPER=<command>` runs it through an
-`agent-resource`-compatible helper on another machine: the sources go to it on stdin and
-`app/build/outputs`, `reports` and `test-results` come back (nothing is cached there).
+container needs internet access. Where the local containers have no internet access (or
+there is no Docker), `KIWI_BUILD_HELPER=<command>` hands the build to a helper of your own,
+for example one that runs the container on another machine over SSH: the sources go to it
+on stdin and `app/build/outputs`, `reports` and `test-results` come back. The script's header
+describes how the helper is called.
 
 Outputs:
 

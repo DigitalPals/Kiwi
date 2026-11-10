@@ -13,20 +13,20 @@
 #
 # How the container is run:
 #
-# - KIWI_BUILD_HELPER=<command>: through an `agent-resource`-compatible helper that runs on
-#   another machine (for example a wrapper that calls it over SSH), for a host whose containers
-#   have no internet access. The sources go to the task on stdin and the build outputs
-#   (app/build/outputs, reports, test-results) come back as a tar on stdout. Nothing is cached
-#   between runs there.
-# - Else, where `agent-resource` exists (a shared build host), through it: a lease with a deadline
-#   that removes the container when the build ends or fails.
+# - KIWI_BUILD_HELPER=<command>: through your own helper, for a host whose containers have no
+#   internet access or that has no Docker. It is called as
+#     <command> IMAGE SCRIPT CPUS MEMORY [GRADLE ARGS...]
+#   with the Android sources as a tar on stdin. It runs `bash -c SCRIPT kiwi-gradle [GRADLE ARGS...]`
+#   in IMAGE (as root, with the sources at /work and KIWI_UID/KIWI_GID set to the user that should
+#   own the outputs, at most CPUS and MEMORY), for example on another machine over SSH, and writes
+#   app/build/outputs, app/build/reports and app/build/test-results as a tar on stdout. Its exit
+#   status is the build's.
 # - Else with `docker run --rm`.
 set -euo pipefail
 
 IMAGE="ghcr.io/cirruslabs/android-sdk:36@sha256:f9b3ea9ed2b5fc9522adae82c7b4622ab7aa54207ef532c8e615a347dca08f31"
 CPUS="${KIWI_BUILD_CPUS:-8}"
 MEMORY="${KIWI_BUILD_MEMORY:-12g}"
-TASK="Kiwi Android app build"
 
 android_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ "$#" -eq 0 ]; then
@@ -55,36 +55,13 @@ exec setpriv --reuid="$KIWI_UID" --regid="$KIWI_GID" --clear-groups \
   ./gradlew --no-daemon --console=plain "$@"
 INNER
 
-# The helper task: unpacks the sources from stdin into its workspace, runs the container, follows
-# its log on stderr and writes the outputs to stdout as a tar.
-# shellcheck disable=SC2016 # expanded by the task's shell
-remote='set -euo pipefail
-work="$AGENT_RESOURCE_WORKSPACE/android"
-mkdir -p "$work"
-tar -C "$work" -xf -
-image=$1 inner=$2 cpus=$3 memory=$4
-shift 4
-cid=$(agent-resource docker-run --cpus "$cpus" --memory "$memory" --volume "$work:/work" \
-  --env "KIWI_UID=$(id -u)" --env "KIWI_GID=$(id -g)" "$image" bash -c "$inner" kiwi-gradle "$@")
-docker logs --follow "$cid" >&2 &
-status=$(docker wait "$cid")
-wait
-cd "$work"
-outputs=()
-for path in app/build/outputs app/build/reports app/build/test-results; do
-  if [ -e "$path" ]; then outputs+=("$path"); fi
-done
-if [ "${#outputs[@]}" -gt 0 ]; then tar -cf - "${outputs[@]}"; fi
-exit "$status"'
-
 if [ -n "${KIWI_BUILD_HELPER:-}" ]; then
   results="$(mktemp)"
   trap 'rm -f "$results"' EXIT
   status=0
   tar -C "$android_dir" --exclude=./.cache --exclude=./.gradle --exclude=./.kotlin --exclude=./build \
     --exclude=./app/build --exclude=./local.properties -cf - . |
-    "$KIWI_BUILD_HELPER" run --task "$TASK" --ttl 2h -- \
-      bash -c "$remote" kiwi-build "$IMAGE" "$inner" "$CPUS" "$MEMORY" "$@" >"$results" || status=$?
+    "$KIWI_BUILD_HELPER" "$IMAGE" "$inner" "$CPUS" "$MEMORY" "$@" >"$results" || status=$?
   if [ -s "$results" ]; then
     rm -rf "$android_dir/app/build/outputs" "$android_dir/app/build/reports" "$android_dir/app/build/test-results"
     mkdir -p "$android_dir/app/build"
@@ -95,18 +72,5 @@ fi
 
 run_args=(--cpus "$CPUS" --memory "$MEMORY" --volume "$android_dir:/work"
   --env "KIWI_UID=$(id -u)" --env "KIWI_GID=$(id -g)")
-
-if command -v agent-resource >/dev/null 2>&1; then
-  # The supervised task owns the container: `docker-run` starts it detached; the task follows its
-  # log, returns its exit status, and the helper removes the container afterwards.
-  # shellcheck disable=SC2016 # expanded by the task's shell
-  exec agent-resource run --task "$TASK" --ttl 2h -- \
-    bash -c 'set -euo pipefail
-      cid=$(agent-resource docker-run "$@")
-      docker logs --follow "$cid" &
-      status=$(docker wait "$cid")
-      wait
-      exit "$status"' kiwi-build "${run_args[@]}" "$IMAGE" bash -c "$inner" kiwi-gradle "$@"
-fi
 
 exec docker run --rm "${run_args[@]}" "$IMAGE" bash -c "$inner" kiwi-gradle "$@"

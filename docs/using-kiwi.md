@@ -1,8 +1,30 @@
 # Using Kiwi
 
-Kiwi has four tabs: **Browse**, **My Apps**, **Sources** and **Settings**. Use it from the
-Home Screen (Safari › Share › Add to Home Screen); only the Home Screen app gets badges
-and notifications.
+Kiwi has four tabs: **Browse**, **My Apps**, **Sources** and **Settings**. On an iPhone, use
+it from the Home Screen (Safari › Share › Add to Home Screen); only the Home Screen app gets
+badges and notifications. On Android, **Builds** takes the place of Sources (see
+[Kiwi Builds](kiwi-builds.md#install-on-android)).
+
+## First use
+
+The first time a device opens Kiwi, it asks what the device is: **iPhone or iPad** or
+**Android phone or tablet**. Kiwi preselects what the browser or Tailscale tells it; a
+desktop browser tells nothing, so you pick. Kiwi remembers the answer for the device on the
+server, so the Home Screen app and Kiwi's Android app know it too, and shows only what works
+on that platform: iPhone apps, sources and signing on an iPhone; Android apps from Kiwi
+Builds on Android.
+
+Then it sets the device up:
+
+- **iPhone**: how to add Kiwi to the Home Screen, notifications (they need the Home Screen
+  app) and whether this Kiwi can sign apps for it, and until when.
+- **Android**: Kiwi's Android app, when this Kiwi serves it (download, allow installs from
+  the browser, open it and connect), or **Continue in the Browser**.
+- **Desktop browser**: nothing more; the choice decides which apps it shows.
+
+Change the device type later under Settings › This iPhone (or This Phone) › **Device Type**,
+or go through the whole setup again with Settings › **Show Setup Again**. Devices that used
+Kiwi before the setup existed skip it.
 
 ## Sources
 
@@ -101,12 +123,12 @@ expire. **Send a Test** checks that it works.
 
 ## This iPhone and devicectl
 
-Settings › This iPhone shows the name Kiwi uses, the iOS version (from Safari, the
-installer, devicectl or typed in by hand) and the Tailscale name. Kiwi offers only the
-releases that support that iOS version.
+Settings › This iPhone shows the device type, the name Kiwi uses, the iOS version (from
+Safari, the installer, devicectl or typed in by hand) and the Tailscale name. Kiwi offers
+only the releases that support that iOS version.
 
-If the iPhone is paired with the Mac (connected once with a cable and trusted, with full
-Xcode installed), link it under **Linked Mac Device**. Kiwi then reads its iOS version and
+If Kiwi runs on a Mac and the iPhone is paired with it (connected once with a cable and
+trusted, with full Xcode installed), link it under **Linked Mac Device**. Kiwi then reads its iOS version and
 installed apps with `devicectl`, every 10 minutes by default (Settings › **Sync with
 devicectl**). Installs from other stores show up in My Apps as "installed outside Kiwi".
 

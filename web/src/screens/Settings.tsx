@@ -1,11 +1,13 @@
 import { useEffect, useState } from "preact/hooks";
 import { api, errorMessage } from "../api/client";
-import type { CoreDevice, Me, Profile, Settings as SettingsData, Signing } from "../api/types";
+import type { CoreDevice, Me, Platform, PlatformSource, Profile, Settings as SettingsData, Signing } from "../api/types";
+import { KiwiAppIcon } from "../components/AppIcon";
 import { Icon } from "../components/Icon";
 import { KiwiLogo } from "../components/KiwiLogo";
 import {
   BackBar,
   Cell,
+  CellIcon,
   ErrorState,
   LinkCell,
   Loading,
@@ -14,8 +16,12 @@ import {
   Spinner,
   Toggle,
 } from "../components/ui";
+import { buildsNotice } from "../lib/automation";
+import { hasFeature } from "../lib/features";
 import {
   expiryInfo,
+  fingerprint,
+  formatBytes,
   formatDate,
   formatDateTime,
   formatRelative,
@@ -23,9 +29,11 @@ import {
   osVersionSourceLabel,
   plural,
   serverLabel,
+  shortFingerprint,
 } from "../lib/format";
 import { useResource, useTask } from "../lib/hooks";
 import { useMe } from "../lib/me";
+import { isUndetected } from "../lib/onboarding";
 import { blockedMessage, pushSupport, subscribe, subscriptionBody, usableSubscription, type PushSupport } from "../lib/push";
 import { BUILDS_PATH, DEVICE_PATH, NOTIFICATIONS_PATH, SIGNING_PATH } from "../lib/routes";
 import { countryName } from "../lib/store";
@@ -90,23 +98,36 @@ function DeviceSection({ me, setMe }: { me: Me; setMe: (me: Me) => void }) {
     setMe(await api.me());
   });
   const clearManual = useTask(async () => setMe(await api.updateMe({ os_version: null })));
+  const setPlatform = useTask(async (platform: Platform) => setMe(await api.updateMe({ platform })));
 
-  const android = device.platform === "android";
+  const android = hasFeature(me, "android_apps");
+  // Linking to a CoreDevice needs the Mac's devicectl: iOS devices on a macOS host.
+  const devicectl = hasFeature(me, "devicectl");
   const os = osName(device.platform);
   const linked = device.devicectl;
   const cores = devices.data?.core_devices ?? [];
   const physicalFirst = [...cores].sort((a, b) => Number(b.physical) - Number(a.physical));
 
+  let footer: string;
+  if (android) footer = "Kiwi can't see which apps an Android device has installed, so it tracks what you download here.";
+  else if (!devicectl) footer = "Kiwi can't see the iPhone directly here, so it tracks what you install with Kiwi.";
+  else if (me.server.devicectl_available) footer = "Linking this device to the iPhone paired with the Mac lets Kiwi read its iOS version and installed apps.";
+  else footer = "devicectl is not available on the Mac, so Kiwi can't see the iPhone directly.";
+
   return (
-    <Section
-      footer={
-        android
-          ? "Kiwi can't see which apps an Android device has installed, so it tracks what you download here."
-          : me.server.devicectl_available
-            ? "Linking this device to the iPhone paired with the Mac lets Kiwi read its iOS version and installed apps."
-            : "devicectl is not available on the Mac, so Kiwi can't see the iPhone directly."
-      }
-    >
+    <Section footer={footer}>
+      <Cell label="Device Type" sub={PLATFORM_SOURCES[device.platform_source]}>
+        <select
+          class="select"
+          aria-label="Device type"
+          value={device.platform}
+          disabled={setPlatform.pending}
+          onChange={(e) => void setPlatform.run(e.currentTarget.value as Platform)}
+        >
+          <option value="ios">iPhone or iPad</option>
+          <option value="android">Android</option>
+        </select>
+      </Cell>
       <Cell label="Name">
         <InlineField value={device.name} label="Device name" onSave={async (name) => setMe(await api.updateMe({ name }))} />
       </Cell>
@@ -137,7 +158,7 @@ function DeviceSection({ me, setMe }: { me: Me; setMe: (me: Me) => void }) {
         </Cell>
       )}
       <Cell label="Tailscale">{device.tailscale_name ?? (device.kind === "browser" ? "Not identified (browser cookie)" : "—")}</Cell>
-      {!android && <Cell label="Linked Mac Device" sub={linked ? linkStatus(linked) : null}>
+      {devicectl && <Cell label="Linked Mac Device" sub={linked ? linkStatus(linked) : null}>
         {devices.data ? (
           <select
             class="select"
@@ -161,7 +182,7 @@ function DeviceSection({ me, setMe }: { me: Me; setMe: (me: Me) => void }) {
           <Spinner />
         )}
       </Cell>}
-      {!android && <Cell label="Sync with Mac" sub={linked?.last_sync_at ? `Last synced ${formatRelative(linked.last_sync_at)}` : "Reads the iOS version and installed apps"}>
+      {devicectl && <Cell label="Sync with Mac" sub={linked?.last_sync_at ? `Last synced ${formatRelative(linked.last_sync_at)}` : "Reads the iOS version and installed apps"}>
         <button
           type="button"
           class="text-button"
@@ -171,14 +192,21 @@ function DeviceSection({ me, setMe }: { me: Me; setMe: (me: Me) => void }) {
           {sync.pending ? <Spinner /> : "Sync Now"}
         </button>
       </Cell>}
-      {(link.error || sync.error || clearManual.error) && (
+      {(setPlatform.error || link.error || sync.error || clearManual.error) && (
         <div class="cell">
-          <p class="form-error">{link.error ?? sync.error ?? clearManual.error}</p>
+          <p class="form-error">{setPlatform.error ?? link.error ?? sync.error ?? clearManual.error}</p>
         </div>
       )}
     </Section>
   );
 }
+
+/** Where the device type comes from, under Device Type. */
+const PLATFORM_SOURCES: Record<PlatformSource, string> = {
+  chosen: "Kiwi shows the apps for the type you chose",
+  detected: "Detected; Kiwi shows the apps for this type",
+  assumed: "Kiwi can't tell from this browser",
+};
 
 function linkStatus(linked: NonNullable<Me["device"]["devicectl"]>): string {
   if (linked.last_error) return `Error: ${linked.last_error}`;
@@ -522,25 +550,31 @@ function usePreferences() {
   return { settings, data, update, error };
 }
 
-const BUILDS_NOTICE =
-  "Turn on Kiwi Builds?\n\n" +
-  "Kiwi will download App Store apps with your Apple account, decrypt them on this Mac and patch them with " +
-  "open-source tweaks. Patched apps may break the app's terms of service. Use it only for apps you may use, " +
-  "on your own devices, at your own risk.\n\n" +
-  "The Mac needs a one-time setup first (see Kiwi's documentation).";
-
-/** Kiwi Builds: off until the owner turns it on and confirms what it does. */
-function BuildsSection({ data, update }: { data: SettingsData; update: (patch: Partial<SettingsData>) => Promise<void> }) {
+/**
+ * Kiwi Builds: off until the owner turns it on and confirms what it does. On Android it is a
+ * tab, so only the switch is here.
+ */
+function BuildsSection(props: {
+  data: SettingsData;
+  update: (patch: Partial<SettingsData>) => Promise<void>;
+  android?: boolean;
+}) {
+  const { data, update, android = false } = props;
   const toggle = (on: boolean) => {
-    if (on && !window.confirm(BUILDS_NOTICE)) return;
+    if (on && !window.confirm(buildsNotice(android))) return;
     void update({ kiwi_builds: on });
   };
   return (
-    <Section title="Kiwi Builds" footer="Patch App Store apps with open-source tweaks and sign them on this Mac.">
+    <Section
+      title="Kiwi Builds"
+      footer={android
+        ? "Patch Android apps with open-source patches and sign them with this Kiwi's own key."
+        : "Patch App Store apps with open-source tweaks and sign them on this Mac."}
+    >
       <Cell label="Kiwi Builds" icon="wrench" sub={data.kiwi_builds ? undefined : "Off"}>
         <Toggle label="Kiwi Builds" checked={data.kiwi_builds} onChange={toggle} />
       </Cell>
-      {data.kiwi_builds && <LinkCell href={BUILDS_PATH} label="Apps, Patches and Schedules" />}
+      {data.kiwi_builds && !android && <LinkCell href={BUILDS_PATH} label="Apps, Patches and Schedules" />}
     </Section>
   );
 }
@@ -638,10 +672,34 @@ function DeviceSyncSection() {
   );
 }
 
-/** A browser Kiwi can't place on the tailnet, or an Android phone or tablet, is "This Device". */
-const deviceTitle = (me: Me) => (me.device.kind === "browser" || me.device.platform === "android" ? "This Device" : "This iPhone");
+/**
+ * "This iPhone", "This Phone" on Android, and "This Device" for a browser Kiwi can't place on
+ * the tailnet or whose platform it can't tell (a desktop).
+ */
+const deviceTitle = (me: Me) => {
+  if (me.device.kind === "browser" || isUndetected(me.device)) return "This Device";
+  return hasFeature(me, "android_apps") ? "This Phone" : "This iPhone";
+};
 
-/** This iPhone (name and iOS version) and its notifications. */
+/** Kiwi's Android app, which this Kiwi serves and signs: a download. */
+function KiwiAppCell({ app }: { app: NonNullable<Me["android_app"]> }) {
+  return (
+    <div class="cell has-icon kiwi-app-cell">
+      <KiwiAppIcon size={29} />
+      <div class="cell-main">
+        <div class="cell-label">Kiwi App</div>
+        <div class="cell-sub">
+          Kiwi for Android {app.version_name} · {formatBytes(app.size)}
+        </div>
+      </div>
+      <a class="pill pill-small" href={app.install_url} aria-label={`Get Kiwi for Android ${app.version_name}`}>
+        Get
+      </a>
+    </div>
+  );
+}
+
+/** This iPhone (name and iOS version), its notifications and, on Android, the Kiwi app. */
 function DeviceRows({ me }: { me: Me }) {
   const { device } = me;
   return (
@@ -651,33 +709,143 @@ function DeviceRows({ me }: { me: Me }) {
         icon="phone"
         label={device.name}
         value={
-          device.platform === "android"
+          hasFeature(me, "android_apps")
             ? [osName(device.platform), device.os_version].filter(Boolean).join(" ")
             : device.os_version ? `iOS ${device.os_version}` : <span class="tone-warn">iOS unknown</span>
         }
       />
-      <LinkCell href={NOTIFICATIONS_PATH} icon="bell" label="Notifications" value={me.push.subscribed ? "On" : "Off"} />
+      {hasFeature(me, "web_push") && (
+        <LinkCell href={NOTIFICATIONS_PATH} icon="bell" label="Notifications" value={me.push.subscribed ? "On" : "Off"} />
+      )}
+      {hasFeature(me, "android_app_offer") && me.android_app && <KiwiAppCell app={me.android_app} />}
     </>
   );
 }
 
-/** Kiwi's card: a turning kiwi slice, the version and address, and whether it can sign right now. */
-function AboutCard({ me }: { me: Me }) {
+const BACKUP_DOCS = "https://github.com/DigitalPals/Kiwi/blob/main/docs/operations.md#backups";
+
+/**
+ * The key Kiwi Builds signs Android apps with, by its certificate's fingerprint. The key itself
+ * stays on the server (secrets don't travel over HTTP); the footer says where to back it up.
+ */
+function AndroidKeySection({ me }: { me: Me }) {
+  const sha = me.host.android_signer_sha256;
+  return (
+    <Section
+      title="Android Signing Key"
+      footer={
+        <>
+          Back up your key: Android only installs updates signed with the same key. It is in{" "}
+          <span class="mono">automation/android</span> in Kiwi's data directory;{" "}
+          <a href={BACKUP_DOCS} target="_blank" rel="noopener noreferrer">
+            see Backups
+          </a>
+          .
+        </>
+      }
+    >
+      {sha ? (
+        <div class="cell has-icon">
+          <CellIcon name="key" />
+          <div class="cell-main">
+            <div class="cell-label">Kiwi’s Key</div>
+            <details class="cell-details fingerprint">
+              <summary class="cell-sub mono" aria-label="SHA-256 fingerprint, show all">
+                SHA-256 {shortFingerprint(sha)}
+              </summary>
+              <ul class="mono-list">
+                <li>{fingerprint(sha)}</li>
+              </ul>
+            </details>
+          </div>
+        </div>
+      ) : (
+        <Cell icon="key" label="Kiwi’s Key" sub="Kiwi creates it with the first Android build." />
+      )}
+    </Section>
+  );
+}
+
+/** Android: Kiwi Builds (where its apps come from) and update notifications; no Mac or signing. */
+function AndroidSections({ me }: { me: Me }) {
+  const { settings, data, update, error } = usePreferences();
+  return (
+    <>
+      <AndroidKeySection me={me} />
+      {data ? (
+        <>
+          <BuildsSection data={data} update={update} android />
+          <Section title="Updates" footer={error ? <span class="danger">{error}</span> : undefined}>
+            <Cell label="Notify About Updates">
+              <Toggle label="Notify about updates" checked={data.notify_updates} onChange={(v) => void update({ notify_updates: v })} />
+            </Cell>
+          </Section>
+        </>
+      ) : (
+        settings.error && (
+          <Section title="Kiwi Builds">
+            <Cell label="Couldn't load settings" sub={settings.error.message}>
+              <button type="button" class="text-button" onClick={() => void settings.reload()}>
+                Retry
+              </button>
+            </Cell>
+          </Section>
+        )
+      )}
+    </>
+  );
+}
+
+/** Shows the first-run setup again: the device type, then the Home Screen app or the Kiwi app. */
+function SetupSection() {
+  const { setMe } = useMe();
+  const again = useTask(async () => setMe(await api.updateMe({ onboarded: false })));
+  return (
+    <Section footer={again.error ? <span class="danger">{again.error}</span> : "Choose the device type again and go through the first-run setup."}>
+      <button type="button" class="cell cell-button center" onClick={() => void again.run()} disabled={again.pending}>
+        {again.pending ? <Spinner /> : <span class="cell-action">Show Setup Again</span>}
+      </button>
+    </Section>
+  );
+}
+
+interface CardStatus {
+  dot: "live" | "warn" | "error" | "off";
+  text: string;
+}
+
+/** On an iPhone: whether Kiwi can sign right now. */
+function useSigningStatus(): CardStatus {
   const signing = useResource<Signing>("signing", api.signing);
   const active = signing.data?.active;
   const expiry = active ? expiryInfo(active.expires_at) : null;
-  let dot = "dot";
-  let status: string;
-  if (signing.data === undefined) {
-    dot = "dot dot-off";
-    status = signing.error ? "Signing status unknown" : "Checking signing…";
-  } else if (!active) {
-    dot = "dot dot-error";
-    status = "Can't sign apps";
-  } else if (expiry && expiry.tone !== "ok") {
-    dot = "dot dot-warn";
-    status = `Signing ${expiry.label.toLowerCase()}`;
-  } else status = "Ready to sign";
+  if (signing.data === undefined) return { dot: "off", text: signing.error ? "Signing status unknown" : "Checking signing…" };
+  if (!active) return { dot: "error", text: "Can't sign apps" };
+  if (expiry && expiry.tone !== "ok") return { dot: "warn", text: `Signing ${expiry.label.toLowerCase()}` };
+  return { dot: "live", text: "Ready to sign" };
+}
+
+/** On Android: whether Kiwi Builds is on and has its signing key. */
+function useAndroidStatus(me: Me): CardStatus {
+  const settings = useResource<SettingsData>("settings", api.settings);
+  if (!settings.data) return { dot: "off", text: settings.error ? "Kiwi Builds status unknown" : "Checking Kiwi Builds…" };
+  if (!settings.data.kiwi_builds) return { dot: "off", text: "Kiwi Builds is off" };
+  if (!me.host.android_signer_sha256) return { dot: "off", text: "No Android builds yet" };
+  return { dot: "live", text: "Android builds ready" };
+}
+
+function SigningCard({ me }: { me: Me }) {
+  return <AboutCard me={me} status={useSigningStatus()} />;
+}
+
+function AndroidCard({ me }: { me: Me }) {
+  return <AboutCard me={me} status={useAndroidStatus(me)} />;
+}
+
+const DOTS: Record<CardStatus["dot"], string> = { live: "dot dot-live", warn: "dot dot-warn", error: "dot dot-error", off: "dot dot-off" };
+
+/** Kiwi's card: a turning kiwi slice, the version and address, and whether it is ready. */
+function AboutCard({ me, status }: { me: Me; status: CardStatus }) {
   return (
     <div class="about-card">
       <KiwiLogo size={150} />
@@ -687,8 +855,8 @@ function AboutCard({ me }: { me: Me }) {
         </div>
         <div class="about-host">{me.server.public_url.replace(/^https?:\/\//, "")}</div>
         <div class="about-status">
-          <span class={dot === "dot" ? "dot dot-live" : dot} />
-          <span>{status}</span>
+          <span class={DOTS[status.dot]} />
+          <span>{status.text}</span>
         </div>
       </div>
     </div>
@@ -708,13 +876,16 @@ export function Settings() {
 
   let content;
   if (me) {
+    // Android has no Apple signing or Mac: its apps come from Kiwi Builds, signed with Kiwi's own key.
+    const android = hasFeature(me, "android_apps");
     content = (
       <>
-        <AboutCard me={me} />
+        {android ? <AndroidCard me={me} /> : <SigningCard me={me} />}
         <Section title={deviceTitle(me)}>
           <DeviceRows me={me} />
         </Section>
-        <MacSections me={me} />
+        {android ? <AndroidSections me={me} /> : <MacSections me={me} />}
+        <SetupSection />
         <Versions me={me} />
       </>
     );
@@ -735,7 +906,7 @@ export function DeviceScreen() {
     content = (
       <>
         <DeviceSection me={me} setMe={setMe} />
-        {me.device.platform !== "android" && <DeviceSyncSection />}
+        {hasFeature(me, "devicectl") && <DeviceSyncSection />}
         <Section title="Details">
           <Cell label="Device ID">
             <span class="mono small">{me.device.id}</span>

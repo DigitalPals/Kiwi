@@ -186,7 +186,9 @@ The first Android build creates a 4096-bit RSA key in
 mode 0600). It never leaves the Mac and no API returns it. Android installs an update over
 an app only when both carry the same signature, so **back these two files up** with the
 rest of the data directory: without them, every Android app Kiwi built has to be
-uninstalled before a build signed with a new key can be installed.
+uninstalled before a build signed with a new key can be installed. Settings › **Android
+Signing Key** on an Android device shows the SHA-256 of its certificate, the same
+fingerprint Android shows for apps Kiwi signed; the web app never offers the key itself.
 
 The patcher takes the keystore password as a command-line argument, so it is visible to
 other processes of the same user on the Mac while a build runs.
@@ -194,8 +196,12 @@ other processes of the same user on the Mac while a build runs.
 ### Install on Android
 
 Install [Tailscale](https://tailscale.com/download/android) on the device, sign in as the
-owner and open Kiwi's address in the browser. Kiwi recognises Android devices: Browse
-shows them Android apps only, and iPhones the iPhone apps.
+owner and open Kiwi's address in the browser. Kiwi recognises Android devices and asks once
+to confirm ([First use](using-kiwi.md#first-use)): Browse then shows Android apps only, and
+the **Builds** tab, where you add them, takes the place of Sources (whose AltStore sources
+list iPhone apps). Settings shows the fingerprint of this Kiwi's Android signing key under
+**Android Signing Key**; back up the key itself from the data directory
+([The signing key](#the-signing-key)).
 
 1. Open the app in Kiwi and tap **Install**. The browser downloads the APK.
 2. Open the download. The first time, Android asks you to allow that browser to install

@@ -2,28 +2,38 @@ import { useEffect, useLayoutEffect } from "preact/hooks";
 import { api, ApiError } from "./api/client";
 import { TabBar } from "./components/TabBar";
 import { Empty, Loading } from "./components/ui";
+import { hasFeature, useFeatures } from "./lib/features";
 import { useMe } from "./lib/me";
 import { subscriptionBody, usableSubscription } from "./lib/push";
-import { applyPendingScroll, previousTab, useRoute } from "./lib/router";
-import { routeTab, type Route } from "./lib/routes";
+import { applyPendingScroll, navigate, previousTab, useRoute } from "./lib/router";
+import { BUILDS_PATH, routeTab, shownTab, tabsFor, type Route } from "./lib/routes";
 import { tabDots } from "./lib/warnings";
 import { AppDetailScreen } from "./screens/AppDetail";
 import { Browse } from "./screens/Browse";
 import { MyApps } from "./screens/MyApps";
+import { Onboarding } from "./screens/Onboarding";
 import { DeviceScreen, NotificationsScreen, Settings, SigningScreen } from "./screens/Settings";
 import { SourceApps } from "./screens/SourceApps";
 import { Sources } from "./screens/Sources";
 import { Automation } from "./screens/Automation";
 import { Builds } from "./screens/Builds";
 
+/** Replaces the address with `to`, e.g. for a page this device doesn't show. */
+function Redirect({ to }: { to: string }) {
+  useEffect(() => navigate(to, { replace: true }), [to]);
+  return null;
+}
+
 function Screen({ route }: { route: Route }) {
+  const { has } = useFeatures();
   switch (route.name) {
     case "browse":
       return <Browse />;
     case "apps":
       return <MyApps />;
     case "sources":
-      return <Sources />;
+      // AltStore sources list iPhone apps: on Android, Kiwi Builds has the Sources tab's place.
+      return has("android_apps") ? <Redirect to={BUILDS_PATH} /> : <Sources />;
     case "settings":
       return <Settings />;
     case "signing":
@@ -62,7 +72,7 @@ function Screen({ route }: { route: Route }) {
 /** Re-registers this browser's push subscription if the server lost it (e.g. after a reset). */
 function usePushResync() {
   const { me, reload } = useMe();
-  const missing = me !== null && !me.push.subscribed && !!me.push.vapid_public_key;
+  const missing = me !== null && hasFeature(me, "web_push") && !me.push.subscribed && !!me.push.vapid_public_key;
   const key = me?.push.vapid_public_key ?? "";
   useEffect(() => {
     if (!missing || !("Notification" in window) || Notification.permission !== "granted") return;
@@ -100,11 +110,15 @@ export function App() {
     );
   }
 
-  const active = routeTab(route) ?? (route.name === "app" ? previousTab() : null);
+  // A new device first says what it is; the tabs follow from that.
+  if (me && !me.onboarded) return <Onboarding me={me} />;
+
+  const tabs = tabsFor(me?.features ?? []);
+  const active = shownTab(routeTab(route) ?? (route.name === "app" ? previousTab() : null), tabs);
   return (
     <>
       <Screen route={route} />
-      <TabBar active={active} updates={me?.counts.updates ?? 0} dots={tabDots(me)} />
+      <TabBar tabs={tabs} active={active} updates={me?.counts.updates ?? 0} dots={tabDots(me)} />
     </>
   );
 }

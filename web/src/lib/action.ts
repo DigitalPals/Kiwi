@@ -204,3 +204,13 @@ export function replacesLabel(state: Pick<AppState, "replaces">): string | null 
   const r = state.replaces;
   return r ? `Replaces ${r.name} (${r.source_name})` : null;
 }
+
+/**
+ * Android installs an app over another only when both carry the same signature: when the
+ * package is installed from elsewhere, that copy has to go before Kiwi's can install.
+ */
+export function foreignInstallWarning(app: { name: string; state: Pick<AppState, "foreign_install"> }): string | null {
+  return app.state.foreign_install
+    ? `Another ${app.name} is installed with a different signature. Remove it first, then install Kiwi's.`
+    : null;
+}

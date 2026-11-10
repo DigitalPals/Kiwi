@@ -333,7 +333,8 @@ small:
   ones signed with another key are saved in `foreign_packages` (`AppState.foreign_install`).
   Kiwi's key is the certificate SHA-256 the Android runner writes to
   `automation/android/signer.json` whenever it loads the key (before that, the `signer`
-  of a published build's provenance); without either only removals are recorded.
+  of a published build's provenance); without either only removals are recorded. `/api/me`
+  reports the same fingerprint as `host.android_signer_sha256`, for Settings on Android.
 - **Kiwi's own app.** `android::AndroidAppCache` reads `android-app/kiwi.json`, checks
   the package, version, size and SHA-256 of `kiwi.apk` against it (again only when either
   file's size or modification time changes) and offers it as `Me.android_app`;
@@ -545,6 +546,54 @@ Four tabs; routes: `/` (Browse), `/apps` (My Apps), `/sources`, `/settings`, `/s
 `/settings/device`, `/settings/notifications` and `/app/:sourceId/:bundleId`. `/updates` and `/library` (the earlier Updates and Library tabs,
 still used by older notifications) open My Apps.
 
+What a device shows follows `Me.features` (`hasFeature`/`useFeatures`, `web/src/lib/features.ts`),
+not checks of the platform scattered through the screens:
+
+- `ios_apps` (an iPhone): the tabs above; Kiwi Builds lists the iPhone recipes.
+- `android_apps` (Android): **Builds** (`/builds`, a wrench) replaces Sources as the third tab
+  (`tabsFor`, `web/src/lib/routes.ts`), because AltStore sources list iPhone apps: `/sources`
+  redirects there, and AltStore sources, apps from links and the add-source sheet are not
+  reachable (Kiwi Builds' own source page is, from Builds). Kiwi Builds lists only the Android
+  recipes, without the Mac's setup, and offers to turn Kiwi Builds on when it is off. Browse
+  keeps to Android apps (with hidden apps the API lists every platform's) and has no source
+  picker. Settings has no Signing or Mac sections: This Phone (the device, Notifications, the
+  Kiwi app), "Android Signing Key" (the certificate's fingerprint, `Me.host.android_signer_sha256`,
+  and where to back the key up; the key itself never leaves the server), Kiwi Builds' switch
+  and Notify About Updates.
+- `android_app_offer`: a slim "Get the Kiwi app" card on top of Browse (dismissed for good in
+  `localStorage`) and a Kiwi App row in Settings, both downloading `android_app.install_url`.
+  The router and the service worker leave `/android/` to the server, like `/api` and `/ota`.
+- `devicectl`: the Linked Mac Device and Sync rows and Sync with devicectl in This iPhone.
+- `home_screen_app`: Browse's Add to Home Screen hint. `web_push`: the Notifications row and
+  re-registering a lost push subscription.
+
+An app whose package Android has from another publisher (`AppState.foreign_install`) shows
+"Another <Name> is installed with a different signature. Remove it first, then install
+Kiwi's." in amber on its page and under its row in My Apps.
+
+First-run setup (`web/src/screens/Onboarding.tsx`, `web/src/lib/onboarding.ts`): while
+`Me.onboarded` is false it replaces the tabs. It asks "iPhone or iPad" or "Android phone or
+tablet" in two radio cards, preselecting an earlier choice or `device.detected_platform`;
+with nothing detected (a desktop browser) nothing is preselected, Continue waits, the copy
+asks "Which device do you use Kiwi on?" and the cards sit side by side from 760 px. Continue
+sends `PATCH /api/me {platform}`, the detected platform too, so it becomes the owner's
+choice. Then, by platform:
+
+- iPhone: "Set Up This iPhone": the Add to Home Screen steps when not standalone,
+  Notifications (turned on with the usual push flow in the Home Screen app; in Safari it says
+  they need the Home Screen app) and whether this Kiwi can sign, from the signing warnings and
+  `/api/signing` ("Signing ready … until <date>", or in amber "Signing isn't set up on this
+  Kiwi yet"). "Continue in Safari", or "Done" in the Home Screen app.
+- Android with `android_app`: "Set Up This Phone": the Kiwi app card with the one filled
+  button (Download Kiwi for Android), three steps, and "Continue in the Browser". Downloading
+  completes the setup too, in the background.
+- Android without `android_app`, or a desktop browser: nothing to set up; Continue sends the
+  platform with `onboarded: true`.
+
+Finishing sends `PATCH /api/me {onboarded: true}` and the tabs appear. Settings has "Show
+Setup Again" (`onboarded: false`) and This iPhone/This Phone a Device Type picker
+(`platform`).
+
 Warnings appear where they are fixed rather than as banners on every screen: an expiring
 app in My Apps (its re-sign is an update, so the badge counts it), a failed source in Sources,
 signing problems and an unknown iOS version in Settings. Sources and Settings get a dot on
@@ -606,13 +655,15 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
 - Another person's device: once `/api/me` answers `403 not_owner`, "Not Your Kiwi" with the
   server's message replaces the tabs.
 - Settings is a short index: Kiwi's card (deep green with a slowly turning kiwi slice, the
-  version, public host, and whether signing is ready, with a pulse, or expiring), this iPhone (iOS version, amber when unknown) and Notifications (on or
+  version, public host, and whether signing is ready, with a pulse, or expiring; on Android
+  whether Android builds are ready), this iPhone (iOS version, amber when unknown) and Notifications (on or
   off), the Mac (Signing with its expiry, App Store country),
   Updates (source refresh interval, auto-prepare updates, notify on updates/expiry, remove
-  watch apps) and Kiwi Builds (a switch that asks for confirmation before turning it on). Sub-pages: Signing (ready or why not, the certificates, the profiles named by
-  App ID with expiry and entitlements, Rescan), This iPhone (name, iOS version and where it
-  came from, model, Tailscale name, linked Mac device, Sync Now, devicectl sync, device ID)
-  and Notifications (enable, test, disable).
+  watch apps), Kiwi Builds (a switch that asks for confirmation before turning it on) and
+  Show Setup Again; Android's sections are above. Sub-pages: Signing (ready or why not, the certificates, the profiles named by
+  App ID with expiry and entitlements, Rescan), This iPhone (device type, name, iOS version and where it
+  came from, model, Tailscale name, linked Mac device, Sync Now, devicectl sync, device ID;
+  "This Phone" on Android, "This Device" in a desktop browser) and Notifications (enable, test, disable).
 - PWA: `manifest.webmanifest` (`display: standalone`, scope `/`), apple-touch-icon and
   icons (a kiwi fruit), `sw.js` (network-first app shell, never caches `/api` or `/ota`,
   push + notificationclick + app badge; when the server answers 5xx, e.g. `tailscale serve`'s

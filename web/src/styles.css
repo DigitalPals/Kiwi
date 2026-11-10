@@ -1199,6 +1199,11 @@ a.banner {
   left: 62px;
 }
 
+/* The Kiwi app's icon is a glyph-sized tile in Settings. */
+.cell + .cell.kiwi-app-cell::before {
+  left: 55px;
+}
+
 /* Kiwi Builds' glyph on an Evergreen tile, the size of an app icon in a cell. */
 .tile-icon {
   flex: none;
@@ -1275,6 +1280,16 @@ a.banner {
 
 .cell-details[open] summary {
   margin-bottom: 4px;
+}
+
+/* The key's fingerprint: its ends, the whole of it on a tap. */
+.fingerprint summary {
+  list-style: none;
+  font-size: 11.5px;
+}
+
+.fingerprint summary::-webkit-details-marker {
+  display: none;
 }
 
 .section-footer {
@@ -2381,6 +2396,315 @@ p.small {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
 }
 
+/* First-run setup: which device this is, then that platform's setup (no tab bar). */
+
+.onboarding {
+  padding-bottom: calc(env(safe-area-inset-bottom) + 32px);
+}
+
+.welcome {
+  padding-top: calc(env(safe-area-inset-top) + 48px);
+  text-align: center;
+}
+
+.welcome .kiwi-logo {
+  margin: 0 auto;
+  filter: drop-shadow(0 8px 14px rgba(60, 40, 10, 0.28));
+}
+
+.welcome-title {
+  margin: 14px 0 6px;
+  font-family: var(--rounded);
+  font-size: 32px;
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.welcome-lead {
+  margin: 0 12px;
+  color: var(--label2);
+  font-size: 15px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* A long address moves to its own line instead of breaking at a hyphen. */
+.welcome-host {
+  display: inline-block;
+  max-width: 100%;
+}
+
+/* The setup's pages are short: the back button scrolls with them, over the glow. */
+.onboarding .back-bar {
+  position: static;
+  background: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.welcome-question {
+  margin: 26px 6px 12px;
+  color: var(--label2);
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.welcome-question b {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--label);
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.choice {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 14px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--card-shadow), 0 0 0 0.5px var(--sep);
+  color: inherit;
+  text-align: left;
+  transition: box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+.choice.on {
+  background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 9%, var(--card)), var(--card) 65%);
+  box-shadow: 0 0 0 2px var(--accent), 0 10px 22px -14px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.choice-tile {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: linear-gradient(160deg, color-mix(in srgb, var(--tile) 78%, #fff), var(--tile));
+  box-shadow: 0 6px 14px -8px var(--tile);
+  color: #fff;
+}
+
+.choice-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.choice-text b {
+  display: block;
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.choice-sub {
+  display: block;
+  margin-top: 2px;
+  color: var(--label2);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.choice-radio {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.6px var(--label3);
+  color: var(--accent-on);
+}
+
+.choice.on .choice-radio {
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.welcome-continue {
+  margin-top: 20px;
+}
+
+.welcome-continue:disabled {
+  box-shadow: none;
+}
+
+.welcome-error {
+  margin: 10px 4px 0;
+  text-align: center;
+}
+
+/* Grey with accent text: the other way on (Continue in Safari). */
+.button-secondary {
+  background: var(--fill);
+  box-shadow: none;
+  color: var(--accent);
+}
+
+.onboarding .section + .button-block {
+  margin-top: 0;
+}
+
+/* Numbered steps ("1 Tap ••• in Safari, then Share"). */
+.cell.step {
+  min-height: 52px;
+  padding: 10px 14px;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.cell.step + .cell.step::before {
+  left: 52px;
+}
+
+.step-number {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.step-text {
+  min-width: 0;
+}
+
+/* A button named in a step, e.g. Share. */
+.key {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 7px;
+  background: var(--fill);
+  font-size: 14px;
+  font-weight: 600;
+  vertical-align: -1px;
+  white-space: nowrap;
+}
+
+/* Android: the Kiwi app, with the one filled button. */
+.get-app {
+  margin: 0 0 22px;
+  padding: 14px;
+  border-radius: 18px;
+  background: var(--card);
+  box-shadow: var(--card-shadow);
+}
+
+.get-app-info {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  margin-bottom: 14px;
+}
+
+.get-app-name {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 21px;
+}
+
+.get-app-detail {
+  margin-top: 1px;
+  color: var(--label2);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.get-app .button-block {
+  margin-top: 0;
+}
+
+@media (min-width: 760px) {
+  .welcome-wide {
+    max-width: 672px;
+    padding-top: calc(env(safe-area-inset-top) + 56px);
+  }
+
+  .welcome-wide .welcome-question {
+    margin: 18px 0;
+  }
+
+  .welcome-wide .choices {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin-bottom: 22px;
+  }
+
+  .welcome-wide .choice {
+    margin: 0;
+  }
+
+  .welcome-wide .welcome-continue {
+    width: 280px;
+    margin: 0 auto;
+  }
+}
+
+/* Browse on Android: a slim offer of the Kiwi app, dismissible. */
+.app-offer {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin: 4px 0 12px;
+  padding: 10px 10px 10px 12px;
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: var(--card-shadow);
+}
+
+.app-offer-name {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 19px;
+}
+
+.app-offer-detail {
+  color: var(--label2);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.app-offer .pill {
+  min-width: 0;
+}
+
+.app-offer .banner-close {
+  margin: 0;
+}
+
+/* An app's package installed from elsewhere (Android): under its row in My Apps. */
+.row-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: -6px 0 12px 60px;
+  color: var(--warn);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.row-warning .icon {
+  flex: none;
+  margin-top: 1px;
+}
+
 /* Bottom sheet */
 
 .sheet-backdrop {
@@ -2471,8 +2795,14 @@ p.small {
   .pill,
   .soft-button,
   .dot-live,
+  .choice,
   .about-card .kiwi-logo {
     animation: none;
     transition: none;
   }
+}
+
+/* Under Browse's list on Android: where its apps come from. */
+.fine-print.browse-note {
+  margin-top: -8px;
 }

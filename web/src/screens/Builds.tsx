@@ -3,9 +3,10 @@ import { api, ApiError } from "../api/client";
 import type { AutomationState, SetupCheck } from "../api/types";
 import { AppIcon } from "../components/AppIcon";
 import { Icon } from "../components/Icon";
-import { BackBar, Cell, Empty, ErrorState, LinkCell, Loading, Section, Spinner } from "../components/ui";
-import { activeJob, BUILD_SOURCE_ID, statusLine } from "../lib/automation";
-import { useOnForeground, useResource } from "../lib/hooks";
+import { BackBar, Cell, Empty, ErrorState, LinkCell, Loading, Page, Section, Spinner } from "../components/ui";
+import { activeJob, appsForDevice, BUILD_SOURCE_ID, buildsNotice, statusLine } from "../lib/automation";
+import { useFeatures } from "../lib/features";
+import { useOnForeground, useResource, useTask } from "../lib/hooks";
 import { buildPath, sourcePath } from "../lib/routes";
 
 export const SETUP_HELP: Record<string, string> = {
@@ -31,7 +32,7 @@ function BuildRow({ app }: { app: AutomationState }) {
     <a class="cell has-icon cell-link build-row" href={buildPath(app.id)}>
       <AppIcon url={app.icon_url} name={app.name} size={40} />
       <div class="cell-main">
-        <div class="cell-label">{app.name} {app.platform === "android" && <AndroidTag />} {app.experimental && <ExperimentalTag />}</div>
+        <div class="cell-label">{app.name} {app.experimental && <ExperimentalTag />}</div>
         <div class="cell-sub">
           {app.added ? (
             <span class="build-status">{active?.status === "running" && <Spinner />}{statusLine(app)}</span>
@@ -56,7 +57,12 @@ export function SetupCells({ checks }: { checks: SetupCheck[] }) {
   );
 }
 
+/**
+ * Kiwi Builds: the apps added, the ones to add and the Mac's setup. An iPhone opens it from
+ * Sources and sees iPhone apps; on Android it is a tab with the Android apps only.
+ */
 export function Builds() {
+  const android = useFeatures().has("android_apps");
   const overview = useResource("automation", api.automationOverview);
   const sources = useResource("sources", api.sources);
   const source = sources.data?.find((s) => s.id === BUILD_SOURCE_ID);
@@ -70,9 +76,27 @@ export function Builds() {
     return () => window.clearInterval(timer);
   }, [active, overview.reload]);
 
+  // Android has no Settings switch for Kiwi Builds' Mac side, so it turns it on here.
+  const turnOn = useTask(async () => {
+    await api.updateSettings({ kiwi_builds: true });
+    await overview.reload();
+  });
+
   let content;
   if (overview.error instanceof ApiError && overview.error.code === "builds_off") {
-    content = (
+    content = android ? (
+      <Empty icon="wrench" title="Kiwi Builds Is Off" message="Turn it on to patch Android apps and sign them with this Kiwi's own key.">
+        <button
+          type="button"
+          class="button"
+          disabled={turnOn.pending}
+          onClick={() => window.confirm(buildsNotice(true)) && void turnOn.run()}
+        >
+          {turnOn.pending ? <Spinner /> : "Turn On Kiwi Builds"}
+        </button>
+        {turnOn.error && <p class="form-error">{turnOn.error}</p>}
+      </Empty>
+    ) : (
       <Empty icon="wrench" title="Kiwi Builds Is Off" message="Turn it on in Settings to patch App Store apps on this Mac.">
         <a class="button" href="/settings">
           Open Settings
@@ -82,9 +106,9 @@ export function Builds() {
   } else if (!data) {
     content = overview.error ? <ErrorState error={overview.error} onRetry={overview.reload} /> : <Loading />;
   } else {
-    const added = data.apps.filter((a) => a.added);
-    const available = data.apps.filter((a) => !a.added && a.platform !== "android");
-    const android = data.apps.filter((a) => !a.added && a.platform === "android");
+    const apps = appsForDevice(data.apps, android);
+    const added = apps.filter((a) => a.added);
+    const available = apps.filter((a) => !a.added);
     const ready = data.checks.length > 0 && data.checks.every((c) => c.ready);
     content = (
       <>
@@ -94,13 +118,13 @@ export function Builds() {
           </Section>
         )}
         {available.length > 0 && (
-          <Section title="Add an App" footer="Downloaded with your Apple account, patched from pinned open-source tweaks and signed on the Mac.">
+          <Section
+            title={android ? "Add an Android App" : "Add an App"}
+            footer={android
+              ? "Downloaded from Google Play, patched with pinned open-source patches and signed with this Kiwi's own key."
+              : "Downloaded with your Apple account, patched from pinned open-source tweaks and signed on the Mac."}
+          >
             {available.map((app) => <BuildRow key={app.id} app={app} />)}
-          </Section>
-        )}
-        {android.length > 0 && (
-          <Section title="Add an Android App" footer="Downloaded from Google Play, patched with pinned open-source patches and signed with this Kiwi's own key. Installs on Android phones and tablets.">
-            {android.map((app) => <BuildRow key={app.id} app={app} />)}
           </Section>
         )}
         {source && (
@@ -113,14 +137,23 @@ export function Builds() {
             />
           </Section>
         )}
-        <Section title="Mac" footer="Apple account sign-in and enrollment stay on the Mac. Android apps need neither.">
-          {ready ? (
-            <Cell label="Mac Setup" sub="Build tools, App Store sign-in, enrollment" icon="server">
-              <span class="tone-ok">Ready</span>
-            </Cell>
-          ) : <SetupCells checks={data.checks} />}
-        </Section>
+        {!android && (
+          <Section title="Mac" footer="Apple account sign-in and enrollment stay on the Mac.">
+            {ready ? (
+              <Cell label="Mac Setup" sub="Build tools, App Store sign-in, enrollment" icon="server">
+                <span class="tone-ok">Ready</span>
+              </Cell>
+            ) : <SetupCells checks={data.checks} />}
+          </Section>
+        )}
       </>
+    );
+  }
+  if (android) {
+    return (
+      <Page title="Kiwi Builds" summary="Android apps, patched and signed by this Kiwi">
+        {content}
+      </Page>
     );
   }
   return (

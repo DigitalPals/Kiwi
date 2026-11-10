@@ -3,9 +3,10 @@
 Thanks for helping. Kiwi is a small project, so a short conversation first saves work:
 
 - **Bugs:** open an issue with what you did, what you expected and what happened. Include
-  your macOS and iOS versions, how Tailscale is installed (Homebrew or the Tailscale app) and
-  the relevant lines of `~/Library/Logs/Kiwi/kiwi.log`. Remove device ids, tailnet names and
-  anything else personal first.
+  your macOS (or Linux distribution, or Docker) and iOS versions, how Kiwi and Tailscale are
+  installed and the relevant lines of Kiwi's log (`~/Library/Logs/Kiwi/kiwi.log` on a Mac,
+  `journalctl -u kiwi` on Linux). Remove device ids, tailnet names and anything else
+  personal first.
 - **Features:** open an issue describing the problem before sending a large change.
 - **Security problems:** don't open an issue; see [SECURITY.md](SECURITY.md).
 

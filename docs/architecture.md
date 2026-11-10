@@ -37,6 +37,12 @@ Kiwi runs as the LaunchAgent `local.kiwi` in the user's GUI (Aqua) session: `cod
 with `errSecInternalComponent` from a plain SSH session because the login keychain is not
 usable there, and works in the GUI session, so its child processes can sign directly.
 
+Kiwi also runs on Linux: as the system service `kiwi.service` under its own user (`install.sh`,
+`deploy/kiwi.service.in`; data in `/var/lib/kiwi`, program in `/opt/kiwi/app`), or in Docker
+(`Dockerfile`, `compose.yaml`) next to a Tailscale container whose network namespace and
+LocalAPI socket it shares. There is no keychain, `devicectl` or iOS build there; Kiwi Builds
+builds Android apps only (see "Kiwi Builds on Linux").
+
 ## Repository layout
 
 ```
@@ -48,10 +54,12 @@ crates/kiwi-push        VAPID keys + Web Push (RFC 8030/8291/8292) sender
 crates/kiwi-server      axum HTTP server, SQLite state, jobs, scheduler; binary `kiwi`
 web/                    Vite + Preact + TypeScript PWA (built to web/dist, served by kiwi-server)
 automation/             Kiwi Builds: the build runner (Python) and pinned app recipes
-install.sh              installs or updates Kiwi on the Mac (build, LaunchAgent, tailscale serve)
+install.sh              installs or updates Kiwi on a Mac (build, LaunchAgent, tailscale serve)
+                        or on Linux (build, systemd service, tailscale serve)
 uninstall.sh            removes it again
-deploy/                 LaunchAgent and log rotation templates; deploy.sh deploys a checkout
-                        from another machine over SSH
+deploy/                 LaunchAgent, log rotation and systemd unit templates; deploy.sh deploys
+                        a checkout to a Mac from another machine over SSH
+Dockerfile, compose.yaml  the container image, and Kiwi with a Tailscale sidecar
 docs/                   this file, the HTTP API (api.md) and the guides
 ```
 
@@ -155,14 +163,22 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
 
 - axum on `127.0.0.1:8742` (`--listen`). Only `tailscale serve` exposes it.
 - Flags (each also an environment variable, `KIWI_<FLAG>`): `--data-dir` (default
-  `~/Library/Application Support/Kiwi`), `--web-dir` (default `<exe dir>/web`),
-  `--public-url` (default `https://<this Mac's MagicDNS name>`, asked from Tailscale at start;
-  without Tailscale, the listen address with a warning; also the only host name requests may
+  `~/Library/Application Support/Kiwi` on macOS, `$XDG_DATA_HOME/kiwi` or
+  `~/.local/share/kiwi` elsewhere), `--web-dir` (default `<exe dir>/web`),
+  `--public-url` (default `https://<this computer's MagicDNS name>`, asked from Tailscale at
+  start, waiting up to 30 s while tailscaled's socket exists but it has no name yet; without
+  Tailscale, the listen address with a warning; also the only host name requests may
   use besides the listen address, see "Security"), `--tailscale-socket` (tailscaled's
-  LocalAPI, default `/var/run/tailscaled.socket`), `--tailscale-bin` (the CLI, used without
-  that socket; default `/opt/homebrew/bin/tailscale`), `--owner` (the owner's Tailscale
-  login, see "The owner"), `--allow-simulators` (treat simulators as linkable devices, for
-  testing only). `install.sh` passes the address and the Tailscale CLI it found explicitly.
+  LocalAPI, default `/var/run/tailscaled.socket` on macOS and
+  `/var/run/tailscale/tailscaled.sock` on Linux), `--tailscale-bin` (the CLI, used without
+  that socket; default `/opt/homebrew/bin/tailscale` on macOS, `/usr/bin/tailscale` on
+  Linux), `--owner` (the owner's Tailscale login, see "The owner"), `--python` (runs Kiwi
+  Builds' runners; default `/opt/homebrew/bin/python3.13` on macOS, `python3` elsewhere),
+  `--allow-simulators` (treat simulators as linkable devices, for testing only).
+  `install.sh` passes the address and the Tailscale CLI it found explicitly.
+- The App Store country, until the owner picks one, is the region of the Mac's locale
+  (`AppleLocale`), elsewhere of the first of `LC_ALL`, `LC_MESSAGES` and `LANG` that names
+  one (`nl_NL.UTF-8` -> `nl`), else `us`.
 - SQLite (`rusqlite`, bundled) at `<data>/kiwi.db`, migrations embedded and versioned.
 - Data layout: `downloads/<sha256>.ipa` (content addressed), `builds/<build_id>/<Name>.ipa`,
   `work/` (temporary, cleared at start), `icons/<sha256(url)>.png`, `vapid.json` (0600),
@@ -171,7 +187,7 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
   (clearing `work/`, failing interrupted builds); a second instance exits with an error
   instead of damaging the running one.
 - Logging with `tracing` to stdout/stderr (LaunchAgent redirects to
-  `~/Library/Logs/Kiwi/kiwi.log`).
+  `~/Library/Logs/Kiwi/kiwi.log`; on Linux the journal, in Docker the container log).
 
 ### State
 
@@ -281,6 +297,16 @@ The Android runner needs no Mac-specific tool: it downloads a pinned Java runtim
 and patch bundle, fetches the original app, verifies the publisher's signature over the
 whole file with its own verifier (`automation/apk.py`, standard library only) and emits
 the same events as `runner.py`. Details are in [kiwi-builds.md](kiwi-builds.md#android-apps).
+
+### Kiwi Builds on Linux
+
+The iOS runner needs macOS (Xcode's SDK, FairPlay decryption). `Automation::builds_ios` is
+true on macOS only (tests turn it on with a fake runner); without it, adding or checking an
+iOS recipe answers `409 needs_mac` without starting a runner, the scheduler skips iOS apps
+(an iOS app added on a Mac whose data moved to Linux waits), and the shared setup `checks`
+are a single `{"name":"macOS","ready":false}`. Android recipes build as on a Mac. Both
+runners run with `--python`; the Android runner stops with a blocked error on Python older
+than 3.12.
 
 ### App actions
 

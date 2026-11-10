@@ -15,7 +15,8 @@ RFC 3339 strings in UTC. All `/api` responses are `application/json` with
   `conflict`, `source_fetch`, `source_parse`, `signing_unavailable`, `app_store` (502,
   the App Store could not be reached), `device_unidentified` (503), `bad_host` (421),
   `not_owner` (403, the device belongs to someone other than the owner), `builds_off` (409,
-  Kiwi Builds is turned off in Settings), `internal`.
+  Kiwi Builds is turned off in Settings), `needs_mac` (409, an iOS app in Kiwi Builds on a
+  Kiwi that doesn't run on macOS), `internal`.
 - Every request (`/api`, `/ota` and the web app) must be addressed to the public URL's
   host (`Host`, as `tailscale serve` forwards it) or to the listen address
   (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`); an `X-Forwarded-Host`, when
@@ -50,6 +51,10 @@ source. A Kiwi that had added apps before this setting existed keeps it on.
 `GET /api/automation` returns `{apps, checks}`: every app's state (as below, with only its
 newest 3 `jobs`) in display order, and the shared Mac setup `checks` (`{name,ready}[]`).
 
+iOS apps are built only on a Mac. On a Kiwi that doesn't run on macOS, `checks` is always
+`[{"name":"macOS","ready":false}]`, `POST .../add` and `POST .../check` of an iOS app answer
+`409 needs_mac`, and added iOS apps are not scheduled. Android apps build everywhere.
+
 `GET /api/automation/:app` returns one app's state with up to 30 `jobs`, newest first:
 
 - From the recipe: `id`, `platform` (`"ios"` or `"android"`), `name`, `bundle_id` (for
@@ -71,7 +76,8 @@ newest 3 `jobs`) in display order, and the shared Mac setup `checks` (`{name,rea
   is independent of the preference `enabled`.
 - `configuration_changed`: true when saved patch choices or the app name differ from the
   published build. Schedule changes alone never require rebuilding.
-- `next_check_at`: scheduled UTC time, or null when not added, disabled or a job is active.
+- `next_check_at`: scheduled UTC time, or null when not added, disabled, a job is active or
+  the app can't be built here (an iOS app on a Kiwi that doesn't run on macOS).
 - `checks`: the shared Mac setup checks. They concern iOS builds only: an Android job
   never changes them and is never blocked by them.
 

@@ -1,13 +1,20 @@
-//! X.509 certificate details (subject CN/OU, expiry) and PEM/SHA-1 helpers.
+//! X.509 certificate details (subject CN/OU, expiry, code signing usage) and PEM/SHA-1
+//! helpers.
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use sha1::{Digest, Sha1};
 
-use crate::der::{GENERALIZED_TIME, INTEGER, OID, Reader, SEQUENCE, SET, UTC_TIME, context};
+use crate::der::{
+    BOOLEAN, GENERALIZED_TIME, INTEGER, OCTET_STRING, OID, Reader, SEQUENCE, SET, UTC_TIME, context,
+};
 
 const OID_COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03];
 const OID_ORG_UNIT: &[u8] = &[0x55, 0x04, 0x0b];
+/// id-ce-extKeyUsage, 2.5.29.37
+const OID_EXTENDED_KEY_USAGE: &[u8] = &[0x55, 0x1d, 0x25];
+/// id-kp-codeSigning, 1.3.6.1.5.5.7.3.3
+const OID_CODE_SIGNING: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x03];
 
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct CertInfo {
@@ -15,6 +22,8 @@ pub(crate) struct CertInfo {
     /// Apple puts the team id in the subject's organizational unit.
     pub org_unit: Option<String>,
     pub not_after: Option<DateTime<Utc>>,
+    /// Whether the Extended Key Usage allows code signing; `None` without that extension.
+    pub code_signing: Option<bool>,
 }
 
 /// Upper-case hex SHA-1 of DER bytes, the form `security` and `codesign` use.
@@ -53,7 +62,35 @@ pub(crate) fn parse_certificate(der: &[u8]) -> Option<CertInfo> {
             }
         }
     }
+    if tbs.read(SEQUENCE).is_some() {
+        // subject public key info, then the optional unique ids and extensions
+        tbs.optional(0x81);
+        tbs.optional(0x82);
+        if let Some(extensions) = tbs.optional(context(3)) {
+            info.code_signing = code_signing_usage(extensions);
+        }
+    }
     Some(info)
+}
+
+/// Whether the Extended Key Usage extension (if any) includes code signing.
+fn code_signing_usage(extensions: &[u8]) -> Option<bool> {
+    let mut list = Reader::new(Reader::new(extensions).read(SEQUENCE)?);
+    while !list.is_empty() {
+        let mut extension = Reader::new(list.read(SEQUENCE)?);
+        let oid = extension.read(OID)?;
+        extension.optional(BOOLEAN); // critical
+        let value = extension.read(OCTET_STRING)?;
+        if oid == OID_EXTENDED_KEY_USAGE {
+            let mut purposes = Reader::new(Reader::new(value).read(SEQUENCE)?);
+            let mut code_signing = false;
+            while !purposes.is_empty() {
+                code_signing |= purposes.read(OID)? == OID_CODE_SIGNING;
+            }
+            return Some(code_signing);
+        }
+    }
+    None
 }
 
 fn parse_time(tag: u8, value: &[u8]) -> Option<DateTime<Utc>> {
@@ -100,6 +137,38 @@ mod tests {
             info.not_after,
             Some(Utc.with_ymd_and_hms(2027, 10, 25, 12, 0, 0).unwrap())
         );
+    }
+
+    #[test]
+    fn reads_the_code_signing_usage() {
+        use crate::testutil::{certificate_with_extensions, tlv};
+        let eku = |purposes: &[&[u8]]| {
+            let list: Vec<u8> = purposes.iter().flat_map(|p| tlv(OID, p)).collect();
+            tlv(
+                SEQUENCE,
+                &[
+                    tlv(OID, OID_EXTENDED_KEY_USAGE),
+                    tlv(BOOLEAN, &[0xff]),
+                    tlv(OCTET_STRING, &tlv(SEQUENCE, &list)),
+                ]
+                .concat(),
+            )
+        };
+        let basic = tlv(
+            SEQUENCE,
+            &[tlv(OID, &[0x55, 0x1d, 0x13]), tlv(OCTET_STRING, &[0x30, 0])].concat(),
+        );
+        let server_auth: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01];
+        let info = |extensions: Vec<u8>| {
+            parse_certificate(&certificate_with_extensions("A", "TEAM", &extensions)).unwrap()
+        };
+        let signing = info([basic.clone(), eku(&[server_auth, OID_CODE_SIGNING])].concat());
+        assert_eq!(signing.code_signing, Some(true));
+        assert_eq!(signing.org_unit.as_deref(), Some("TEAM"));
+        assert_eq!(info(eku(&[server_auth])).code_signing, Some(false));
+        assert_eq!(info(basic).code_signing, None);
+        let plain = certificate("A", "TEAM", false);
+        assert_eq!(parse_certificate(&plain).unwrap().code_signing, None);
     }
 
     #[test]

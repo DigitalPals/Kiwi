@@ -51,7 +51,7 @@ use crate::{
     ota::ServedRanges,
     push::{NoticeBackoff, PushTransport, WebPush},
     settings::Settings,
-    signing::{AppleSigner, SIGNING_SCAN_TIMEOUT, Signer, SigningInfo, scan_signing},
+    signing::{SIGNING_SCAN_TIMEOUT, Signer, SigningInfo, SystemSigner, scan_signing},
     store::Store,
 };
 
@@ -66,6 +66,8 @@ pub struct Paths {
     pub vapid: PathBuf,
     /// Kiwi's Android app (`kiwi.apk`, `kiwi.json`), put there by whatever provides it.
     pub android_app: PathBuf,
+    /// Uploaded signing identity and provisioning profiles.
+    pub signing: kiwi_signer::SigningDir,
 }
 
 impl Paths {
@@ -78,8 +80,14 @@ impl Paths {
             icons: data.join("icons"),
             vapid: data.join("vapid.json"),
             android_app: data.join("android-app"),
+            signing: signing_dir(data),
         }
     }
+}
+
+/// `<data>/signing`: the uploaded `.p12` identity and provisioning profiles.
+pub fn signing_dir(data: &Path) -> kiwi_signer::SigningDir {
+    kiwi_signer::SigningDir::new(data.join("signing"))
 }
 
 /// Everything the server needs; platform pieces are injectable for tests.
@@ -109,10 +117,13 @@ impl Options {
                 tailscale.bin().display()
             );
         }
+        let signer = Arc::new(SystemSigner {
+            dir: signing_dir(&config.data_dir),
+        });
         Ok(Self {
             config,
             source_client: ClientOptions::default(),
-            signer: Arc::new(AppleSigner),
+            signer,
             devices: Arc::new(SystemDevices { tailscale }),
             push: None,
             app_store_url: store::DEFAULT_URL.into(),
@@ -363,13 +374,14 @@ impl Kiwi {
     /// [`SIGNING_SCAN_TIMEOUT`] so a blocked keychain cannot stall startup, the scheduler or
     /// a build.
     pub async fn rescan_signing(&self) -> SigningInfo {
-        let info = scan_signing(
+        let mut info = scan_signing(
             self.signer.clone(),
             self.signing_scan.clone(),
             &self.signing_info(),
             SIGNING_SCAN_TIMEOUT,
         )
         .await;
+        info.uploads = Some(self.paths.signing.clone());
         if let Some(team) = info.team_id(Utc::now()) {
             let mut current = self.team.write().unwrap();
             if current.as_ref() != Some(&team) {

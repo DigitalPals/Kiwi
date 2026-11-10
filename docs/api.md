@@ -405,10 +405,12 @@ interface Profile {
   entitlements: string[];           // entitlement keys granted
   usable: boolean;
   reason: string | null;            // why not usable
+  uploaded: boolean;                // uploaded to Kiwi (deletable), not found in Xcode's folders
 }
 
 interface Signing {
-  identities: Identity[];
+  backend: "keychain" | "files";    // macOS: login keychain + codesign; elsewhere: uploaded .p12 + rcodesign
+  identities: Identity[];           // "files": the uploaded identity, if any
   profiles: Profile[];
   active: { identity_sha1: string; profile_uuid: string; expires_at: Timestamp } | null; // default wildcard choice
   error: string | null;
@@ -455,6 +457,10 @@ interface Settings {
 | POST | `/api/updates/prepare` | | `Build[]` (queues all updates) |
 | GET | `/api/signing` | | `Signing` |
 | POST | `/api/signing/rescan` | | `Signing` |
+| POST | `/api/signing/identity` | `{ p12, password }` (`p12`: the `.p12` file, base64) | `Signing` (after a rescan). `files` backend only; see "Signing uploads" |
+| DELETE | `/api/signing/identity` | | `Signing`; `404` when none was uploaded. `files` backend only |
+| POST | `/api/signing/profiles` | `{ profile }` (the `.mobileprovision` file, base64) | `Signing` (after a rescan); replaces an upload with the same UUID |
+| DELETE | `/api/signing/profiles/:uuid` | | `Signing`; `404` unless the profile was uploaded |
 | GET | `/api/settings` | | `Settings` |
 | PATCH | `/api/settings` | partial `Settings` | `Settings` |
 | POST | `/api/push/subscribe` | `{ endpoint, keys: { p256dh, auth } }` | `204` |
@@ -503,6 +509,26 @@ what the scheduler prepares and notifies. `Me.features` tells the web app (and K
 Android app) what to show; `Me.onboarded` whether the first-run setup is done. Devices that
 were in use before Kiwi had platforms (with an install, an install attempt or a push
 subscription) count as set up.
+
+## Signing uploads
+
+A Kiwi on macOS signs with the login keychain (`Signing.backend: "keychain"`): its identity
+comes from the keychain, and `POST`/`DELETE /api/signing/identity` answer `409 conflict`.
+Elsewhere (`"files"`) the owner uploads an Apple Development (or Distribution) identity as
+a `.p12` with its password ([signing-on-linux.md](signing-on-linux.md) explains how to get
+one). Provisioning profiles can be uploaded on every host; they are used together with the
+profiles in Xcode's folders.
+
+- The identity is checked before it is stored: it must open with the password, hold a
+  code signing certificate with a team id that has not expired, and the private key that
+  belongs to it. A `.p12` encrypted with AES (OpenSSL 3's default) is refused with advice
+  how to convert it. A new upload replaces the previous identity.
+- A profile must parse, be an iOS profile and not have expired.
+- Problems answer `400 bad_request` with a message for the owner (`"The password is
+  wrong"`, `"'Name' expired on 2026-01-01"`). Bodies are limited to about 100 KB for an
+  identity and about 1.4 MB for a profile (`400 "Request body is too large."`).
+- Responses never contain the `.p12`, the key or the password; Kiwi stores them in
+  `<data>/signing` with mode 0600 and does not log them.
 
 ## Android devices
 

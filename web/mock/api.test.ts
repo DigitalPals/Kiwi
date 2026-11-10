@@ -7,6 +7,7 @@ import type {
   Build,
   Me,
   Settings,
+  Signing,
   Source,
   StoreApp,
 } from "../src/api/types.ts";
@@ -444,5 +445,55 @@ describe("mock api", () => {
     expect(compareVersions("1.10", "1.9")).toBe(1);
     expect(compareVersions("2.0", "2.0.0")).toBe(0);
     expect(compareVersions("1.0", "1.0.1")).toBe(-1);
+  });
+});
+
+describe("mock signing", () => {
+  function signingSetup(signing: "keychain" | "files") {
+    const api = createMockApi(() => Date.parse("2026-10-29T12:00:00Z"), { signing });
+    return (method: string, path: string, body?: unknown) =>
+      api.handle({
+        method,
+        path,
+        query: new URLSearchParams(),
+        headers: method === "GET" ? {} : { "x-kiwi": "1", "content-type": "application/json" },
+        body: body === undefined ? "" : JSON.stringify(body),
+        origin: "http://localhost:5173",
+      });
+  }
+
+  it("signs with the keychain on a Mac and refuses identity uploads", () => {
+    const request = signingSetup("keychain");
+    const signing = request("GET", "/api/signing").json as Signing;
+    expect(signing.backend).toBe("keychain");
+    expect(signing.profiles.every((p) => !p.uploaded)).toBe(true);
+    expect(request("POST", "/api/signing/identity", { p12: "AAAA", password: "x" }).status).toBe(409);
+    const uploaded = request("POST", "/api/signing/profiles", { profile: "AAAA" }).json as Signing;
+    expect(uploaded.profiles[0]?.uploaded).toBe(true);
+    expect(request("DELETE", `/api/signing/profiles/${signing.profiles[0]?.uuid}`).status).toBe(404);
+  });
+
+  it("uploads and removes the identity and profiles on Linux", () => {
+    const request = signingSetup("files");
+    expect((request("GET", "/api/signing").json as Signing).backend).toBe("files");
+    const removed = request("DELETE", "/api/signing/identity").json as Signing;
+    expect(removed.identities).toEqual([]);
+    expect(removed.active).toBeNull();
+    expect(removed.error).toMatch(/No signing identity was uploaded/);
+    expect(request("DELETE", "/api/signing/identity").status).toBe(404);
+    expect(request("POST", "/api/signing/identity", { p12: "AAAA", password: "wrong" }).status).toBe(400);
+    expect(request("POST", "/api/signing/identity", { p12: "not base64!", password: "" }).status).toBe(400);
+    const added = request("POST", "/api/signing/identity", { p12: "AAAA", password: "secret" }).json as Signing;
+    expect(added.identities).toHaveLength(1);
+    expect(JSON.stringify(added)).not.toContain("secret");
+    const profiles = (request("GET", "/api/signing").json as Signing).profiles;
+    for (const p of profiles) request("DELETE", `/api/signing/profiles/${p.uuid}`);
+    const empty = request("GET", "/api/signing").json as Signing;
+    expect(empty.profiles).toEqual([]);
+    expect(empty.error).toMatch(/wildcard provisioning profile/);
+    const uploaded = request("POST", "/api/signing/profiles", { profile: "AAAA" }).json as Signing;
+    expect(uploaded.profiles[0]?.uploaded).toBe(true);
+    expect(uploaded.active?.profile_uuid).toBe(uploaded.profiles[0]?.uuid);
+    expect(uploaded.error).toBeNull();
   });
 });

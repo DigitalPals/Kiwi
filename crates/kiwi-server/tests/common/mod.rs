@@ -25,7 +25,7 @@ use kiwi_server::{
     push::{PushTransport, SendError},
     signing::Signer,
 };
-use kiwi_signer::{Identity, Profile, SignReport, SignRequest, SignStep};
+use kiwi_signer::{Backend, Identity, Profile, SignReport, SignRequest, SignStep};
 use kiwi_source::{CancellationToken, ClientOptions};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -431,6 +431,8 @@ pub struct FakeSigner {
     pub profile_expiry: Mutex<DateTime<Utc>>,
     /// Requests the signer received.
     pub requests: Mutex<Vec<SignRequest>>,
+    /// The backend it reports (this system's by default).
+    pub backend: Mutex<Backend>,
 }
 
 impl Default for FakeSigner {
@@ -441,11 +443,15 @@ impl Default for FakeSigner {
             fail: Mutex::new(None),
             profile_expiry: Mutex::new(Utc::now() + chrono::Duration::days(360)),
             requests: Mutex::default(),
+            backend: Mutex::new(Backend::current()),
         }
     }
 }
 
 impl Signer for FakeSigner {
+    fn backend(&self) -> Backend {
+        *self.backend.lock().unwrap()
+    }
     fn identities(&self) -> Result<Vec<Identity>, String> {
         Ok(vec![identity()])
     }
@@ -731,6 +737,28 @@ impl TestKiwi {
         allow_simulators: bool,
         app_store_url: &str,
     ) -> Self {
+        Self::start_full(dir, devices, allow_simulators, app_store_url, None).await
+    }
+
+    /// With `signer` (for example the real one) instead of the [`FakeSigner`].
+    pub async fn start_with_signer(dir: tempfile::TempDir, signer: Arc<dyn Signer>) -> Self {
+        Self::start_full(
+            dir,
+            FakeDevices::with_phone(),
+            false,
+            "http://127.0.0.1:9",
+            Some(signer),
+        )
+        .await
+    }
+
+    async fn start_full(
+        dir: tempfile::TempDir,
+        devices: FakeDevices,
+        allow_simulators: bool,
+        app_store_url: &str,
+        real_signer: Option<Arc<dyn Signer>>,
+    ) -> Self {
         let signer = Arc::new(FakeSigner::default());
         let devices = Arc::new(devices);
         let push = Arc::new(FakePush::default());
@@ -751,7 +779,7 @@ impl TestKiwi {
                 read_timeout: Duration::from_secs(10),
                 allow_local: true,
             },
-            signer: signer.clone(),
+            signer: real_signer.unwrap_or_else(|| signer.clone()),
             devices: devices.clone(),
             push: Some(push.clone()),
             app_store_url: app_store_url.into(),

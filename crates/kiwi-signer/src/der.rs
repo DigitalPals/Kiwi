@@ -1,5 +1,6 @@
 //! Minimal DER reader for the structures Kiwi needs (CMS content, X.509 subject and validity).
 
+pub(crate) const BOOLEAN: u8 = 0x01;
 pub(crate) const INTEGER: u8 = 0x02;
 pub(crate) const OCTET_STRING: u8 = 0x04;
 pub(crate) const OID: u8 = 0x06;

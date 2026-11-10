@@ -303,13 +303,35 @@ export interface Profile {
   entitlements: string[];
   usable: boolean;
   reason: string | null;
+  /** Uploaded to Kiwi (DELETE /api/signing/profiles/:uuid removes it), not found in Xcode's folders. */
+  uploaded: boolean;
 }
 
+/**
+ * How this Kiwi signs iOS apps: "keychain" (macOS: the login keychain and codesign) or
+ * "files" (other systems: an uploaded .p12 identity and rcodesign).
+ */
+export type SigningBackend = "keychain" | "files";
+
 export interface Signing {
+  backend: SigningBackend;
   identities: Identity[];
   profiles: Profile[];
   active: { identity_sha1: string; profile_uuid: string; expires_at: Timestamp } | null;
   error: string | null;
+}
+
+/** POST /api/signing/identity ("files" backend only; 409 on "keychain"). */
+export interface IdentityUpload {
+  /** The .p12 file, base64. */
+  p12: string;
+  password: string;
+}
+
+/** POST /api/signing/profiles. */
+export interface ProfileUpload {
+  /** The .mobileprovision file, base64. */
+  profile: string;
 }
 
 export interface Settings {

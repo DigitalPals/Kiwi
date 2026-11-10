@@ -60,15 +60,19 @@ export function mockApi(): Plugin {
       const host = process.env.KIWI_MOCK_HOST === "linux" ? "linux" : "macos";
       // KIWI_MOCK_ANDROID_APP=0: Kiwi serves no Android app.
       const androidApp = process.env.KIWI_MOCK_ANDROID_APP !== "0";
+      // KIWI_MOCK_SIGNING=files: signing with uploaded files, as on Linux (the default for
+      // KIWI_MOCK_HOST=linux); =keychain: the Mac's keychain.
+      const signing = ({ files: "files", keychain: "keychain" } as const)[process.env.KIWI_MOCK_SIGNING ?? ""];
       // KIWI_MOCK_FOREIGN=<package>,...: Android packages installed with another signature.
       const foreign = (process.env.KIWI_MOCK_FOREIGN ?? "").split(",").filter(Boolean);
-      api = createMockApi(Date.now, { builds, device, onboarded, host, androidApp, foreign });
+      api = createMockApi(Date.now, { builds, device, onboarded, host, androidApp, foreign, signing });
       const notes = [
         builds === "simulated" && "simulated Kiwi Builds",
         device === "android" && "Android device",
         device === "desktop" && "desktop browser",
         !onboarded && "not set up",
         host === "linux" && "Linux host",
+        signing === "files" && host !== "linux" && "signing with uploaded files",
         !androidApp && "no Android app",
         foreign.length > 0 && `foreign ${foreign.join(", ")}`,
       ].filter(Boolean);

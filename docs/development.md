@@ -105,6 +105,12 @@ a Kiwi on Linux, `KIWI_MOCK_ANDROID_APP=0` without Kiwi's Android app, and
 `KIWI_MOCK_FOREIGN=app.morphe.android.youtube` with that package installed under another
 signature.
 
+The demo imitates a Kiwi on a Mac, which signs with the keychain. Add
+`KIWI_MOCK_SIGNING=files` and it imitates one on Linux (`Signing.backend: "files"`): the
+identity and profiles are uploads, which the `/api/signing/identity` and
+`/api/signing/profiles` endpoints add and remove (any base64 is accepted; the password
+`wrong` is refused).
+
 ## Running the server locally
 
 ```sh
@@ -114,9 +120,10 @@ cargo run -p kiwi-server -- \
   --public-url http://localhost:5173
 ```
 
-On Linux without tailscaled, Tailscale lookups fail, but sources, the catalogue, settings
-and the API work. Every flag is also an environment variable (`KIWI_LISTEN`,
-`KIWI_DATA_DIR`, `KIWI_PUBLIC_URL`, ...; see `kiwi --help`).
+On Linux, Kiwi signs with an uploaded identity and profile ([signing-on-linux.md](signing-on-linux.md);
+until then signing reports that none was uploaded) and Tailscale lookups fail, but sources,
+the catalogue, settings and the API work. Every flag is also an environment variable
+(`KIWI_LISTEN`, `KIWI_DATA_DIR`, `KIWI_PUBLIC_URL`, ...; see `kiwi --help`).
 
 To try the container image: `docker build -t kiwi .`, and `docker compose config` checks
 `compose.yaml`. CI builds the image on every push without publishing it.

@@ -7,7 +7,9 @@ Kiwi Builds patches App Store apps with open-source tweaks and signs them on you
 
 It also builds **Android** apps: YouTube, YouTube Music and Reddit, patched with
 [Morphe](https://morphe.software)'s open-source patches and signed with a key of your own.
-They need no Apple account, Xcode or Mac setup; see [Android apps](#android-apps).
+They need no Apple account, Xcode or Mac setup; see [Android apps](#android-apps). On a Kiwi
+that runs on Linux or in Docker, Kiwi Builds builds these Android apps only: iOS apps need a
+Mac, and the page shows a **macOS** setup check that is never ready.
 
 It is optional and off by default. Kiwi itself works without it; see the
 [README](../README.md) and [installation guide](install.md) first.
@@ -181,19 +183,29 @@ Return YouTube Dislike when those are on).
 
 The first Android build creates a 4096-bit RSA key in
 `automation/android/keystore.p12`, with its password beside it in `keystore.pass` (both
-mode 0600). It never leaves the Mac and no API returns it. Android installs an update over
+mode 0600). It never leaves the computer Kiwi runs on and no API returns it. Android installs an update over
 an app only when both carry the same signature, so **back these two files up** with the
 rest of the data directory: without them, every Android app Kiwi built has to be
-uninstalled before a build signed with a new key can be installed.
+uninstalled before a build signed with a new key can be installed. Settings › **Android
+Signing Key** on an Android device shows the SHA-256 of its certificate, the same
+fingerprint Android shows for apps Kiwi signed; the web app never offers the key itself. The same key signs
+[Kiwi's own Android app](android-app.md), which Kiwi offers to Android phones while Kiwi
+Builds is on.
 
-The patcher takes the keystore password as a command-line argument, so it is visible to
-other processes of the same user on the Mac while a build runs.
+The password never appears on a command line, where other local users could read it while
+a build runs: `keytool` and `apksigner` get it through their environment, and the patcher
+reads it from an argument file (`@file`) that only Kiwi can read, in the build's job
+directory, deleted once patching is done.
 
 ### Install on Android
 
 Install [Tailscale](https://tailscale.com/download/android) on the device, sign in as the
-owner and open Kiwi's address in the browser. Kiwi recognises Android devices: Browse
-shows them Android apps only, and iPhones the iPhone apps.
+owner and open Kiwi's address in the browser. Kiwi recognises Android devices and asks once
+to confirm ([First use](using-kiwi.md#first-use)): Browse then shows Android apps only, and
+the **Builds** tab, where you add them, takes the place of Sources (whose AltStore sources
+list iPhone apps). Settings shows the fingerprint of this Kiwi's Android signing key under
+**Android Signing Key**; back up the key itself from the data directory
+([The signing key](#the-signing-key)).
 
 1. Open the app in Kiwi and tap **Install**. The browser downloads the APK.
 2. Open the download. The first time, Android asks you to allow that browser to install
@@ -208,8 +220,12 @@ and Kiwi's signing warnings don't apply to them.
 
 ### Requirements and limits
 
-- Python 3.13 on the Mac (`brew install python@3.13`). Nothing else: the setup below, the
-  Apple account, Xcode and enrollment are for iPhone apps only.
+- Python 3.13 on the Mac (`brew install python@3.13`); on Linux Python 3.12 or newer
+  (`python3`, or the one `--python`/`KIWI_PYTHON` names, installed outside home directories
+  for `install.sh`'s service; the Docker image has 3.13). An older Python fails the build
+  with a message saying so. Nothing else: the setup below, the Apple account, Xcode and
+  enrollment are for iPhone apps only.
+- Linux on x86-64 or ARM64, or a Mac: the pinned Java runtime exists for those.
 - About 1 GB of disk for the tools and cached originals, plus 75 to 180 MB for each
   retained release (the newest 5 per app), and network access to GitHub, `auroraoss.com`,
   Google Play and APKPure.
@@ -331,10 +347,11 @@ Paths under `automation/` are in the data directory, `~/Library/Application Supp
 | `kiwi.db` meta `automation_v2` | Per-app preferences, revisions and health, and job history. Migrated once from `youtube_automation_v1`, which is left in place for a rollback |
 | `automation/runner.py`, `automation/recipes.json` | The runner and pinned recipes built into Kiwi, rewritten at every start |
 | `automation/android.py`, `automation/apk.py`, `automation/android.json` | The Android runner, its APK signature verifier and the pinned Android recipes, rewritten at every start |
+| `automation/kiwi-app.json`, `automation/kiwi-app.log` | The pinned release of [Kiwi's Android app](android-app.md), and the private log of signing it |
 | `automation/android/keystore.p12`, `keystore.pass` | This Kiwi's Android signing key and its password, mode 0600. Back them up |
 | `automation/android/originals/` | Original Android apps you supply by hand (optional) |
 | `automation/android/play-session.json` | The anonymous Google Play session, mode 0600 |
-| `automation/tools/android/` | The pinned Java runtime, patcher and patch bundle, and verified originals |
+| `automation/tools/android/` | The pinned Java runtime, patcher, patch bundle and `apksigner`, and verified originals |
 | `~/.kiwi-builder-tools` | Space-free private toolchain and transient build workspaces; `automation/tools` links here |
 | `~/.kiwi-builder-tools/sources/<owner>__<repo>/<commit>` | Pinned source cache (a `.complete` file marks a finished fetch) |
 | `~/.kiwi-builder-tools/cache/ffmpeg-kit/<key>` | NeoFreeBird's compiled FFmpeg stack, keyed by its inputs and the SDK |

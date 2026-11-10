@@ -1,4 +1,7 @@
-export type Tab = "browse" | "apps" | "sources" | "settings";
+import type { Feature } from "../api/types";
+
+/** "builds" is Kiwi Builds' tab on Android, where it replaces Sources. */
+export type Tab = "browse" | "apps" | "sources" | "builds" | "settings";
 
 export type Route =
   | { name: "browse" }
@@ -14,18 +17,39 @@ export type Route =
   | { name: "source"; sourceId: string }
   | { name: "not-found"; path: string };
 
-export const TABS: readonly { tab: Tab; path: string; label: string }[] = [
-  { tab: "browse", path: "/", label: "Browse" },
-  { tab: "apps", path: "/apps", label: "My Apps" },
-  { tab: "sources", path: "/sources", label: "Sources" },
-  { tab: "settings", path: "/settings", label: "Settings" },
-];
+export interface TabLink {
+  tab: Tab;
+  path: string;
+  label: string;
+}
 
 export const SIGNING_PATH = "/settings/signing";
 export const DEVICE_PATH = "/settings/device";
 export const NOTIFICATIONS_PATH = "/settings/notifications";
-/** Kiwi Builds, under Sources. */
+/** Kiwi Builds: under Sources on an iPhone, its own tab on Android. */
 export const BUILDS_PATH = "/builds";
+
+const BROWSE_TAB: TabLink = { tab: "browse", path: "/", label: "Browse" };
+const APPS_TAB: TabLink = { tab: "apps", path: "/apps", label: "My Apps" };
+const SETTINGS_TAB: TabLink = { tab: "settings", path: "/settings", label: "Settings" };
+const IOS_TABS: readonly TabLink[] = [BROWSE_TAB, APPS_TAB, { tab: "sources", path: "/sources", label: "Sources" }, SETTINGS_TAB];
+const ANDROID_TABS: readonly TabLink[] = [BROWSE_TAB, APPS_TAB, { tab: "builds", path: BUILDS_PATH, label: "Builds" }, SETTINGS_TAB];
+
+/**
+ * The tab bar for a device's features. AltStore sources list iPhone apps, so on Android
+ * Kiwi Builds, where its apps come from, takes the Sources tab's place.
+ */
+export function tabsFor(features: readonly Feature[]): readonly TabLink[] {
+  return features.includes("android_apps") ? ANDROID_TABS : IOS_TABS;
+}
+
+/** `routeTab`'s tab in this tab bar: Kiwi Builds' pages belong to the Builds tab where it replaces Sources. */
+export function shownTab(tab: Tab | null, tabs: readonly TabLink[]): Tab | null {
+  if (tab === "sources" && !tabs.some((t) => t.tab === "sources")) {
+    return tabs.some((t) => t.tab === "builds") ? "builds" : null;
+  }
+  return tab;
+}
 
 export const buildPath = (app: string) => `${BUILDS_PATH}/${encodeURIComponent(app)}`;
 
@@ -147,7 +171,7 @@ export function interceptedPath(
     return null;
   }
   if (url.origin !== origin) return null;
-  // The server answers these itself (the API, OTA installs).
-  if (url.pathname === "/api" || ["/api/", "/ota/"].some((p) => url.pathname.startsWith(p))) return null;
+  // The server answers these itself (the API, OTA installs, Kiwi's Android app).
+  if (url.pathname === "/api" || ["/api/", "/ota/", "/android/"].some((p) => url.pathname.startsWith(p))) return null;
   return url.pathname + url.search + url.hash;
 }

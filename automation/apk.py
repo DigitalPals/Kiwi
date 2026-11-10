@@ -475,14 +475,97 @@ def _signer(data: bytes, scheme: int, digest) -> bytes | None:
     return certificates[0]
 
 
+def _contents(path: Path) -> dict:
+    """Manifest and native-code ABIs of an APK, whoever signed it (or nobody)."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            info = archive.getinfo("AndroidManifest.xml")
+            if info.file_size > 16 << 20:
+                raise ApkError("the manifest is too large")
+            details = manifest(archive.read(info))
+            libraries = sorted(
+                {
+                    name.split("/")[1]
+                    for name in archive.namelist()
+                    if name.startswith("lib/") and name.count("/") == 2
+                }
+            )
+    except (KeyError, IndexError, struct.error, zipfile.BadZipFile) as error:
+        raise ApkError("the file is not an Android package") from error
+    details["abis"] = libraries
+    return details
+
+
+# JAR signature files: an APK signed with scheme v1.
+JAR_SIGNATURE = (".SF", ".RSA", ".DSA", ".EC")
+
+
+def unsigned(path: Path) -> dict:
+    """The manifest of an APK that carries no signature at all (v1, v2 or v3).
+
+    Kiwi signs its own Android app itself; an input that is already signed is
+    refused rather than signed over.
+    """
+    import zipfile
+
+    path = Path(path)
+    size = path.stat().st_size
+    if not 0 < size < LIMIT:
+        raise ApkError("the file is not a usable Android package")
+    details = _contents(path)
+    with path.open("rb") as handle:
+        try:
+            _layout(handle, size)
+        except ApkError as error:
+            if "no APK signature" not in str(error):
+                raise
+        else:
+            raise ApkError("the package is already signed")
+    with zipfile.ZipFile(path) as archive:
+        if any(
+            name.startswith("META-INF/") and name.upper().endswith(JAR_SIGNATURE)
+            for name in archive.namelist()
+        ):
+            raise ApkError("the package is already signed (JAR signature)")
+    details["size"] = size
+    return details
+
+
+# Uncompressed entries start on 4-byte boundaries, uncompressed native libraries on a
+# memory page, so Android can map them in place (what `zipalign -p 4` does).
+ALIGNMENT = 4
+PAGE = 4096
+
+
+def misaligned(path: Path) -> list[str]:
+    """The uncompressed entries of an APK whose data is not aligned for Android."""
+    import zipfile
+
+    found = []
+    with zipfile.ZipFile(path) as archive, Path(path).open("rb") as handle:
+        for info in archive.infolist():
+            if info.compress_type != zipfile.ZIP_STORED or info.is_dir():
+                continue
+            handle.seek(info.header_offset)
+            header = handle.read(30)
+            if len(header) != 30 or header[:4] != b"PK\x03\x04":
+                raise ApkError("the archive layout is not supported")
+            name_size, extra_size = struct.unpack_from("<HH", header, 26)
+            start = info.header_offset + 30 + name_size + extra_size
+            boundary = PAGE if info.filename.endswith(".so") else ALIGNMENT
+            if start % boundary:
+                found.append(info.filename)
+    return found
+
+
 def inspect(path: Path) -> dict:
     """Verifies an APK's signature and returns its manifest and signers.
 
     `certificates` holds the SHA-256 of every signing certificate that was
     verified; the caller decides which publishers it trusts.
     """
-    import zipfile
-
     path = Path(path)
     size = path.stat().st_size
     if not 0 < size < LIMIT:
@@ -517,22 +600,8 @@ def inspect(path: Path) -> dict:
                     certificates.append(fingerprint)
         if not schemes:
             raise ApkError("the package has no APK signature (v2 or v3)")
-    try:
-        with zipfile.ZipFile(path) as archive:
-            info = archive.getinfo("AndroidManifest.xml")
-            if info.file_size > 16 << 20:
-                raise ApkError("the manifest is too large")
-            details = manifest(archive.read(info))
-            libraries = sorted(
-                {
-                    name.split("/")[1]
-                    for name in archive.namelist()
-                    if name.startswith("lib/") and name.count("/") == 2
-                }
-            )
-    except (KeyError, zipfile.BadZipFile) as error:
-        raise ApkError("the file is not an Android package") from error
-    details.update(certificates=certificates, schemes=schemes, abis=libraries, size=size)
+    details = _contents(path)
+    details.update(certificates=certificates, schemes=schemes, size=size)
     return details
 
 

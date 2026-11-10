@@ -111,6 +111,6 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn unsupported_off_macos() {
-        assert!(matches!(list_identities(), Err(Error::Unsupported)));
+        assert!(matches!(list_identities(), Err(Error::Unsupported(_))));
     }
 }

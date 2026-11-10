@@ -2,6 +2,7 @@
 // action rules in docs/architecture.md closely enough to exercise every UI state.
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import type {
+  AndroidApp,
   AppDetail,
   AppState,
   AppSummary,
@@ -9,7 +10,11 @@ import type {
   AutomationPreferences,
   AutomationState,
   Build,
+  Client,
+  Device,
   DevicesResponse,
+  Feature,
+  Host,
   Installed,
   Me,
   Original,
@@ -19,6 +24,8 @@ import type {
   Release,
   Settings,
   SetupCheck,
+  Signing,
+  SigningBackend,
   Source,
   StoreApp,
   Warning,
@@ -54,8 +61,54 @@ export interface MockOptions {
    * through the Mac's stages and publishes a signed release in the Kiwi Builds source.
    */
   builds?: "blocked" | "simulated";
-  /** The device the mock answers as: an iPhone (default) or an Android phone. */
-  device?: Platform;
+  /**
+   * The device the mock answers as: an iPhone (default), an Android phone, or a desktop browser
+   * (nothing tells its platform, so iOS is assumed until one is chosen).
+   */
+  device?: Platform | "desktop";
+  /** false: the device has not been through the first-run setup yet. Default true. */
+  onboarded?: boolean;
+  /** The program asking: the web app (default) or Kiwi's Android app. */
+  client?: Client;
+  /** The computer Kiwi runs on: a Mac (default) or Linux. */
+  host?: "macos" | "linux";
+  /**
+   * Whether Kiwi serves its Android app (default true). "failed": signing it failed, so Kiwi
+   * serves none and warns Android devices (`android_app`) as the server does.
+   */
+  androidApp?: boolean | "failed";
+  /** Android packages installed with another signature than Kiwi's, e.g. "app.morphe.android.youtube". */
+  foreign?: string[];
+  /**
+   * How the imitated Kiwi signs: "keychain" (a Mac) or "files" (Linux: uploaded identity and
+   * profiles, which the upload endpoints change). Defaults to the host's.
+   */
+  signing?: SigningBackend;
+}
+
+/** The certificate the mock's Android builds are signed with (`PUT /api/me/packages`). */
+export const MOCK_ANDROID_SIGNER = "c0ffee".padEnd(64, "0");
+
+const MOCK_ANDROID_APP = {
+  package: "io.github.digitalpals.kiwi",
+  version_name: "1.0.0",
+  version_code: 1,
+  size: 9_400_000,
+};
+
+/** Mirrors kiwi-server's `routes::features`: the Kiwi app is offered only to devices detected as Android. */
+export function featuresOf(platform: Platform, detected: Platform | null, client: Client, host: Host, androidApp: boolean): Feature[] {
+  const web = client === "web";
+  const ios = platform === "ios";
+  const features: [boolean, Feature][] = [
+    [ios, "ios_apps"],
+    [!ios, "android_apps"],
+    [web && ios, "home_screen_app"],
+    [web, "web_push"],
+    [web && !ios && detected === "android" && androidApp, "android_app_offer"],
+    [ios && host.os === "macos", "devicectl"],
+  ];
+  return features.filter(([on]) => on).map(([, feature]) => feature);
 }
 
 export interface MockResponse {
@@ -74,6 +127,12 @@ const BUILD_SOURCE = "kiwi-youtube";
 /** How long each stage of a simulated Kiwi Build takes; the web app polls every 2 seconds. */
 const BUILD_STAGE_MS = 2600;
 const SETUP_CHECKS = ["Mac build tools", "Tweak toolchain", "App Store sign-in", "Private decryption enrollment"];
+/** kiwi-server's setup checks where iOS apps can't be built (`automation::NEEDS_MAC_CHECK`). */
+const NEEDS_MAC_CHECKS: SetupCheck[] = [{ name: "macOS", ready: false }];
+/** The message of kiwi-server's `409 needs_mac`. */
+const NEEDS_MAC = "iOS apps can only be built on a Mac. This Kiwi doesn't run on macOS, so Kiwi Builds builds Android apps here.";
+/** Why the mock's Kiwi couldn't sign its Android app (`KIWI_MOCK_ANDROID_APP=failed`). */
+const ANDROID_APP_FAILURE = "The Android builder failed: apksigner was not found in the pinned Android build-tools.";
 
 class HttpError extends Error {
   constructor(
@@ -122,12 +181,57 @@ function newerThanInstalled(target: Release, installed: Installed): boolean {
 }
 
 export function createMockApi(clock: () => number = Date.now, options: MockOptions = {}) {
-  const db: MockDb = createDb(clock(), options.device);
+  const db: MockDb = createDb(
+    clock(),
+    options.device === "android" ? "android" : "ios",
+    options.signing ?? (options.host === "linux" ? "files" : "keychain"),
+  );
+  if (options.device === "desktop") {
+    Object.assign(db.device, {
+      id: "local:mQ3x7Lr2Vt9KpZ4wYb8N1c",
+      name: "Browser",
+      kind: "browser",
+      tailscale_name: null,
+      os_version: null,
+      os_version_source: null,
+      model: null,
+    });
+    db.detected_platform = null;
+    db.installs = [];
+    db.attempts = [];
+  }
+  db.onboarded = options.onboarded ?? true;
+  db.foreign_packages = new Set(options.foreign ?? []);
+  const client: Client = options.client ?? "web";
+  const host: Host = {
+    ...(options.host === "linux"
+      ? { os: "linux", ios_signing: "files", devicectl: false }
+      : { os: "macos", ios_signing: "keychain", devicectl: true }),
+    android_signer_sha256: MOCK_ANDROID_SIGNER,
+  };
+  const servesAndroidApp = (options.androidApp ?? true) === true;
+  const androidAppFailed = options.androidApp === "failed";
+  /** iOS apps are built only on a Mac (`409 needs_mac` elsewhere). */
+  const buildsIos = host.os === "macos";
   const vapid = vapidPublicKey();
   const builds = createBuilds(iso(clock()));
   const simulated = options.builds === "simulated";
 
   // ---- derived state ------------------------------------------------------------------
+
+  /** The device's platform: the owner's choice, else the detected one, else iOS. */
+  function syncPlatform() {
+    const chosen = db.chosen_platform;
+    db.device.platform = chosen ?? db.detected_platform ?? "ios";
+    db.device.platform_source = chosen ? "chosen" : db.detected_platform ? "detected" : "assumed";
+    db.device.detected_platform = db.detected_platform;
+  }
+  syncPlatform();
+
+  const deviceJson = (now: number): Device => ({ ...db.device, client, last_seen: iso(now) });
+
+  const androidApp = (origin: string): AndroidApp | null =>
+    servesAndroidApp ? { ...MOCK_ANDROID_APP, install_url: `${origin}/android/kiwi.apk` } : null;
 
   const platformOf = (app: Pick<MockApp, "platform">): Platform => app.platform ?? "ios";
   const onDevice = (app: MockApp) => platformOf(app) === db.device.platform;
@@ -335,6 +439,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       update_reason: null,
       install_url: null,
       replaces: inst ? null : replaces(app),
+      foreign_install: platformOf(app) === "android" && db.foreign_packages.has(app.bundle_id),
     };
     if (!target) return { ...base, action: inst ? "open" : "unavailable", target: null, build: null };
 
@@ -416,10 +521,35 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
 
   const visibleApps = () => db.apps.filter((a) => db.sources.some((s) => s.id === a.source_id && s.enabled));
 
-  function me(now: number): Me {
+  /** Why Kiwi can't sign, in the server's words; `no_identity` when there is no identity at all. */
+  function signingProblem(): { code: "no_identity" | "no_profile"; message: string } | null {
+    const files = db.signing_backend === "files";
+    if (!db.identities[0]) {
+      return {
+        code: "no_identity",
+        message: files
+          ? "No signing identity was uploaded. Export your Apple Development certificate with its private key as a .p12 file and upload it."
+          : "No code signing identity was found in the login keychain. Sign in to Xcode and create an Apple Development certificate.",
+      };
+    }
+    if (!db.profiles.some((p) => p.usable && p.wildcard)) {
+      return {
+        code: "no_profile",
+        message: files
+          ? "No usable wildcard provisioning profile was found. Download a profile for the App ID * that includes this certificate from the Apple Developer site and upload it."
+          : "No usable wildcard provisioning profile was found. Open an app project in Xcode with automatic signing once, then rescan.",
+      };
+    }
+    return null;
+  }
+
+  function me(now: number, origin: string): Me {
     const updates = visibleApps().filter((a) => isUpdate(a, now)).length;
     const errors = db.sources.filter((s) => s.enabled && s.error);
     const warnings: Warning[] = [];
+    // Signing doesn't concern Android devices.
+    const problem = db.device.platform === "android" ? null : signingProblem();
+    if (problem) warnings.push({ level: "error", code: problem.code, link: "/settings", message: problem.message });
     if (errors.length > 0) {
       warnings.push({
         level: "warning",
@@ -440,14 +570,28 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         });
       }
     }
+    // Signing Kiwi's own Android app failed: the server tells Android devices only.
+    if (androidAppFailed && db.device.platform === "android") {
+      warnings.push({
+        level: "warning",
+        code: "android_app",
+        link: "/settings",
+        message: `Kiwi couldn't prepare its Android app: ${ANDROID_APP_FAILURE}`,
+      });
+    }
+    const offer = androidApp(origin);
     return {
-      device: { ...db.device, last_seen: iso(now) },
+      device: deviceJson(now),
+      onboarded: db.onboarded,
       server: {
         version: VERSION,
         public_url: "https://mac-studio.example.ts.net",
         team_id: TEAM_ID,
-        devicectl_available: true,
+        devicectl_available: host.devicectl,
       },
+      host,
+      features: featuresOf(db.device.platform, db.detected_platform, client, host, offer !== null),
+      android_app: offer,
       push: { vapid_public_key: vapid, subscribed: db.subscriptions.size > 0 },
       counts: {
         updates,
@@ -463,8 +607,8 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     };
   }
 
-  function devices(): DevicesResponse {
-    return { devices: [db.device], core_devices: db.core_devices };
+  function devices(now: number): DevicesResponse {
+    return { devices: [deviceJson(now)], core_devices: db.core_devices };
   }
 
   /** Completes simulated installs and builds whose time has come. */
@@ -526,8 +670,13 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     // The server shows the App Store icon.
     const store = simulated ? findStore(iconBundleId(app.id)) : undefined;
     if (store) view.icon_url = `/__mock/icon/${store.slug}.svg`;
+    // Where iOS apps can't be built, only the missing Mac is checked and nothing is scheduled.
+    if (app.platform !== "android" && !buildsIos) Object.assign(view, { checks: currentChecks(), next_check_at: null });
     return view;
   }
+
+  /** The shared setup checks: the App Store's, or only the missing Mac where iOS apps can't be built. */
+  const currentChecks = (): SetupCheck[] => structuredClone(buildsIos ? setupChecks : NEEDS_MAC_CHECKS);
 
   /** Simulated builds: the Mac's one worker takes the oldest job through its stages, then publishes it. */
   function advanceBuilds(now: number) {
@@ -712,6 +861,15 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     const parts = path.split("/").filter(Boolean).map(decodeURIComponent);
     const ok = (json: unknown, status = 200): MockResponse => ({ status, json });
 
+    if (parts[0] === "android") {
+      if (parts[1] !== "kiwi.apk" || !servesAndroidApp) throw new HttpError(404, "not_found", "Kiwi's Android app is not available here.");
+      return {
+        status: 200,
+        contentType: "application/vnd.android.package-archive",
+        text: "PK mock Kiwi app",
+        headers: { "Content-Disposition": `attachment; filename="Kiwi-${MOCK_ANDROID_APP.version_name}.apk"` },
+      };
+    }
     if (parts[0] === "ota") {
       const attempt = db.attempts.find((a) => a.token === parts[1]) ?? null;
       const build = db.builds.find((b) => b.token === parts[1]);
@@ -762,7 +920,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     if (resource === "automation" && !db.settings.kiwi_builds) {
       throw new HttpError(409, "builds_off", "Kiwi Builds is off. Turn it on in Settings.");
     }
-    if (is("GET", "automation")) return ok({ apps: builds.map(automationView), checks: structuredClone(setupChecks) });
+    if (is("GET", "automation")) return ok({ apps: builds.map(automationView), checks: currentChecks() });
     if (parts[1] === "automation" && parts[2] !== undefined) {
       const build = builds.find((b) => b.id === parts[2]);
       if (!build) throw new HttpError(404, "not_found", "Kiwi doesn't build that app.");
@@ -779,12 +937,17 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         const chosen = typeof name === "string" ? name : build.names[0];
         return { enabled, interval_minutes, tweaks: [...new Set(tweaks as string[])].sort(), ...(chosen ? { name: chosen } : {}) };
       };
+      // Like the server: an iOS app can't be added or checked where it can't be built.
+      const requireBuildable = () => {
+        if (build.platform !== "android" && !buildsIos) throw new HttpError(409, "needs_mac", NEEDS_MAC);
+      };
       const schedule = () => {
         build.next_check_at = build.added && build.preferences.enabled
           ? iso(now + build.preferences.interval_minutes * 60_000) : null;
       };
       // Without simulated builds the mock cannot run the Mac pipeline: every check ends blocked.
       const check = (force = false) => {
+        requireBuildable();
         if (!build.added) throw new HttpError(400, "bad_request", `Add ${build.name} to Kiwi Builds first.`);
         if (build.jobs.some((j) => !j.finished_at)) throw new HttpError(409, "conflict", `A ${build.name} build job is already running.`);
         build.sequence++;
@@ -820,6 +983,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         return ok(automationView(build));
       }
       if (is("POST", "automation", undefined, "add")) {
+        requireBuildable();
         build.preferences = preferences();
         build.added = true;
         check();
@@ -843,8 +1007,31 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         return ok(automationView(build));
       }
     }
-    if (is("GET", "me")) return ok(me(now));
+    if (is("GET", "me")) return ok(me(now, origin));
+    if (is("PUT", "me", "packages")) {
+      if (db.device.platform !== "android") throw new HttpError(400, "bad_request", "Only Android devices report their installed packages.");
+      if (!Array.isArray(body.packages)) throw new HttpError(400, "bad_request", "Invalid request body: missing field `packages`.");
+      const android = new Set(db.apps.filter((a) => a.platform === "android").map((a) => a.bundle_id));
+      db.foreign_packages = new Set(
+        (body.packages as { package?: unknown; signer_sha256?: unknown }[])
+          .filter((p) => typeof p.package === "string" && android.has(p.package))
+          .filter((p) => !(Array.isArray(p.signer_sha256) && p.signer_sha256.includes(MOCK_ANDROID_SIGNER)))
+          .map((p) => p.package as string),
+      );
+      return { status: 204 };
+    }
     if (is("PATCH", "me")) {
+      if (body.platform !== undefined) {
+        if (body.platform !== null && body.platform !== "ios" && body.platform !== "android") {
+          throw new HttpError(400, "bad_request", "Invalid request body: unknown variant, expected `ios` or `android`.");
+        }
+        db.chosen_platform = body.platform;
+        syncPlatform();
+      }
+      if (body.onboarded !== undefined) {
+        if (typeof body.onboarded !== "boolean") throw new HttpError(400, "bad_request", "Invalid request body: onboarded must be true or false.");
+        db.onboarded = body.onboarded;
+      }
       if (body.name !== undefined) {
         if (typeof body.name !== "string" || !body.name.trim()) throw new HttpError(400, "bad_request", "Name can't be empty.");
         db.device.name = body.name.trim();
@@ -859,7 +1046,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         db.device.os_version = body.os_version.trim();
         db.device.os_version_source = "manual";
       }
-      return ok(me(now));
+      return ok(me(now, origin));
     }
 
     if (resource === "sources") {
@@ -978,18 +1165,83 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       );
     }
 
-    if (is("GET", "signing") || is("POST", "signing", "rescan")) {
+    const signing = (): Signing => {
       const identity = db.identities[0];
-      const profile = db.profiles[0];
-      return ok({
+      const profile = db.profiles.find((p) => p.usable && p.wildcard);
+      return {
+        backend: db.signing_backend,
         identities: db.identities,
         profiles: db.profiles,
         active:
           identity && profile
             ? { identity_sha1: identity.sha1, profile_uuid: profile.uuid, expires_at: iso(Math.min(PROFILE_EXPIRES, CERT_EXPIRES)) }
             : null,
-        error: null,
+        error: signingProblem()?.message ?? null,
+      };
+    };
+    const base64 = (field: string, value: unknown): Buffer => {
+      if (typeof value !== "string" || !value.trim() || !/^[A-Za-z0-9+/=\s]+$/.test(value)) {
+        throw new HttpError(400, "bad_request", `${field} must be base64.`);
+      }
+      return Buffer.from(value, "base64");
+    };
+    if (is("GET", "signing") || is("POST", "signing", "rescan")) return ok(signing());
+    if (is("POST", "signing", "identity") || is("DELETE", "signing", "identity")) {
+      if (db.signing_backend !== "files") {
+        throw new HttpError(
+          409,
+          "conflict",
+          "This Kiwi signs with the Mac's login keychain. Add the certificate to the keychain (for example in Xcode) instead of uploading it.",
+        );
+      }
+      if (method === "DELETE") {
+        if (!db.identities.length) throw new HttpError(404, "not_found", "No signing identity was uploaded.");
+        db.identities = [];
+        return ok(signing());
+      }
+      base64("p12", body.p12);
+      // The mock can't open a .p12; the password "wrong" imitates a bad one.
+      if (body.password === "wrong") throw new HttpError(400, "bad_request", "The password is wrong");
+      db.identities = [
+        {
+          sha1: createHash("sha1").update(String(body.p12)).digest("hex").toUpperCase(),
+          name: `Apple Development: Alex Morgan (${TEAM_ID})`,
+          team_id: TEAM_ID,
+          expires_at: iso(CERT_EXPIRES),
+        },
+      ];
+      return ok(signing());
+    }
+    if (is("POST", "signing", "profiles")) {
+      const bytes = base64("profile", body.profile);
+      // The mock can't parse a profile: it adds a usable team wildcard profile per upload.
+      const uuid = createHash("sha256").update(bytes).digest("hex").slice(0, 32).toUpperCase()
+        .replace(/^(.{8})(.{4})(.{4})(.{4})/, "$1-$2-$3-$4-");
+      db.profiles = db.profiles.filter((p) => p.uuid !== uuid);
+      db.profiles.unshift({
+        uuid,
+        name: "iOS Team Provisioning Profile: *",
+        team_id: TEAM_ID,
+        app_id_pattern: `${TEAM_ID}.*`,
+        wildcard: true,
+        development: true,
+        created_at: iso(clock()),
+        expires_at: iso(PROFILE_EXPIRES),
+        devices: 2,
+        entitlements: ["application-identifier", "com.apple.developer.team-identifier", "get-task-allow", "keychain-access-groups"],
+        usable: db.identities.length > 0,
+        reason: db.identities.length > 0 ? null : "No signing identity",
+        uploaded: true,
       });
+      return ok(signing());
+    }
+    if (is("DELETE", "signing", "profiles", undefined)) {
+      const before = db.profiles.length;
+      db.profiles = db.profiles.filter((p) => !(p.uploaded && p.uuid === sub));
+      if (db.profiles.length === before) {
+        throw new HttpError(404, "not_found", "No uploaded provisioning profile has this UUID. Profiles from Xcode can't be removed here.");
+      }
+      return ok(signing());
     }
 
     if (is("GET", "settings")) return ok(db.settings);
@@ -1027,14 +1279,14 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     }
     if (is("POST", "push", "test")) return ok({ sent: db.subscriptions.size });
 
-    if (is("GET", "devices")) return ok(devices());
+    if (is("GET", "devices")) return ok(devices(now));
     if (is("POST", "devices", "sync")) {
       const linked = db.device.devicectl;
       if (linked) {
         linked.last_sync_at = iso(now);
         linked.last_error = linked.reachable ? null : "The device is not connected (tunnel unavailable).";
       }
-      return ok(devices());
+      return ok(devices(now));
     }
     if (is("PATCH", "devices", id)) {
       if (id !== db.device.id) throw new HttpError(404, "not_found", "Device not found.");
@@ -1055,7 +1307,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
           };
         }
       }
-      return ok(db.device);
+      return ok(deviceJson(now));
     }
 
     throw new HttpError(404, "not_found", `No route for ${method} ${path}.`);

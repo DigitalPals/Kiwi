@@ -227,7 +227,7 @@ pub(crate) fn add_url_scheme(info: &mut Dictionary, scheme: &str) {
 }
 
 /// Nested code below `app` in signing order: deepest path first.
-fn nested_code(app: &Path) -> Result<Vec<Code>> {
+pub(crate) fn nested_code(app: &Path) -> Result<Vec<Code>> {
     let mut found = Vec::new();
     walk(app, &mut found).map_err(|e| Error::io(format!("Could not read {}", short(app)), e))?;
     found.sort_by(|a, b| {

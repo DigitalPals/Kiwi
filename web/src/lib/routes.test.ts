@@ -9,7 +9,9 @@ import {
   interceptedPath,
   matchRoute,
   routeTab,
+  shownTab,
   sourcePath,
+  tabsFor,
 } from "./routes";
 
 describe("matchRoute", () => {
@@ -101,6 +103,7 @@ describe("interceptedPath", () => {
     expect(interceptedPath(click, link("https://github.com/x"), origin)).toBeNull();
     expect(interceptedPath(click, link(`${origin}/api/me`), origin)).toBeNull();
     expect(interceptedPath(click, link(`${origin}/ota/t/manifest.plist`), origin)).toBeNull();
+    expect(interceptedPath(click, link(`${origin}/android/kiwi.apk`), origin)).toBeNull();
   });
 
   it("respects modifiers, targets and downloads", () => {
@@ -110,5 +113,45 @@ describe("interceptedPath", () => {
     expect(interceptedPath(click, link(`${origin}/`, { target: "_blank" }), origin)).toBeNull();
     expect(interceptedPath(click, link(`${origin}/x`, { hasDownload: true }), origin)).toBeNull();
     expect(interceptedPath(click, link(`${origin}/`, { target: "_self" }), origin)).toBe("/");
+  });
+});
+
+describe("tabsFor", () => {
+  const paths = (features: Parameters<typeof tabsFor>[0]) => tabsFor(features).map((t) => `${t.label} ${t.path}`);
+
+  it("shows Sources on an iPhone and while nothing is known", () => {
+    expect(paths(["ios_apps", "home_screen_app", "web_push", "devicectl"])).toEqual([
+      "Browse /",
+      "My Apps /apps",
+      "Sources /sources",
+      "Settings /settings",
+    ]);
+    expect(paths([])).toEqual(paths(["ios_apps"]));
+  });
+
+  it("puts Kiwi Builds in the Sources tab's place on Android", () => {
+    expect(paths(["android_apps", "web_push", "android_app_offer"])).toEqual([
+      "Browse /",
+      "My Apps /apps",
+      `Builds ${BUILDS_PATH}`,
+      "Settings /settings",
+    ]);
+  });
+});
+
+describe("shownTab", () => {
+  const ios = tabsFor(["ios_apps"]);
+  const android = tabsFor(["android_apps"]);
+
+  it("highlights Builds for Kiwi Builds' pages on Android", () => {
+    expect(shownTab(routeTab({ name: "builds" }), android)).toBe("builds");
+    expect(shownTab(routeTab({ name: "build", app: "youtube" }), android)).toBe("builds");
+    expect(shownTab(routeTab({ name: "source", sourceId: "kiwi-youtube" }), android)).toBe("builds");
+  });
+
+  it("keeps them under Sources on an iPhone", () => {
+    expect(shownTab(routeTab({ name: "builds" }), ios)).toBe("sources");
+    expect(shownTab("settings", android)).toBe("settings");
+    expect(shownTab(null, android)).toBeNull();
   });
 });

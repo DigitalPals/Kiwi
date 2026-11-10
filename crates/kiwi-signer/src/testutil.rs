@@ -1,4 +1,6 @@
-//! Synthetic fixtures: DER, certificates, profiles, Mach-O binaries and IPAs.
+//! Synthetic fixtures: DER, certificates, profiles, Mach-O binaries and IPAs. Other crates'
+//! tests get them with the `test-support` feature.
+#![allow(missing_docs, clippy::missing_panics_doc)]
 
 use std::io::{Cursor, Write};
 
@@ -55,6 +57,17 @@ pub fn cms(content: &[u8]) -> Vec<u8> {
     cms_with_content(&tlv(OCTET_STRING, content))
 }
 
+/// A provisioning profile whose entitlements nest `levels` arrays deep: deserializing it
+/// recursively overflows the stack. 60 000 levels make about 900 KB, within the upload limit.
+pub fn nested_profile(levels: usize) -> Vec<u8> {
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>UUID</key><string>deep</string><key>Entitlements</key><dict><key>deep</key>{}{}</dict></dict></plist>",
+        "<array>".repeat(levels),
+        "</array>".repeat(levels)
+    );
+    cms(xml.as_bytes())
+}
+
 fn name_attribute(oid: &[u8], tag: u8, value: &str) -> Vec<u8> {
     tlv(
         SET,
@@ -66,6 +79,24 @@ fn name_attribute(oid: &[u8], tag: u8, value: &str) -> Vec<u8> {
 }
 
 pub fn certificate(common_name: &str, org_unit: &str, generalized: bool) -> Vec<u8> {
+    certificate_with(common_name, org_unit, generalized, None)
+}
+
+/// A certificate with the given (already encoded) extensions.
+pub fn certificate_with_extensions(
+    common_name: &str,
+    org_unit: &str,
+    extensions: &[u8],
+) -> Vec<u8> {
+    certificate_with(common_name, org_unit, false, Some(extensions))
+}
+
+fn certificate_with(
+    common_name: &str,
+    org_unit: &str,
+    generalized: bool,
+    extensions: Option<&[u8]>,
+) -> Vec<u8> {
     let alg = tlv(
         SEQUENCE,
         &tlv(OID, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b]),
@@ -107,6 +138,7 @@ pub fn certificate(common_name: &str, org_unit: &str, generalized: bool) -> Vec<
             validity,
             subject,
             tlv(SEQUENCE, &[]),
+            extensions.map_or_else(Vec::new, |e| tlv(context(3), &tlv(SEQUENCE, e))),
         ]
         .concat(),
     );
@@ -131,6 +163,8 @@ pub fn identity() -> Identity {
 }
 
 pub struct ProfileSpec {
+    /// DER of the certificate the profile allows (default: [`identity_certificate`]).
+    pub certificate: Option<Vec<u8>>,
     pub uuid: String,
     pub name: String,
     pub app_id: Option<String>,
@@ -143,6 +177,7 @@ pub struct ProfileSpec {
 impl ProfileSpec {
     pub fn wildcard() -> Self {
         Self {
+            certificate: None,
             uuid: "00000000-0000-4000-8000-000000000001".into(),
             name: "iOS Team Provisioning Profile: *".into(),
             app_id: Some(format!("{TEAM}.*")),
@@ -189,7 +224,11 @@ pub fn profile_bytes(spec: &ProfileSpec) -> Vec<u8> {
     root.insert(
         "DeveloperCertificates".into(),
         Value::Array(vec![
-            Value::Data(identity_certificate()),
+            Value::Data(
+                spec.certificate
+                    .clone()
+                    .unwrap_or_else(identity_certificate),
+            ),
             Value::Data(b"other".to_vec()),
         ]),
     );
@@ -312,6 +351,12 @@ pub fn plist_bytes(dict: Dictionary, binary: bool) -> Vec<u8> {
 /// Builds zip archives entry by entry.
 pub struct Zip(ZipWriter<Cursor<Vec<u8>>>);
 
+impl Default for Zip {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Zip {
     pub fn new() -> Self {
         Self(ZipWriter::new(Cursor::new(Vec::new())))
@@ -341,4 +386,126 @@ impl Zip {
     pub fn finish(self) -> Vec<u8> {
         self.0.finish().unwrap().into_inner()
     }
+}
+
+/// A self-signed Apple Development style identity, exported as Keychain Access does.
+#[cfg(not(target_os = "macos"))]
+pub struct TestIdentity {
+    pub p12: Vec<u8>,
+    /// DER of the certificate.
+    pub certificate: Vec<u8>,
+    /// PKCS#8 DER of the private key.
+    pub private_key: Vec<u8>,
+}
+
+/// Creates a code signing certificate for `team` (its organizational unit) with a new P-256
+/// key, valid for a year, in a `.p12` protected by `password`.
+#[cfg(not(target_os = "macos"))]
+pub fn signing_identity(team: &str, password: &str) -> TestIdentity {
+    signing_identity_with(team, password, false)
+}
+
+/// Like [`signing_identity`], with a 2048-bit RSA key (as Apple issues) when `rsa`.
+#[cfg(not(target_os = "macos"))]
+pub fn signing_identity_with(team: &str, password: &str, rsa: bool) -> TestIdentity {
+    use apple_codesign::{CertificateProfile, create_self_signed_code_signing_certificate};
+    use x509_certificate::{EcdsaCurve, KeyAlgorithm};
+    let algorithm = if rsa {
+        KeyAlgorithm::Rsa
+    } else {
+        KeyAlgorithm::Ecdsa(EcdsaCurve::Secp256r1)
+    };
+    let (cert, key) = create_self_signed_code_signing_certificate(
+        algorithm,
+        CertificateProfile::AppleDevelopment,
+        team,
+        "Kiwi Test",
+        "NL",
+        chrono::Duration::days(365),
+    )
+    .unwrap();
+    let certificate = cert.encode_der().unwrap();
+    let private_key = key.to_pkcs8_one_asymmetric_key_der().to_vec();
+    TestIdentity {
+        p12: p12_with(&certificate, &private_key, password),
+        certificate,
+        private_key,
+    }
+}
+
+/// A `.p12` with one certificate and one key (legacy encryption, SHA-1 MAC).
+#[cfg(not(target_os = "macos"))]
+pub fn p12_with(certificate: &[u8], private_key: &[u8], password: &str) -> Vec<u8> {
+    p12::PFX::new(certificate, private_key, None, password, "Kiwi Test")
+        .unwrap()
+        .to_der()
+}
+
+/// A `.p12` with `certificates` in this order and the private `keys` (legacy encryption,
+/// SHA-1 MAC), like an identity exported with its certificate chain.
+#[cfg(not(target_os = "macos"))]
+pub fn p12_with_bags(certificates: &[&[u8]], keys: &[&[u8]], password: &str) -> Vec<u8> {
+    use p12::{CertBag, ContentInfo, EncryptedData, MacData, PFX, SafeBag, SafeBagKind};
+    let bmp: Vec<u8> = password
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_be_bytes)
+        .collect();
+    // The p12 crate encrypts a key only while it builds a whole file: take the bag from one.
+    let key_bags: Vec<SafeBag> = keys
+        .iter()
+        .map(|key| {
+            PFX::new(&[], key, None, password, "Kiwi Test")
+                .unwrap()
+                .bags(password)
+                .unwrap()
+                .into_iter()
+                .find(|bag| matches!(bag.bag, SafeBagKind::Pkcs8ShroudedKeyBag(_)))
+                .unwrap()
+        })
+        .collect();
+    let cert_bags: Vec<SafeBag> = certificates
+        .iter()
+        .map(|der| SafeBag {
+            bag: SafeBagKind::CertBag(CertBag::X509(der.to_vec())),
+            attributes: Vec::new(),
+        })
+        .collect();
+    let contents = yasna::construct_der(|w| {
+        w.write_sequence_of(|w| {
+            ContentInfo::EncryptedData(EncryptedData::from_safe_bags(&cert_bags, &bmp).unwrap())
+                .write(w.next());
+            let keys = yasna::construct_der(|w| {
+                w.write_sequence_of(|w| {
+                    for bag in &key_bags {
+                        bag.write(w.next());
+                    }
+                })
+            });
+            ContentInfo::Data(keys).write(w.next());
+        })
+    });
+    PFX {
+        version: 3,
+        mac_data: Some(MacData::new(&contents, &bmp)),
+        auth_safe: ContentInfo::Data(contents),
+    }
+    .to_der()
+}
+
+/// A structurally complete arm64 iOS Mach-O (segments, `__LINKEDIT`, build version) that
+/// signers can sign: an executable, or a dylib when `dylib`.
+#[cfg(not(target_os = "macos"))]
+pub fn ios_macho(dylib: bool) -> Vec<u8> {
+    use apple_codesign::{MachoTarget, Platform, macho_builder::MachOBuilder};
+    const MH_EXECUTE: u32 = 2;
+    const MH_DYLIB: u32 = 6;
+    MachOBuilder::new_aarch64(if dylib { MH_DYLIB } else { MH_EXECUTE })
+        .macho_target(MachoTarget {
+            platform: Platform::IOs,
+            minimum_os_version: semver::Version::new(16, 0, 0),
+            sdk_version: semver::Version::new(18, 0, 0),
+        })
+        .write_macho()
+        .unwrap()
 }

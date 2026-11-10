@@ -1,0 +1,14 @@
+# The image is built from these paths only (see Dockerfile); everything else, such as
+# .env, deploy/deploy.env, .git and build output, stays out of the build context.
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates
+!automation
+!web
+web/node_modules
+web/dist
+**/__pycache__
+**/.pytest_cache
+**/.DS_Store

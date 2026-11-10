@@ -2,6 +2,7 @@
 //! the web app. See docs/architecture.md and docs/api.md.
 
 pub mod actions;
+pub mod android;
 pub mod automation;
 pub mod builds;
 pub mod catalog;
@@ -9,9 +10,11 @@ pub mod config;
 pub mod db;
 pub mod devices;
 pub mod error;
+pub mod kiwi_app;
 pub mod linked;
 pub mod ota;
 pub mod owner;
+pub mod peers;
 pub mod push;
 pub mod routes;
 pub mod scheduler;
@@ -24,14 +27,14 @@ mod testutil;
 pub mod views;
 
 use std::{
+    future::Future,
     io::{Read, Write},
-    net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, RwLock, atomic::AtomicBool},
     time::Duration,
 };
 
-use axum::http::HeaderMap;
+use axum::{Router, extract::connect_info::IntoMakeServiceWithConnectInfo, http::HeaderMap};
 use chrono::Utc;
 use kiwi_device::Tailscale;
 use kiwi_source::{CancellationToken, ClientOptions, SourceClient};
@@ -41,15 +44,17 @@ pub use config::{Args, Config};
 pub use routes::router;
 
 use crate::{
+    android::{AndroidAppCache, PackageReports},
     builds::Jobs,
     catalog::Catalog,
     config::{AllowedHosts, valid_forwarded_host},
     db::Db,
     devices::{DeviceCaches, DeviceTools, SystemDevices},
     ota::ServedRanges,
+    peers::{Connection, PeerUids, ProcNet},
     push::{NoticeBackoff, PushTransport, WebPush},
     settings::Settings,
-    signing::{AppleSigner, SIGNING_SCAN_TIMEOUT, Signer, SigningInfo, scan_signing},
+    signing::{SIGNING_SCAN_TIMEOUT, Signer, SigningInfo, SystemSigner, scan_signing},
     store::Store,
 };
 
@@ -62,6 +67,10 @@ pub struct Paths {
     pub work: PathBuf,
     pub icons: PathBuf,
     pub vapid: PathBuf,
+    /// Kiwi's Android app (`kiwi.apk`, `kiwi.json`), put there by whatever provides it.
+    pub android_app: PathBuf,
+    /// Uploaded signing identity and provisioning profiles.
+    pub signing: kiwi_signer::SigningDir,
 }
 
 impl Paths {
@@ -73,8 +82,15 @@ impl Paths {
             work: data.join("work"),
             icons: data.join("icons"),
             vapid: data.join("vapid.json"),
+            android_app: data.join("android-app"),
+            signing: signing_dir(data),
         }
     }
+}
+
+/// `<data>/signing`: the uploaded `.p12` identity and provisioning profiles.
+pub fn signing_dir(data: &Path) -> kiwi_signer::SigningDir {
+    kiwi_signer::SigningDir::new(data.join("signing"))
 }
 
 /// Everything the server needs; platform pieces are injectable for tests.
@@ -83,6 +99,8 @@ pub struct Options {
     pub source_client: ClientOptions,
     pub signer: Arc<dyn Signer>,
     pub devices: Arc<dyn DeviceTools>,
+    /// Who made a loopback connection (off macOS).
+    pub peers: Arc<dyn PeerUids>,
     /// `None`: real Web Push with the VAPID key in the data directory.
     pub push: Option<Arc<dyn PushTransport>>,
     /// Base URL of the iTunes Search API ([`store::DEFAULT_URL`]).
@@ -104,11 +122,15 @@ impl Options {
                 tailscale.bin().display()
             );
         }
+        let signer = Arc::new(SystemSigner {
+            dir: signing_dir(&config.data_dir),
+        });
         Ok(Self {
             config,
             source_client: ClientOptions::default(),
-            signer: Arc::new(AppleSigner),
+            signer,
             devices: Arc::new(SystemDevices { tailscale }),
+            peers: Arc::new(ProcNet),
             push: None,
             app_store_url: store::DEFAULT_URL.into(),
         })
@@ -117,8 +139,11 @@ impl Options {
 
 pub struct Kiwi {
     pub config: Config,
-    /// Host names requests may be addressed to.
-    pub hosts: AllowedHosts,
+    /// The public URL: `--public-url`, or this machine's Tailscale name once Tailscale told
+    /// it (see [`learn_public_url`]).
+    public: RwLock<Option<String>>,
+    /// Host names requests may be addressed to (of the public URL and the listen address).
+    hosts: RwLock<AllowedHosts>,
     pub paths: Paths,
     pub db: Db,
     pub catalog: Catalog,
@@ -130,6 +155,7 @@ pub struct Kiwi {
     signing_scan: Arc<tokio::sync::Mutex<()>>,
     team: RwLock<Option<String>>,
     pub devices: Arc<dyn DeviceTools>,
+    pub peers: Arc<dyn PeerUids>,
     pub caches: DeviceCaches,
     pub devicectl_available: AtomicBool,
     pub push: Arc<dyn PushTransport>,
@@ -142,6 +168,10 @@ pub struct Kiwi {
     pub owner: owner::Owner,
     /// IPA byte ranges served per install token (completion of ranged downloads).
     pub served: ServedRanges,
+    /// Kiwi's Android app, checked when its files change.
+    pub android_app: AndroidAppCache,
+    /// The last package report of each Android device.
+    pub package_reports: PackageReports,
     /// Cancelled on shutdown.
     pub cancel: CancellationToken,
     /// Wakes the scheduler (a build finished, a source changed, ...).
@@ -274,7 +304,7 @@ impl Kiwi {
                     .clone()
                     .filter(|u| u.starts_with("https://"))
                     .unwrap_or_else(|| "mailto:kiwi@localhost".into());
-                Arc::new(WebPush(
+                Arc::new(WebPush::new(
                     kiwi_push::PushSender::new(vapid, subject).map_err(|e| e.to_string())?,
                 ))
             }
@@ -298,7 +328,8 @@ impl Kiwi {
         );
         let hosts = AllowedHosts::new(&fallback_url(&config), config.listen);
         let kiwi = Arc::new(Self {
-            hosts,
+            public: RwLock::new(config.public_url.clone()),
+            hosts: RwLock::new(hosts),
             paths,
             db,
             catalog,
@@ -309,6 +340,7 @@ impl Kiwi {
             signing_scan: Arc::default(),
             team: RwLock::new(team),
             devices: opts.devices,
+            peers: opts.peers,
             caches: DeviceCaches::default(),
             devicectl_available: AtomicBool::new(devicectl),
             push,
@@ -319,6 +351,8 @@ impl Kiwi {
             automation,
             owner,
             served: ServedRanges::default(),
+            android_app: AndroidAppCache::default(),
+            package_reports: PackageReports::default(),
             cancel: CancellationToken::new(),
             kick: Notify::new(),
             config,
@@ -355,13 +389,14 @@ impl Kiwi {
     /// [`SIGNING_SCAN_TIMEOUT`] so a blocked keychain cannot stall startup, the scheduler or
     /// a build.
     pub async fn rescan_signing(&self) -> SigningInfo {
-        let info = scan_signing(
+        let mut info = scan_signing(
             self.signer.clone(),
             self.signing_scan.clone(),
             &self.signing_info(),
             SIGNING_SCAN_TIMEOUT,
         )
         .await;
+        info.uploads = Some(self.paths.signing.clone());
         if let Some(team) = info.team_id(Utc::now()) {
             let mut current = self.team.write().unwrap();
             if current.as_ref() != Some(&team) {
@@ -380,21 +415,45 @@ impl Kiwi {
         self.team.read().unwrap().clone()
     }
 
-    /// `--public-url` (or the Mac's Tailscale name), else `https://<X-Forwarded-Host>`, else
-    /// the listen address.
+    /// `--public-url` (or this machine's Tailscale name), else `https://<X-Forwarded-Host>`,
+    /// else the listen address.
     pub fn public_url(&self, headers: &HeaderMap) -> String {
-        if let Some(url) = &self.config.public_url {
-            return url.clone();
+        if let Some(url) = self.known_public_url() {
+            return url;
         }
         headers
             .get("x-forwarded-host")
             .and_then(|v| v.to_str().ok())
             .filter(|h| valid_forwarded_host(h))
-            .map_or_else(|| fallback_url(&self.config), |h| format!("https://{h}"))
+            .map_or_else(
+                || format!("http://{}", self.config.listen),
+                |h| format!("https://{h}"),
+            )
     }
 
     pub fn default_public_url(&self) -> String {
         self.public_url(&HeaderMap::new())
+    }
+
+    /// `--public-url`, or this machine's Tailscale name once known.
+    pub fn known_public_url(&self) -> Option<String> {
+        self.public.read().unwrap().clone()
+    }
+
+    /// Whether a request may name `host` (`Host`) and `forwarded` (`X-Forwarded-Host`), see
+    /// [`AllowedHosts`].
+    pub fn allows_host(&self, host: Option<&str>, forwarded: Option<&str>) -> bool {
+        self.hosts.read().unwrap().allows(host, forwarded)
+    }
+
+    /// Takes the public URL Tailscale named after Kiwi started: requests may name its host
+    /// from now on, and links and Web Push use it.
+    pub fn set_public_url(&self, url: String) {
+        *self.hosts.write().unwrap() = AllowedHosts::new(&url, self.config.listen);
+        if url.starts_with("https://") {
+            self.push.set_subject(&url);
+        }
+        *self.public.write().unwrap() = Some(url);
     }
 
     /// Cancels builds and the scheduler and waits for them (bounded).
@@ -425,7 +484,7 @@ async fn shutdown_signal() {
     let _ = ctrl_c.await;
 }
 
-/// `--public-url`, else the listen address (reachable only from the Mac itself).
+/// `--public-url`, else the listen address (reachable only from this machine itself).
 fn fallback_url(config: &Config) -> String {
     config
         .public_url
@@ -433,20 +492,51 @@ fn fallback_url(config: &Config) -> String {
         .unwrap_or_else(|| format!("http://{}", config.listen))
 }
 
-/// `https://<this Mac's MagicDNS name>`, the address `tailscale serve` answers on.
-async fn tailscale_url(args: &Args) -> Option<String> {
-    let tailscale = Tailscale::new(&args.tailscale_socket, &args.tailscale_bin).ok()?;
+/// `https://<this machine's MagicDNS name>`, the address `tailscale serve` answers on;
+/// `Ok(None)` while Tailscale has no name for it.
+async fn tailscale_url(tailscale: &Tailscale) -> Result<Option<String>, String> {
     match tailscale.dns_name().await {
-        Ok(Some(name)) => Some(format!("https://{name}")),
-        Ok(None) => {
-            tracing::warn!("Tailscale has no DNS name for this Mac yet");
-            None
-        }
-        Err(e) => {
-            tracing::warn!("could not ask Tailscale for this Mac's name: {e}");
-            None
-        }
+        Ok(name) => Ok(name.map(|name| format!("https://{name}"))),
+        Err(e) => Err(e.to_string()),
     }
+}
+
+/// The longest pause between two questions of [`learn_public_url`].
+const LEARN_MAX_DELAY: Duration = Duration::from_secs(30);
+
+/// Asks `ask` for the public URL until it has one, then takes it
+/// ([`Kiwi::set_public_url`]). Kiwi needs it when it was not given `--public-url` and
+/// Tailscale could not name this machine at start: tailscaled was still starting (at boot,
+/// or a Tailscale container started after Kiwi's, before its socket existed) or not logged
+/// in. Until then Kiwi answers only on its listen address. The pause between questions
+/// starts at `first` and doubles up to 30 s. Stops on shutdown.
+pub async fn learn_public_url<F, Fut>(kiwi: Arc<Kiwi>, mut ask: F, first: Duration)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<Option<String>, String>>,
+{
+    let mut delay = first;
+    loop {
+        tokio::select! {
+            _ = kiwi.cancel.cancelled() => return,
+            _ = tokio::time::sleep(delay) => {}
+        }
+        match ask().await {
+            Ok(Some(url)) => {
+                tracing::info!("public URL from Tailscale: {url}");
+                kiwi.set_public_url(url);
+                return;
+            }
+            Ok(None) => tracing::debug!("Tailscale has no name for this machine yet"),
+            Err(e) => tracing::debug!("could not ask Tailscale for this machine's name: {e}"),
+        }
+        delay = (delay * 2).min(LEARN_MAX_DELAY);
+    }
+}
+
+/// The service `axum::serve` runs: the router, with each connection's [`Connection`].
+pub fn app(kiwi: Arc<Kiwi>) -> IntoMakeServiceWithConnectInfo<Router, Connection> {
+    router(kiwi).into_make_service_with_connect_info::<Connection>()
 }
 
 /// Runs the server until SIGTERM/SIGINT.
@@ -458,14 +548,33 @@ pub async fn run(args: Args) -> Result<(), String> {
         );
     }
     let mut options = Options::from_args(&args)?;
+    if args.trust_local && !cfg!(target_os = "macos") {
+        tracing::warn!(
+            "--trust-local: every user and program on this computer counts as Kiwi's owner"
+        );
+    }
+    // Without --public-url, Tailscale names the address; until it does, Kiwi keeps asking.
+    let mut learn = None;
     if options.config.public_url.is_none() {
-        options.config.public_url = tailscale_url(&args).await;
-        match &options.config.public_url {
-            Some(url) => tracing::info!("public URL from Tailscale: {url}"),
-            None => tracing::warn!(
-                "no public URL: pass --public-url; until then Kiwi answers only on http://{}",
-                args.listen
-            ),
+        let tailscale = Tailscale::new(&args.tailscale_socket, &args.tailscale_bin)
+            .map_err(|e| e.to_string())?;
+        match tailscale_url(&tailscale).await {
+            Ok(Some(url)) => {
+                tracing::info!("public URL from Tailscale: {url}");
+                options.config.public_url = Some(url);
+            }
+            result => {
+                let why = match result {
+                    Err(e) => format!("could not ask Tailscale for this machine's name: {e}"),
+                    _ => "Tailscale has no name for this machine yet".into(),
+                };
+                tracing::warn!(
+                    "no public URL ({why}): Kiwi answers only on http://{} until Tailscale \
+                     names this machine, and keeps asking (or pass --public-url)",
+                    args.listen
+                );
+                learn = Some(tailscale);
+            }
         }
     }
     // Held until the process exits.
@@ -482,6 +591,17 @@ pub async fn run(args: Args) -> Result<(), String> {
         kiwi.config.web_dir.display()
     );
     kiwi.jobs.tracker.spawn(scheduler::run(kiwi.clone()));
+    if let Some(tailscale) = learn {
+        let tailscale = Arc::new(tailscale);
+        kiwi.jobs.tracker.spawn(learn_public_url(
+            kiwi.clone(),
+            move || {
+                let tailscale = tailscale.clone();
+                async move { tailscale_url(&tailscale).await }
+            },
+            Duration::from_secs(2),
+        ));
+    }
     tokio::spawn({
         let cancel = kiwi.cancel.clone();
         async move {
@@ -490,9 +610,8 @@ pub async fn run(args: Args) -> Result<(), String> {
             cancel.cancel();
         }
     });
-    let app = router(kiwi.clone()).into_make_service_with_connect_info::<SocketAddr>();
-    let server =
-        axum::serve(listener, app).with_graceful_shutdown(kiwi.cancel.clone().cancelled_owned());
+    let server = axum::serve(listener, app(kiwi.clone()))
+        .with_graceful_shutdown(kiwi.cancel.clone().cancelled_owned());
     let deadline = async {
         kiwi.cancel.cancelled().await;
         tokio::time::sleep(Duration::from_secs(10)).await;

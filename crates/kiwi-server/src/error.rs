@@ -48,6 +48,15 @@ impl ApiError {
             "Kiwi Builds is off. Turn it on in Settings.",
         )
     }
+    /// Kiwi Builds can only build iOS apps on a Mac.
+    pub fn needs_mac() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "needs_mac",
+            "iOS apps can only be built on a Mac. This Kiwi doesn't run on macOS, so Kiwi \
+             Builds builds Android apps here.",
+        )
+    }
     pub fn signing_unavailable(message: impl Into<String>) -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,

@@ -9,11 +9,11 @@ use crate::{Error, Result, process};
 const WHOIS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where the open-source tailscaled listens for its LocalAPI: Homebrew's on macOS, the
-/// distribution packages' on Linux.
+/// distribution packages' (and tailscaled's own default) on Linux.
 #[cfg(target_os = "macos")]
 pub const TAILSCALED_SOCKET: &str = "/var/run/tailscaled.socket";
 #[cfg(not(target_os = "macos"))]
-pub const TAILSCALED_SOCKET: &str = "/var/run/tailscale/tailscaled.socket";
+pub const TAILSCALED_SOCKET: &str = "/var/run/tailscale/tailscaled.sock";
 
 /// tailscaled refuses LocalAPI requests for other host names (DNS rebinding).
 const LOCALAPI: &str = "http://local-tailscaled.sock/localapi/v0";
@@ -80,6 +80,15 @@ impl Tailscale {
             return tailscale_owner(&self.bin).await;
         }
         parse_owner(&self.status().await?)
+    }
+
+    /// This machine's node (`Self.ID` of the status, its StableID); `None` before it has
+    /// joined a tailnet.
+    pub async fn node_id(&self) -> Result<Option<String>> {
+        if !self.uses_localapi() {
+            return parse_node_id(&cli_status(&self.bin).await?);
+        }
+        parse_node_id(&self.status().await?)
     }
 
     /// This machine's MagicDNS name without the trailing dot (`mac.tailnet.ts.net`);
@@ -242,6 +251,16 @@ pub fn parse_dns_name(json: &[u8]) -> Result<Option<String>> {
         .map(|name| name.trim_end_matches('.').to_ascii_lowercase()))
 }
 
+/// Parses `tailscale status --json` output: `Self.ID`, this machine's StableID (what
+/// `whois` reports as the node's `StableID`).
+pub fn parse_node_id(json: &[u8]) -> Result<Option<String>> {
+    let status: Status = serde_json::from_slice(json).map_err(|e| Error::Parse {
+        program: "tailscale".into(),
+        message: e.to_string(),
+    })?;
+    Ok(status.self_node.and_then(|me| non_empty(me.id)))
+}
+
 /// Parses `tailscale whois --json` output.
 pub fn parse_whois(json: &[u8]) -> Result<TailscalePeer> {
     let whois: Whois = serde_json::from_slice(json).map_err(|e| Error::Parse {
@@ -302,6 +321,8 @@ struct Status {
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct SelfNode {
+    #[serde(rename = "ID")]
+    id: Option<String>,
     #[serde(rename = "UserID")]
     user_id: Option<i64>,
     tags: Option<Vec<String>>,

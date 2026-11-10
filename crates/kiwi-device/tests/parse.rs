@@ -232,6 +232,21 @@ fn status_dns_name() {
     assert!(parse_dns_name(b"[").is_err());
 }
 
+#[test]
+fn status_node_id() {
+    let status = fixture("tailscale_status.json");
+    assert_eq!(
+        parse_node_id(&status).unwrap().as_deref(),
+        Some("nMACSTUDIO")
+    );
+    // Before the machine has joined a tailnet.
+    let mut status: Value = serde_json::from_slice(&status).unwrap();
+    status["Self"]["ID"] = serde_json::json!("");
+    assert_eq!(parse_node_id(status.to_string().as_bytes()).unwrap(), None);
+    assert_eq!(parse_node_id(b"{}").unwrap(), None);
+    assert!(parse_node_id(b"[").is_err());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn whois_command() {
@@ -360,6 +375,7 @@ async fn localapi() {
             name: Some("Alex Morgan".into()),
         })
     );
+    assert_eq!(ts.node_id().await.unwrap().as_deref(), Some("nMACSTUDIO"));
 
     // A socket left behind by a stopped tailscaled.
     let stale = dir.path().join("stale.socket");
@@ -586,4 +602,72 @@ fn android_user_agents() {
         None
     );
     assert_eq!(ua("okhttp/4.12.0 Android 14"), None);
+}
+
+#[test]
+fn native_android_user_agents() {
+    let app = |version: Option<&str>| {
+        info(
+            version.map(str::to_owned),
+            some("Android"),
+            None,
+            UaSource::AndroidApp,
+        )
+    };
+    let ua_15 = "Kiwi-Android/1.2.0 (12; Android 15; SDK 35; Google Pixel 9a)";
+    assert_eq!(ua(ua_15), app(Some("15")));
+    assert!(is_native_android(ua_15));
+    assert_eq!(user_agent_platform(ua_15), Some("android"));
+    assert_eq!(
+        ua("Kiwi-Android/0.1.0-debug (1; Android 8.1.0; SDK 27; samsung SM-G960F)"),
+        app(Some("8.1.0"))
+    );
+    // A preview release names itself; the platform is still known.
+    assert_eq!(
+        ua("Kiwi-Android/1.0 (3; Android Baklava; SDK 36; Google sdk_gphone64_arm64)"),
+        app(None)
+    );
+    assert_eq!(ua("Kiwi-Android/1.0"), app(None));
+    assert_eq!(UaSource::AndroidApp.as_str(), "android_app");
+    assert_eq!(
+        serde_json::to_value(UaSource::AndroidApp).unwrap(),
+        "android_app"
+    );
+    // Browsers are not the app.
+    let chrome = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36";
+    assert!(!is_native_android(chrome));
+    assert!(!is_native_android(
+        "Kiwi/1 (iPhone; iOS 27.0.1; Scale/3.00)"
+    ));
+}
+
+#[test]
+fn user_agent_platforms() {
+    let platform = user_agent_platform;
+    // iOS clients, also when they tell no version (Chrome on iOS, the Home Screen app).
+    for ios in [
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/141.0.7390.41 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (iPad; CPU OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "itunesstored/1.0 iOS/27.0.1 model/iPhone19,4 hwp/t8150 build/24A434 (6; dt:332) AMS/1",
+    ] {
+        assert_eq!(platform(ios), Some("ios"), "{ios}");
+    }
+    assert_eq!(
+        platform(
+            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36"
+        ),
+        Some("android")
+    );
+    // Desktop browsers (an iPad asking for desktop sites looks like a Mac) can't tell.
+    for desktop in [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        "curl/8.10.1",
+        "",
+    ] {
+        assert_eq!(platform(desktop), None, "{desktop}");
+    }
 }

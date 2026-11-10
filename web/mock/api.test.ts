@@ -7,14 +7,15 @@ import type {
   Build,
   Me,
   Settings,
+  Signing,
   Source,
   StoreApp,
 } from "../src/api/types.ts";
-import { compareVersions, createMockApi, shortName } from "./api.ts";
+import { MOCK_ANDROID_SIGNER, compareVersions, createMockApi, shortName, type MockOptions } from "./api.ts";
 
-function setup() {
+function setup(options: MockOptions = {}) {
   let now = Date.parse("2026-10-29T12:00:00Z");
-  const api = createMockApi(() => now);
+  const api = createMockApi(() => now, options);
   const request = (method: string, path: string, body?: unknown) => {
     const url = new URL(path, "http://localhost:5173");
     return api.handle({
@@ -218,6 +219,113 @@ describe("mock api", () => {
     expect((request("GET", "/api/me").json as Me).device.platform).toBe("ios");
   });
 
+  it("reports the device's platform, features and the first-run setup", () => {
+    const { request } = setup();
+    const me = request("GET", "/api/me").json as Me;
+    expect(me.device).toMatchObject({ platform: "ios", platform_source: "detected", detected_platform: "ios", client: "web" });
+    expect(me.onboarded).toBe(true);
+    expect(me.host).toEqual({ os: "macos", ios_signing: "keychain", devicectl: true, android_signer_sha256: MOCK_ANDROID_SIGNER });
+    expect(me.features).toEqual(["ios_apps", "home_screen_app", "web_push", "devicectl"]);
+    expect(me.android_app).toMatchObject({ package: "io.github.digitalpals.kiwi", install_url: "http://localhost:5173/android/kiwi.apk" });
+    expect(request("GET", "/android/kiwi.apk")).toMatchObject({ status: 200, contentType: "application/vnd.android.package-archive" });
+    // The owner's choice wins; null goes back to detection.
+    const chosen = request("PATCH", "/api/me", { platform: "android" }).json as Me;
+    expect(chosen.device).toMatchObject({ platform: "android", platform_source: "chosen", detected_platform: "ios" });
+    // Kiwi's Android app is offered only where it installs: a device detected as Android.
+    expect(chosen.features).toEqual(["android_apps", "web_push"]);
+    expect(request("GET", "/api/apps").json).toEqual([]);
+    expect((request("PATCH", "/api/me", { platform: null }).json as Me).device.platform_source).toBe("detected");
+    expect(request("PATCH", "/api/me", { platform: "windows" }).status).toBe(400);
+    expect((request("PATCH", "/api/me", { onboarded: false }).json as Me).onboarded).toBe(false);
+    expect(request("PUT", "/api/me/packages", { packages: [] }).status).toBe(400);
+  });
+
+  it("answers as a desktop browser that has not been set up, on Linux", () => {
+    const now = Date.parse("2026-10-29T12:00:00Z");
+    const api = createMockApi(() => now, { device: "desktop", onboarded: false, host: "linux", androidApp: false });
+    const request = (method: string, path: string, body?: unknown) =>
+      api.handle({
+        method, path, query: new URLSearchParams(),
+        headers: method === "GET" ? {} : { "x-kiwi": "1", "content-type": "application/json" },
+        body: body === undefined ? "" : JSON.stringify(body),
+        origin: "http://localhost:5173",
+      });
+    const me = request("GET", "/api/me").json as Me;
+    expect(me.device).toMatchObject({ kind: "browser", platform: "ios", platform_source: "assumed", detected_platform: null });
+    expect(me).toMatchObject({ onboarded: false, android_app: null, host: { os: "linux", ios_signing: "files", devicectl: false } });
+    expect(me.features).toEqual(["ios_apps", "home_screen_app", "web_push"]);
+    expect(me.counts.installed).toBe(0);
+    expect(request("GET", "/android/kiwi.apk").status).toBe(404);
+    const android = request("PATCH", "/api/me", { platform: "android", onboarded: true }).json as Me;
+    expect(android).toMatchObject({ onboarded: true, device: { platform: "android", platform_source: "chosen" } });
+    expect(android.features).toEqual(["android_apps", "web_push"]);
+  });
+
+  it("offers Kiwi's Android app only to devices detected as Android", () => {
+    const phone = setup({ device: "android" }).request("GET", "/api/me").json as Me;
+    expect(phone.features).toEqual(["android_apps", "web_push", "android_app_offer"]);
+    const { request } = setup({ device: "desktop" });
+    const desktop = request("PATCH", "/api/me", { platform: "android" }).json as Me;
+    expect(desktop.android_app).not.toBeNull();
+    expect(desktop.features).toEqual(["android_apps", "web_push"]);
+  });
+
+  it("warns Android devices when Kiwi couldn't prepare its Android app", () => {
+    const { request } = setup({ device: "android", androidApp: "failed" });
+    const me = request("GET", "/api/me").json as Me;
+    expect(me.android_app).toBeNull();
+    expect(me.features).toEqual(["android_apps", "web_push"]);
+    const settings = me.warnings.filter((w) => w.link === "/settings");
+    expect(settings).toEqual([expect.objectContaining({ level: "warning", code: "android_app" })]);
+    expect(settings[0]?.message).toMatch(/^Kiwi couldn't prepare its Android app: /);
+    expect(request("GET", "/android/kiwi.apk").status).toBe(404);
+    // An iPhone isn't told.
+    const iphone = request("PATCH", "/api/me", { platform: "ios" }).json as Me;
+    expect(iphone.warnings.some((w) => w.code === "android_app")).toBe(false);
+  });
+
+  it("builds iOS apps only on a Mac, as the server does on Linux", () => {
+    const { request } = setup({ host: "linux" });
+    const overview = request("GET", "/api/automation").json as AutomationOverview;
+    expect(overview.checks).toEqual([{ name: "macOS", ready: false }]);
+    const youtube = request("GET", "/api/automation/youtube").json as AutomationState;
+    expect(youtube.checks).toEqual(overview.checks);
+    const check = request("POST", "/api/automation/youtube/check", {});
+    expect(check.status).toBe(409);
+    expect((check.json as { error: { code: string; message: string } }).error).toMatchObject({
+      code: "needs_mac",
+      message: expect.stringMatching(/^iOS apps can only be built on a Mac\./),
+    });
+    const twitch = request("GET", "/api/automation/twitch").json as AutomationState;
+    expect(request("POST", "/api/automation/twitch/add", twitch.preferences).status).toBe(409);
+    const android = request("GET", "/api/automation/android-reddit").json as AutomationState;
+    expect(request("POST", "/api/automation/android-reddit/add", android.preferences).status).toBe(202);
+  });
+
+  it("marks Android apps installed with another signature", () => {
+    let now = Date.parse("2026-10-29T12:00:00Z");
+    const api = createMockApi(() => now, { builds: "simulated", device: "android", foreign: ["app.morphe.android.youtube"] });
+    const request = (method: string, path: string, body?: unknown) =>
+      api.handle({
+        method, path, query: new URLSearchParams(),
+        headers: method === "GET" ? {} : { "x-kiwi": "1", "content-type": "application/json" },
+        body: body === undefined ? "" : JSON.stringify(body),
+        origin: "http://localhost:5173",
+      });
+    const recipe = request("GET", "/api/automation/android-youtube").json as AutomationState;
+    request("POST", "/api/automation/android-youtube/add", recipe.preferences);
+    now += 5 * 2600;
+    const path = "/api/apps/kiwi-youtube/app.morphe.android.youtube";
+    expect((request("GET", path).json as AppDetail).state.foreign_install).toBe(true);
+    const report = (signer: string) => ({
+      packages: [{ package: "app.morphe.android.youtube", version_name: "21.30.216", version_code: 1, signer_sha256: [signer], installer: null }],
+    });
+    expect(request("PUT", "/api/me/packages", report(MOCK_ANDROID_SIGNER)).status).toBe(204);
+    expect((request("GET", path).json as AppDetail).state.foreign_install).toBe(false);
+    request("PUT", "/api/me/packages", report("d".repeat(64)));
+    expect((request("GET", path).json as AppDetail).state.foreign_install).toBe(true);
+  });
+
   it("covers every action in the fixtures", () => {
     const { request } = setup();
     const apps = request("GET", "/api/apps").json as AppSummary[];
@@ -379,5 +487,69 @@ describe("mock api", () => {
     expect(compareVersions("1.10", "1.9")).toBe(1);
     expect(compareVersions("2.0", "2.0.0")).toBe(0);
     expect(compareVersions("1.0", "1.0.1")).toBe(-1);
+  });
+});
+
+describe("mock signing", () => {
+  function signingSetup(signing: "keychain" | "files", device: "ios" | "android" = "ios") {
+    const api = createMockApi(() => Date.parse("2026-10-29T12:00:00Z"), { signing, device });
+    return (method: string, path: string, body?: unknown) =>
+      api.handle({
+        method,
+        path,
+        query: new URLSearchParams(),
+        headers: method === "GET" ? {} : { "x-kiwi": "1", "content-type": "application/json" },
+        body: body === undefined ? "" : JSON.stringify(body),
+        origin: "http://localhost:5173",
+      });
+  }
+
+  it("signs with the keychain on a Mac and refuses identity uploads", () => {
+    const request = signingSetup("keychain");
+    const signing = request("GET", "/api/signing").json as Signing;
+    expect(signing.backend).toBe("keychain");
+    expect(signing.profiles.every((p) => !p.uploaded)).toBe(true);
+    expect(request("POST", "/api/signing/identity", { p12: "AAAA", password: "x" }).status).toBe(409);
+    const uploaded = request("POST", "/api/signing/profiles", { profile: "AAAA" }).json as Signing;
+    expect(uploaded.profiles[0]?.uploaded).toBe(true);
+    expect(request("DELETE", `/api/signing/profiles/${signing.profiles[0]?.uuid}`).status).toBe(404);
+  });
+
+  it("uploads and removes the identity and profiles on Linux", () => {
+    const request = signingSetup("files");
+    expect((request("GET", "/api/signing").json as Signing).backend).toBe("files");
+    const removed = request("DELETE", "/api/signing/identity").json as Signing;
+    expect(removed.identities).toEqual([]);
+    expect(removed.active).toBeNull();
+    expect(removed.error).toMatch(/No signing identity was uploaded/);
+    expect(request("DELETE", "/api/signing/identity").status).toBe(404);
+    expect(request("POST", "/api/signing/identity", { p12: "AAAA", password: "wrong" }).status).toBe(400);
+    expect(request("POST", "/api/signing/identity", { p12: "not base64!", password: "" }).status).toBe(400);
+    const added = request("POST", "/api/signing/identity", { p12: "AAAA", password: "secret" }).json as Signing;
+    expect(added.identities).toHaveLength(1);
+    expect(JSON.stringify(added)).not.toContain("secret");
+    const profiles = (request("GET", "/api/signing").json as Signing).profiles;
+    for (const p of profiles) request("DELETE", `/api/signing/profiles/${p.uuid}`);
+    const empty = request("GET", "/api/signing").json as Signing;
+    expect(empty.profiles).toEqual([]);
+    expect(empty.error).toMatch(/wildcard provisioning profile/);
+    const uploaded = request("POST", "/api/signing/profiles", { profile: "AAAA" }).json as Signing;
+    expect(uploaded.profiles[0]?.uploaded).toBe(true);
+    expect(uploaded.active?.profile_uuid).toBe(uploaded.profiles[0]?.uuid);
+    expect(uploaded.error).toBeNull();
+  });
+
+  it("warns about signing problems like the server, except on Android", () => {
+    const signingWarnings = (request: ReturnType<typeof signingSetup>) =>
+      (request("GET", "/api/me").json as Me).warnings.filter((w) => w.link === "/settings").map((w) => [w.level, w.code]);
+    const request = signingSetup("files");
+    expect(signingWarnings(request)).toEqual([]);
+    for (const p of (request("GET", "/api/signing").json as Signing).profiles) request("DELETE", `/api/signing/profiles/${p.uuid}`);
+    expect(signingWarnings(request)).toEqual([["error", "no_profile"]]);
+    request("DELETE", "/api/signing/identity");
+    expect(signingWarnings(request)).toEqual([["error", "no_identity"]]);
+    const android = signingSetup("files", "android");
+    android("DELETE", "/api/signing/identity");
+    expect(signingWarnings(android)).toEqual([]);
   });
 });

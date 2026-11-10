@@ -149,12 +149,15 @@ fn build_view(
         let name = !recipe.names.is_empty() && p.name.is_some() && p.name != state.preferences.name;
         tweaks || name
     });
-    let next_check_at = (state.added && state.preferences.enabled && !jobs.iter().any(Job::active))
-        .then(|| {
-            state.last_checked_at.map_or_else(Utc::now, |last| {
-                last + Duration::minutes(i64::from(state.preferences.interval_minutes))
-            })
-        });
+    let next_check_at = (state.added
+        && state.preferences.enabled
+        && !jobs.iter().any(Job::active)
+        && kiwi.automation.can_build(recipe))
+    .then(|| {
+        state.last_checked_at.map_or_else(Utc::now, |last| {
+            last + Duration::minutes(i64::from(state.preferences.interval_minutes))
+        })
+    });
     AppView {
         id: recipe.id.clone(),
         platform: recipe.platform,
@@ -185,14 +188,16 @@ fn build_view(
 pub fn app_view(kiwi: &Kiwi, id: &str) -> ApiResult<AppView> {
     let recipe = recipe(id)?;
     let mut state = kiwi.automation.snapshot();
+    let checks = kiwi.automation.checks(&state);
     let app = state.apps.remove(id).unwrap_or_default();
     let jobs = state.jobs.into_iter().filter(|j| j.app == id).collect();
-    Ok(build_view(kiwi, recipe, app, jobs, state.checks))
+    Ok(build_view(kiwi, recipe, app, jobs, checks))
 }
 
 /// Every app Kiwi can build, with its latest jobs, and the shared Mac setup checks.
 pub fn overview(kiwi: &Kiwi) -> Overview {
     let mut state = kiwi.automation.snapshot();
+    let checks = kiwi.automation.checks(&state);
     let apps = recipes()
         .iter()
         .map(|recipe| {
@@ -207,8 +212,5 @@ pub fn overview(kiwi: &Kiwi) -> Overview {
             build_view(kiwi, recipe, app, jobs, Vec::new())
         })
         .collect();
-    Overview {
-        apps,
-        checks: state.checks,
-    }
+    Overview { apps, checks }
 }

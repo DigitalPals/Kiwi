@@ -26,6 +26,13 @@
         }
       }
     },
+    "apksigner": {
+      "name": "Android SDK Build-Tools 36.0.0",
+      "url": "https://dl.google.com/android/repository/build-tools_r36_linux.zip",
+      "sha256": "5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b",
+      "size": 63737259,
+      "member": "android-16/lib/apksigner.jar"
+    },
     "patcher": {
       "name": "Morphe 2.1.1",
       "url": "https://github.com/MorpheApp/morphe-desktop/releases/download/v2.1.1/morphe-desktop-2.1.1-all.jar",

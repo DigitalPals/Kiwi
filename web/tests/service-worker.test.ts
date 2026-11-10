@@ -82,7 +82,7 @@ describe("service worker response caching", () => {
     expect(sw.cache.put).not.toHaveBeenCalled();
   });
 
-  it.each(["/api/apps", "/ota/token/manifest.plist", "/sw.js"])("bypasses %s", (path) => {
+  it.each(["/api/apps", "/ota/token/manifest.plist", "/android/kiwi.apk", "/sw.js"])("bypasses %s", (path) => {
     const sw = worker();
     expect(sw.request(path).response).toBeUndefined();
     expect(sw.fetch).not.toHaveBeenCalled();

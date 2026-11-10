@@ -14,6 +14,11 @@ The original comes from the first source that can supply it:
 
 A source is only a transport. Whatever it returns is accepted solely because
 its APK signature verifies against the publisher certificate in the recipe.
+
+The `kiwi-app` command prepares Kiwi's own Android app for the phones: it takes
+the unsigned APK the project released (pinned in kiwi-app.json) or one the owner
+placed in `android-app/unsigned/`, signs it with the same key and writes it to
+`android-app/` for Kiwi's server to offer.
 """
 import argparse
 import base64
@@ -39,16 +44,74 @@ import apk
 from runner import BuildError, Builder, canonical, digest, emit, recipe_key
 
 RECIPES_PATH = Path(__file__).with_name("android.json")
+KIWI_APP_PATH = Path(__file__).with_name("kiwi-app.json")
+KIWI_APP_PACKAGE = "io.github.digitalpals.kiwi"
+# A release asset of the project (or a fork) on GitHub, named after its version.
+RELEASE_URL = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/"
+                         r"android-v(?P<tag>[^/]+)/kiwi-android-(?P<file>[^/]+)-unsigned\.apk")
+MAX_KIWI_APP = 256 * 1024**2
 PLAY = "https://android.clients.google.com/fdfe/"
 PURE = "https://api.pureapk.com/m/v3/cms/app_version?hl=en-US&package_name="
 MAX_APK = 1024**3
 BUNDLES = (".apks", ".xapk", ".apkm")
 ALIAS = "kiwi"
 SESSION_SECONDS = 1800
+# hashlib.file_digest (3.11) and tarfile's extraction filters (3.12).
+MIN_PYTHON = (3, 12)
 
 
 class SourceError(Exception):
     """One source could not supply a trustworthy original; the next is tried."""
+
+
+def require_python(version=sys.version_info):
+    """Stops plainly on a Python too old for the builder, before anything needs it."""
+    if tuple(version[:2]) < MIN_PYTHON:
+        found = ".".join(str(part) for part in version[:3])
+        raise BuildError(f"Kiwi Builds for Android needs Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer, "
+                         f"but Kiwi runs it with Python {found}. Install a newer Python and start Kiwi with "
+                         "--python (KIWI_PYTHON) naming it.", True)
+
+
+def version_code(name):
+    """The Android version code of a Kiwi app release `MAJOR.MINOR.PATCH`.
+
+    MAJOR * 1000000 + MINOR * 1000 + PATCH, so every later release has a higher code.
+    The release workflow (.github/workflows/android-release.yml) uses the same rule.
+    """
+    match = re.fullmatch(r"(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})", name or "")
+    if not match:
+        raise ValueError(f"{name!r} is not a version like 1.2.3")
+    major, minor, patch = (int(part) for part in match.groups())
+    code = major * 1_000_000 + minor * 1_000 + patch
+    if not 0 < code <= 2_100_000_000:
+        raise ValueError(f"version {name} is out of range")
+    return code
+
+
+def check_pin(pin):
+    """The pinned release in kiwi-app.json, or None before the first one. Raises ValueError
+    when the file does not have the expected shape."""
+    if not isinstance(pin, dict) or set(pin) != {"schema", "package", "release"}:
+        raise ValueError("kiwi-app.json must hold exactly schema, package and release")
+    if pin["schema"] != 1 or pin["package"] != KIWI_APP_PACKAGE:
+        raise ValueError(f"kiwi-app.json must be schema 1 for {KIWI_APP_PACKAGE}")
+    release = pin["release"]
+    if release is None:
+        return None
+    if not isinstance(release, dict) or set(release) != {"version_name", "version_code", "url", "sha256", "size"}:
+        raise ValueError("the pinned release must hold exactly version_name, version_code, url, sha256 and size")
+    name = release["version_name"]
+    if not isinstance(name, str) or type(release["version_code"]) is not int or release["version_code"] != version_code(name):
+        raise ValueError("the pinned version_code must follow from version_name (MAJOR*1000000 + MINOR*1000 + PATCH)")
+    match = RELEASE_URL.fullmatch(release["url"]) if isinstance(release["url"], str) else None
+    if not match or match["tag"] != name or match["file"] != name:
+        raise ValueError(f"the pinned url must be the release asset kiwi-android-{name}-unsigned.apk of tag android-v{name}")
+    if not isinstance(release["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", release["sha256"]):
+        raise ValueError("the pinned sha256 must be 64 lowercase hex digits")
+    if type(release["size"]) is not int or not 0 < release["size"] <= MAX_KIWI_APP:
+        raise ValueError("the pinned size must be the APK's size in bytes")
+    return release
 
 
 def records(data):
@@ -153,6 +216,22 @@ def download(url, target, *, limit=MAX_APK, headers=None, sha256=None):
         target.unlink(missing_ok=True)
         raise SourceError("a download did not match its pinned checksum")
     return hasher.hexdigest()
+
+
+def argument_file(path, arguments):
+    """Writes arguments to an @-file that only this user can read and returns "@<path>". The
+    patcher (picocli) reads its arguments from such a file, so secrets stay off its command
+    line, which every local user can read in /proc. Quoted as picocli parses @-files
+    (java.io.StreamTokenizer): in double quotes, with backslashes and quotes escaped."""
+    def quoted(value):
+        value = str(value)
+        if "\n" in value or "\r" in value:
+            raise BuildError("An argument for the patcher contains a line break")
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        out.write(" ".join(quoted(a) for a in arguments) + "\n")
+    return f"@{path}"
 
 
 def unpack_bundle(path, target):
@@ -305,6 +384,11 @@ class Android:
         return recipe_key({"android": digest(Path(__file__)), "apk": digest(Path(apk.__file__)),
                            "device": recipe_key(self.recipes["device"])})
 
+    def build_toolchain(self):
+        """The pinned tools a patched app depends on. apksigner only signs Kiwi's own app,
+        so a new version of it does not rebuild the patched apps."""
+        return {name: spec for name, spec in self.toolchain.items() if name != "apksigner"}
+
     # --- pinned tools ------------------------------------------------------
 
     def java_archive(self):
@@ -358,6 +442,37 @@ class Android:
             partial.replace(target)
         return target
 
+    def apksigner(self):
+        """apksigner.jar from the pinned Android build-tools. Only the jar is kept: it runs on
+        the pinned Java runtime, on every platform."""
+        spec = self.toolchain["apksigner"]
+        home = self.tools / "apksigner" / spec["sha256"][:16]
+        jar = home / "apksigner.jar"
+        if not home.with_name(home.name + ".complete").is_file() or not jar.is_file():
+            emit("stage", stage=f"Fetching {spec['name']}")
+            partial = home.with_name(home.name + ".partial")
+            for stale in (home, partial):
+                if stale.exists():
+                    shutil.rmtree(stale)
+            partial.mkdir(mode=0o700, parents=True)
+            archive = partial / "build-tools.zip"
+            self.pinned(spec, archive)
+            try:
+                with zipfile.ZipFile(archive) as bundle:
+                    entry = bundle.getinfo(spec["member"])
+                    if entry.file_size > 64 * 1024**2:
+                        raise BuildError("The pinned apksigner is unexpectedly large.")
+                    # Only this one member is written, to a name Kiwi chooses.
+                    with bundle.open(entry) as source, open(partial / "apksigner.jar", "wb") as sink:
+                        shutil.copyfileobj(source, sink, 1024 * 1024)
+            except (KeyError, zipfile.BadZipFile, OSError) as error:
+                raise BuildError("The pinned Android build-tools could not be unpacked.") from error
+            finally:
+                archive.unlink(missing_ok=True)
+            partial.rename(home)
+            home.with_name(home.name + ".complete").write_text(spec["sha256"])
+        return jar
+
     # --- signing key -------------------------------------------------------
 
     def keystore(self, java):
@@ -392,7 +507,12 @@ class Android:
         body = re.search(r"-----BEGIN CERTIFICATE-----(.+?)-----END CERTIFICATE-----", pem, re.S)
         if not body:
             raise BuildError("Kiwi's Android signing key could not be read.")
-        return store, password, hashlib.sha256(base64.b64decode(body.group(1))).hexdigest()
+        signer = hashlib.sha256(base64.b64decode(body.group(1))).hexdigest()
+        # Not a secret: Kiwi's server reads it to tell its own builds on a phone from others.
+        partial = self.private / "signer.partial"
+        partial.write_bytes(canonical({"sha256": signer}))
+        partial.replace(self.private / "signer.json")
+        return store, password, signer
 
     # --- the original app --------------------------------------------------
 
@@ -497,7 +617,7 @@ class Android:
     def plan(self, app, options):
         self.java_archive()
         plan = {"app": app["id"], "platform": "android", "external_id": str(app["version_code"]),
-                "version": app["app_version"], "recipe": {"toolchain": self.toolchain, "app": app},
+                "version": app["app_version"], "recipe": {"toolchain": self.build_toolchain(), "app": app},
                 "tweaks": self.options(app, options), "name": None, "runner_sha256": self.sources_digest()}
         plan["key"] = recipe_key(plan)
         emit("plan", plan=plan)
@@ -505,7 +625,7 @@ class Android:
     def build(self, app, plan, sequence, job_dir):
         expected_key = plan["key"]
         if (expected_key != recipe_key({k: v for k, v in plan.items() if k != "key"}) or plan.get("app") != app["id"]
-                or plan["recipe"] != {"toolchain": self.toolchain, "app": app} or plan["runner_sha256"] != self.sources_digest()):
+                or plan["recipe"] != {"toolchain": self.build_toolchain(), "app": app} or plan["runner_sha256"] != self.sources_digest()):
             raise BuildError("The build plan changed; check for updates again")
         if not isinstance(sequence, int) or not 0 < sequence < 2**53:
             raise BuildError("Invalid Kiwi build revision")
@@ -533,15 +653,21 @@ class Android:
             for name in package.get("patches", []) if package.get("optional") else []:
                 selection += ["--enable" if package["id"] in tweaks else "--disable", name]
         candidate, result = job_dir / "candidate.apk", job_dir / "result.json"
-        self.builder.command(
-            [java, "-jar", patcher, "patch", "--patches", patches, "--out", candidate,
-             "--temporary-files-path", job_dir / "work", "--result-file", result,
-             "--keystore", store, "--keystore-password", password, "--keystore-entry-alias", ALIAS,
-             "--keystore-entry-password", password, "--signer", "Kiwi", "--striplibs", self.toolchain["abi"],
-             *selection, original], cwd=job_dir, timeout=3600,
-            # The patcher records every app it patches; keep that inside the job.
-            env=dict(self.builder.env, MORPHE_DATA_DIR=str(job_dir / "patcher"), HOME=str(job_dir / "home")),
-            message=f"Patching failed. {app['name']} {plan['version']} may need an updated patch recipe.")
+        # The keystore password reaches the patcher in a private @-file, never its arguments.
+        passwords = job_dir / "keystore.args"
+        try:
+            self.builder.command(
+                [java, "-jar", patcher, "patch", "--patches", patches, "--out", candidate,
+                 "--temporary-files-path", job_dir / "work", "--result-file", result,
+                 "--keystore", store, "--keystore-entry-alias", ALIAS,
+                 argument_file(passwords, ["--keystore-password", password, "--keystore-entry-password", password]),
+                 "--signer", "Kiwi", "--striplibs", self.toolchain["abi"], *selection, original],
+                cwd=job_dir, timeout=3600,
+                # The patcher records every app it patches; keep that inside the job.
+                env=dict(self.builder.env, MORPHE_DATA_DIR=str(job_dir / "patcher"), HOME=str(job_dir / "home")),
+                message=f"Patching failed. {app['name']} {plan['version']} may need an updated patch recipe.")
+        finally:
+            passwords.unlink(missing_ok=True)
         try:
             outcome = json.loads(result.read_text())
         except (OSError, ValueError) as error:
@@ -577,14 +703,160 @@ class Android:
                    f"{len(outcome['appliedPatches'])} patches from {self.toolchain['patches']['name']}; signed with this Kiwi’s own key.\n"
                    f"Recipe {expected_key[:12]}. Not yet tested on a physical device.")
 
+    # --- Kiwi's own Android app ---------------------------------------------
+
+    def kiwi_app_input(self, job_dir):
+        """(file, manifest, source) of the unsigned app to sign: the newest one the owner
+        placed in android-app/unsigned/, unless the pinned release is newer (so a test build
+        left there never holds back a release), else the pinned release, downloaded and checked."""
+        folder = self.builder.root.parent / "android-app" / "unsigned"
+        found, problems = [], []
+        if folder.is_dir():
+            for path in sorted(folder.iterdir()):
+                if path.suffix.lower() != ".apk" or not path.is_file():
+                    continue
+                try:
+                    facts = apk.unsigned(path)
+                except (apk.ApkError, OSError) as error:
+                    problems.append(f"{path.name}: {error}")
+                    continue
+                if facts["package"] != KIWI_APP_PACKAGE:
+                    problems.append(f"{path.name}: it is not Kiwi's app but {facts['package']}")
+                    continue
+                found.append((facts["version_code"], path.stat().st_mtime, path, facts))
+        for problem in problems:
+            self.builder.log.write(f"kiwi: android-app/unsigned/{problem}\n".encode())
+        local = max(found, key=lambda item: item[:2]) if found else None
+        try:
+            release, pin_error = check_pin(json.loads(KIWI_APP_PATH.read_text())), None
+        except (OSError, ValueError) as error:
+            release, pin_error = None, error
+        if local and (release is None or local[0] >= release["version_code"]):
+            _, _, path, facts = local
+            return path, facts, "local"
+        if problems and not local:
+            raise BuildError("No APK in android-app/unsigned can be used (" + "; ".join(problems) + "). Place the "
+                             "unsigned release APK of Kiwi's app there, or remove the files to use the released app.", True)
+        if pin_error is not None:
+            raise BuildError(f"Kiwi's Android app pin is not valid: {pin_error}.") from pin_error
+        if release is None:
+            raise BuildError("No release of Kiwi's Android app is pinned yet. To use one you built, place its "
+                             "unsigned APK in android-app/unsigned.", True)
+        emit("stage", stage=f"Downloading Kiwi for Android {release['version_name']}")
+        path = job_dir / "unsigned.apk"
+        try:
+            download(release["url"], path, limit=release["size"], sha256=release["sha256"])
+        except SourceError as error:
+            raise BuildError(f"Kiwi could not fetch its Android app {release['version_name']}: {error}.") from error
+        try:
+            if path.stat().st_size != release["size"]:
+                raise apk.ApkError("it does not have the pinned size")
+            facts = apk.unsigned(path)
+        except (apk.ApkError, OSError) as error:
+            raise BuildError(f"The released Kiwi Android app {release['version_name']} is not usable: {error}.") from error
+        if (facts["package"], facts["version_code"], facts["version"]) != (
+                KIWI_APP_PACKAGE, release["version_code"], release["version_name"]):
+            raise BuildError("The released Kiwi Android app is not the pinned version.")
+        return path, facts, "release"
+
+    def kiwi_app(self, request, job_dir):
+        """Signs Kiwi's Android app with this Kiwi's key and writes it where the server offers it.
+
+        Kiwi's own builds and Kiwi's app share the key, so the app can update the builds
+        silently and is updated itself like them.
+        """
+        emit("stage", stage="Looking for Kiwi's Android app")
+        source_path, facts, source = self.kiwi_app_input(job_dir)
+        if not facts["version"] or len(facts["version"]) > 64 or not facts["version"].isprintable():
+            raise BuildError("Kiwi's Android app has no usable versionName.")
+        unsigned_sha = digest(source_path)
+        java = self.java()
+        signer_jar = self.apksigner()
+        store, password, signer = self.keystore(java)
+        emit("stage", stage=f"Signing Kiwi for Android {facts['version']}")
+        signed = job_dir / "kiwi.apk"
+        # The password reaches apksigner through its environment, never its arguments.
+        self.builder.command(
+            [java, "-jar", signer_jar, "sign", "--ks", store, "--ks-type", "PKCS12", "--ks-key-alias", ALIAS,
+             "--ks-pass", "env:KIWI_KEYSTORE", "--key-pass", "env:KIWI_KEYSTORE",
+             "--v1-signing-enabled", "false", "--v2-signing-enabled", "true", "--v3-signing-enabled", "true",
+             "--v4-signing-enabled", "false", "--out", signed, source_path],
+            env=dict(self.builder.env, KIWI_KEYSTORE=password), timeout=600,
+            message="apksigner could not sign Kiwi's Android app; details are in the private log.")
+        emit("stage", stage="Verifying the signed app")
+        self.builder.command([java, "-jar", signer_jar, "verify", "--verbose", signed], timeout=600,
+                             message="apksigner does not accept the signed Kiwi app; details are in the private log.")
+        try:
+            result = apk.inspect(signed)
+            unaligned = apk.misaligned(signed)
+        except (apk.ApkError, OSError) as error:
+            raise BuildError(f"The signed Kiwi app is not a valid package: {error}.") from error
+        self.builder.log.write(f"kiwi: signed Kiwi app: {json.dumps(result)}\n".encode())
+        if result["certificates"] != [signer]:
+            raise BuildError("The signed Kiwi app is not signed with Kiwi's key.")
+        if not {2, 3} <= set(result["schemes"]):
+            raise BuildError("The signed Kiwi app lacks an APK signature v2 or v3.")
+        if (result["package"], result["version_code"], result["version"]) != (
+                KIWI_APP_PACKAGE, facts["version_code"], facts["version"]):
+            raise BuildError("Signing changed Kiwi's Android app unexpectedly.")
+        if unaligned:
+            raise BuildError("The signed Kiwi app is not aligned (" + ", ".join(unaligned[:3]) + "). Use the APK "
+                             "Gradle's assembleRelease makes, or align it with `zipalign -p 4` before placing it.")
+        key = request.get("input")
+        description = {
+            "package": result["package"], "version_name": result["version"], "version_code": result["version_code"],
+            "sha256": digest(signed), "size": signed.stat().st_size, "signer": signer, "source": source,
+            "unsigned_sha256": unsigned_sha, "input": key if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{64}", key) else None,
+            "signed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        self.publish_kiwi_app(signed, description)
+        emit("kiwi_app", **{name: description[name] for name in
+                            ("package", "version_name", "version_code", "sha256", "size", "source")})
+        return description
+
+    def publish_kiwi_app(self, signed, description):
+        """Writes android-app/kiwi.apk and kiwi.json, each replaced in one step."""
+        target = self.builder.root.parent / "android-app"
+        target.mkdir(mode=0o700, exist_ok=True)
+        apk_partial, meta_partial = target / "kiwi.apk.partial", target / "kiwi.json.partial"
+        # A copy, not a rename: the job directory may be on another file system.
+        shutil.copyfile(signed, apk_partial)
+        meta_partial.write_text(json.dumps(description, indent=2, sort_keys=True) + "\n")
+        for path in (apk_partial, meta_partial):
+            with open(path, "rb") as handle:
+                os.fsync(handle.fileno())
+        # Kiwi offers the app only while kiwi.json describes kiwi.apk: removing the old
+        # description first means it never sees the new file with the old description.
+        (target / "kiwi.json").unlink(missing_ok=True)
+        os.replace(apk_partial, target / "kiwi.apk")
+        os.replace(meta_partial, target / "kiwi.json")
+
+
+def run_kiwi_app(builder, android, request):
+    """The `kiwi-app` command, with its private log and a work folder removed afterwards."""
+    work = builder.tools / "jobs" / "kiwi-app"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(mode=0o700, parents=True)
+    log_path = builder.root / "kiwi-app.log"
+    if log_path.is_file() and log_path.stat().st_size > 1024**2:
+        log_path.replace(log_path.with_name("kiwi-app.log.1"))
+    try:
+        # Unbuffered: the tools Kiwi runs write to the same file.
+        with open(log_path, "ab", buffering=0) as log:
+            builder.log = log
+            log.write(f"kiwi: kiwi-app at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n".encode())
+            return android.kiwi_app(request, work)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["plan", "build"])
+    parser.add_argument("command", choices=["plan", "build", "kiwi-app"])
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--request")
     parser.add_argument("--job-id")
-    parser.add_argument("--recipe", required=True)
+    parser.add_argument("--recipe", help="plan/build: the app recipe id")
     parser.add_argument("--supervisor-pid", type=int)
     args = parser.parse_args()
     os.umask(0o077)
@@ -604,7 +876,10 @@ def main():
     builder = Builder(args.data_dir)
     android = Android(builder)
     request = json.loads(Path(args.request).read_text()) if args.request else {}
-    app = android.app(args.recipe)
+    if args.command == "kiwi-app":
+        run_kiwi_app(builder, android, request if isinstance(request, dict) else {})
+        return
+    app = android.app(args.recipe or "")
     if args.command == "plan":
         android.plan(app, request)
         return
@@ -629,6 +904,7 @@ def main():
 
 if __name__ == "__main__":
     try:
+        require_python()
         main()
     except BuildError as error:
         emit("error", message=str(error), blocked=error.blocked)

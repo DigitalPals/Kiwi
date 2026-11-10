@@ -6,6 +6,7 @@ import {
   deriveAppButton,
   deriveReinstallButton,
   deriveVersionButton,
+  foreignInstallWarning,
   isActiveBuild,
   libraryKey,
   needsPrepare,
@@ -69,6 +70,7 @@ const state = (over: Partial<AppState> = {}): AppState => ({
   install_url: null,
   open_url: null,
   replaces: null,
+  foreign_install: false,
   ...over,
 });
 
@@ -263,6 +265,13 @@ describe("helpers", () => {
     expect(replacesLabel(state())).toBeNull();
     expect(replacesLabel(state({ replaces: { name: "YouTubePlus", source_name: "YTLite Repository", version: "21.43.5" } }))).toBe(
       "Replaces YouTubePlus (YTLite Repository)",
+    );
+  });
+
+  it("warns when Android has the package from another publisher", () => {
+    expect(foreignInstallWarning({ name: "YouTube", state: state() })).toBeNull();
+    expect(foreignInstallWarning({ name: "YouTube", state: state({ foreign_install: true }) })).toBe(
+      "Another YouTube is installed with a different signature. Remove it first, then install Kiwi's.",
     );
   });
 

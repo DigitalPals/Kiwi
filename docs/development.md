@@ -6,7 +6,7 @@ Python build runner for Kiwi Builds in `automation/`. How the parts fit together
 [api.md](api.md).
 
 Everything builds and its platform-neutral tests run on Linux as well as macOS. Signing,
-devicectl and Kiwi Builds need a Mac.
+devicectl and Kiwi Builds' iOS apps need a Mac.
 
 ## Requirements
 
@@ -35,7 +35,12 @@ cd ..
 python3 -m pytest automation/test_runner.py automation/test_android.py
 
 # Scripts
-shellcheck install.sh uninstall.sh deploy/deploy.sh
+shellcheck install.sh uninstall.sh deploy/deploy.sh android/scripts/build-in-docker.sh
+
+# Android app (JDK 17+ and an Android SDK; without them, android/scripts/build-in-docker.sh)
+cd android
+./gradlew test assembleRelease
+cd ..
 ```
 
 The same checks run in CI (`.github/workflows/ci.yml`). Keep them passing.
@@ -52,6 +57,16 @@ KIWI_LIVE_IPHONE=<the iPhone's Tailscale IP> cargo test -p kiwi-device --test li
 KIWI_SIGN_IPA=~/app.ipa KIWI_SIGN_OUT=~/out KIWI_SIGN_IDENTITY=<sha1> \
 KIWI_SIGN_BUNDLE_ID=com.example.app.<TEAMID> \
   cargo test -p kiwi-signer --test real_sign -- --ignored --nocapture
+```
+
+One more needs internet access (it downloads the pinned Java runtime and Android build-tools)
+and an unsigned release APK of Kiwi's Android app; it runs anywhere. It signs the APK with
+the real Android runner through the server's own job and checks what Kiwi then serves:
+
+```sh
+android/scripts/build-in-docker.sh assembleRelease
+KIWI_TEST_UNSIGNED_APK=$PWD/android/app/build/outputs/apk/release/app-release-unsigned.apk \
+  cargo test -p kiwi-server --test automation -- --ignored --nocapture real_kiwi_app
 ```
 
 `live_mac` only compiles on macOS. Everything else uses fixtures (recorded `devicectl` and
@@ -94,7 +109,20 @@ and update. For a new version to build, release one in the demo's App Store with
 
 The demo answers as an iPhone. Add `KIWI_MOCK_DEVICE=android` and it answers as an Android
 phone: Browse lists Android apps only, and a simulated Android build installs as an APK
-download.
+download. `KIWI_MOCK_DEVICE=desktop` answers as a desktop browser (no platform detected).
+`KIWI_MOCK_ONBOARDED=0` starts before the first-run setup, `KIWI_MOCK_HOST=linux` answers as
+a Kiwi on Linux (Kiwi Builds' checks are only the missing Mac, and adding or checking an iOS
+app answers `409 needs_mac`), `KIWI_MOCK_ANDROID_APP=0` without Kiwi's Android app,
+`KIWI_MOCK_ANDROID_APP=failed` as a Kiwi that couldn't sign it (Android devices get the
+`android_app` warning), and `KIWI_MOCK_FOREIGN=app.morphe.android.youtube` with that package
+installed under another signature.
+
+The demo imitates a Kiwi on a Mac, which signs with the keychain. Add
+`KIWI_MOCK_SIGNING=files` and it imitates one on Linux (`Signing.backend: "files"`): the
+identity and profiles are uploads, which the `/api/signing/identity` and
+`/api/signing/profiles` endpoints add and remove (any base64 is accepted; the password
+`wrong` is refused). Without an identity or a usable wildcard profile, `/api/me` warns
+about it as the server does (`no_identity`, `no_profile`).
 
 ## Running the server locally
 
@@ -102,12 +130,18 @@ download.
 cd web && npm ci && npm run build && cd ..
 cargo run -p kiwi-server -- \
   --listen 127.0.0.1:18742 --data-dir /tmp/kiwi-dev --web-dir web/dist \
-  --public-url http://localhost:5173
+  --public-url http://localhost:5173 --trust-local
 ```
 
-On Linux, signing reports "only available on macOS" and Tailscale lookups fail, but sources,
+`--trust-local` makes a browser on your computer the owner, as on a Mac; without it, Kiwi
+on Linux answers requests that don't come through Tailscale with `403 not_owner`. On
+Linux, Kiwi signs with an uploaded identity and profile ([signing-on-linux.md](signing-on-linux.md);
+until then signing reports that none was uploaded) and Tailscale lookups fail, but sources,
 the catalogue, settings and the API work. Every flag is also an environment variable
 (`KIWI_LISTEN`, `KIWI_DATA_DIR`, `KIWI_PUBLIC_URL`, ...; see `kiwi --help`).
+
+To try the container image: `docker build -t kiwi .`, and `docker compose config` checks
+`compose.yaml`. CI builds the image on every push without publishing it.
 
 Requests must name the public URL's host or the listen address (see "Security" in
 [architecture.md](architecture.md)), so when the Vite dev server proxies to a real Kiwi, pass
@@ -144,8 +178,9 @@ crates/kiwi-push       VAPID and Web Push
 crates/kiwi-server     the `kiwi` binary: HTTP API, SQLite, jobs, scheduler
 web/                   the PWA (src/), its mock API (mock/) and tests
 automation/            Kiwi Builds runner and pinned recipes
-deploy/                LaunchAgent and log rotation templates, deploy.sh
-install.sh             installer for the Mac; uninstall.sh removes Kiwi
+deploy/                LaunchAgent, log rotation and systemd templates, deploy.sh
+install.sh             installer for a Mac or Linux; uninstall.sh removes Kiwi
+Dockerfile             the container image; compose.yaml runs it with a Tailscale sidecar
 ```
 
 ## Conventions

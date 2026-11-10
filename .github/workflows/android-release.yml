@@ -1,0 +1,138 @@
+name: Android release
+
+# Publishes Kiwi's Android app as an UNSIGNED release APK with its SHA-256. There is no
+# project signing key: each Kiwi downloads the release pinned in automation/kiwi-app.json,
+# checks it and signs it with its own Android key (docs/android-app.md).
+#
+# Start it by pushing a tag android-vMAJOR.MINOR.PATCH, or from the Actions tab with a
+# version (the tag is then created on the commit the workflow runs on). The version code
+# is MAJOR * 1000000 + MINOR * 1000 + PATCH.
+
+on:
+  push:
+    tags: ["android-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version MAJOR.MINOR.PATCH, e.g. 1.0.0 (creates the tag android-v<version>)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Unsigned release APK
+    # GitHub-hosted like ci.yml's Android job: ubuntu-latest comes with an Android SDK.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Version from the tag
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$EVENT" = push ]; then
+            version="${REF_NAME#android-v}"
+          else
+            version="$INPUT_VERSION"
+          fi
+          if ! [[ "$version" =~ ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$ ]]; then
+            echo "::error::The version must be MAJOR.MINOR.PATCH, e.g. 1.0.0, not '$version'."
+            exit 1
+          fi
+          code=$(( BASH_REMATCH[1] * 1000000 + BASH_REMATCH[2] * 1000 + BASH_REMATCH[3] ))
+          if [ "$code" -lt 1 ] || [ "$code" -gt 2100000000 ]; then
+            echo "::error::Version $version gives the version code $code, outside 1..2100000000."
+            exit 1
+          fi
+          tag="android-v$version"
+          # From the Actions tab the tag must be new: an existing tag may name another commit.
+          if [ "$EVENT" != push ] && gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::The tag $tag exists already. Push it instead, or choose another version."
+            exit 1
+          fi
+          {
+            echo "name=$version"
+            echo "code=$code"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+      # The committed gradle-wrapper.jar must be one Gradle published.
+      - uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+      # No build cache: a release is built from the repository alone.
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: "platforms;android-37.0 build-tools;36.0.0"
+      - name: Build
+        env:
+          NAME: ${{ steps.version.outputs.name }}
+          CODE: ${{ steps.version.outputs.code }}
+        run: ./gradlew --no-daemon --console=plain test assembleRelease "-PkiwiVersionName=$NAME" "-PkiwiVersionCode=$CODE"
+      - name: Check the APK
+        env:
+          NAME: ${{ steps.version.outputs.name }}
+          CODE: ${{ steps.version.outputs.code }}
+        # The checks Kiwi's runner makes before it signs a release (automation/apk.py).
+        run: |
+          python3 -I - app/build/outputs/apk/release/app-release-unsigned.apk "$NAME" "$CODE" <<'EOF'
+          import sys
+          sys.path.insert(0, "../automation")
+          import apk
+          path, name, code = sys.argv[1], sys.argv[2], int(sys.argv[3])
+          facts = apk.unsigned(path)
+          found = (facts["package"], facts["version"], facts["version_code"])
+          if found != ("io.github.digitalpals.kiwi", name, code):
+              sys.exit(f"The APK is {found}, expected Kiwi {name} ({code}).")
+          print(f"{path}: unsigned {found}")
+          EOF
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.version.outputs.name }}
+          CODE: ${{ steps.version.outputs.code }}
+          TAG: ${{ steps.version.outputs.tag }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          file="kiwi-android-$NAME-unsigned.apk"
+          cp app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/$file"
+          cd "$RUNNER_TEMP" || exit 1
+          sha256sum "$file" > "$file.sha256"
+          sha=$(cut -d ' ' -f 1 "$file.sha256")
+          size=$(stat -c %s "$file")
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG/$file"
+          pin=$(printf '{\n  "schema": 1,\n  "package": "io.github.digitalpals.kiwi",\n  "release": {\n    "version_name": "%s",\n    "version_code": %s,\n    "url": "%s",\n    "sha256": "%s",\n    "size": %s\n  }\n}\n' "$NAME" "$CODE" "$url" "$sha" "$size")
+          {
+            echo "Kiwi for Android $NAME (version code $CODE), built from $GITHUB_SHA."
+            echo
+            echo "This APK is **unsigned**: Android does not install it as it is. Each Kiwi downloads"
+            echo "the version pinned in \`automation/kiwi-app.json\`, checks its SHA-256 and signs it with"
+            echo "its own key. To offer this release, commit this as \`automation/kiwi-app.json\`:"
+            echo
+            echo '```json'
+            echo "$pin"
+            echo '```'
+          } > notes.md
+          verify=()
+          if [ "$EVENT" = push ]; then verify=(--verify-tag); fi
+          gh release create "$TAG" "$file" "$file.sha256" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            "${verify[@]}" --title "Kiwi for Android $NAME" --notes-file notes.md --latest=false
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"

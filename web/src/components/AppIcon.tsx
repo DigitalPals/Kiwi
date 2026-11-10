@@ -8,6 +8,11 @@ interface Props {
   size?: number;
 }
 
+/** Kiwi's own icon, for its Android app. */
+export function KiwiAppIcon({ size = 60 }: { size?: number }) {
+  return <AppIcon url="/icons/icon.svg" name="Kiwi" tint="#5f9a1e" size={size} />;
+}
+
 /** The icon glows in the app's colour; without artwork, its initial on that colour. */
 export function AppIcon({ url, name, tint, size = 60 }: Props) {
   const [failed, setFailed] = useState(false);

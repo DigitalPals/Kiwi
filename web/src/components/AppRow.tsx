@@ -1,11 +1,12 @@
 import type { ComponentChildren } from "preact";
 import type { AppState, AppSummary } from "../api/types";
-import { replacesLabel, versionChange, type ButtonView } from "../lib/action";
+import { foreignInstallWarning, replacesLabel, versionChange, type ButtonView } from "../lib/action";
 import { expiryInfo } from "../lib/format";
 import { appPath } from "../lib/routes";
 import { signatureLeft, vividTint } from "../lib/tint";
 import { ActionButton } from "./ActionButton";
 import { AppIcon } from "./AppIcon";
+import { Icon } from "./Icon";
 import { VersionChange } from "./ui";
 
 interface Props {
@@ -74,6 +75,18 @@ export function RowDetail({ app }: { app: AppSummary }) {
   if (state.action === "unavailable") return <>{app.unavailable ?? state.target?.incompatibility ?? "Unavailable"}</>;
   if (app.original) return <>Based on {app.original.short_name}</>;
   return <>{app.subtitle ?? app.developer ?? app.category ?? app.bundle_id}</>;
+}
+
+/** Android has the app's package from another publisher (`foreign_install`): it has to go first. */
+export function ForeignInstallNote({ app }: { app: AppSummary }) {
+  const warning = foreignInstallWarning(app);
+  if (!warning) return null;
+  return (
+    <p class="row-warning">
+      <Icon name="warning" size={14} strokeWidth={2.2} />
+      <span>{warning}</span>
+    </p>
+  );
 }
 
 /** What a running or failed action says instead of the second line. */

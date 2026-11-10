@@ -1,8 +1,10 @@
+import base64
 from contextlib import redirect_stdout
 import hashlib
 import io
 import json
 from pathlib import Path
+import shlex
 import stat
 import struct
 import tempfile
@@ -87,10 +89,10 @@ def lp(data):
 
 
 def package(path, key=PUBLISHER, *, name="com.example.app", code=42, version="1.2.3", split=None, abi="arm64-v8a",
-            scheme=2, signing=None, claimed=None):
-    """Writes an APK signed the way `apksigner` does (scheme v2 or v3)."""
+            scheme=2, signing=None, claimed=None, compression=zipfile.ZIP_STORED):
+    """Writes an APK signed the way `apksigner` does (scheme v2, v3 or a tuple of both)."""
     plain = io.BytesIO()
-    with zipfile.ZipFile(plain, "w") as archive:
+    with zipfile.ZipFile(plain, "w", compression) as archive:
         archive.writestr("AndroidManifest.xml", manifest(name, code, version, split))
         if abi:
             archive.writestr(f"lib/{abi}/libapp.so", b"native code")
@@ -102,10 +104,12 @@ def package(path, key=PUBLISHER, *, name="com.example.app", code=42, version="1.
     content = hashlib.sha256(b"\x5a" + struct.pack("<I", len(chunks)) + b"".join(chunks)).digest()
     signed = lp(lp(struct.pack("<I", 0x0201) + lp(content))) + lp(lp(key.certificate)) + lp(b"")
     signature = (signing or key).sign(signed)
-    signer = lp(signed) + (struct.pack("<II", 24, 0x7FFFFFFF) if scheme == 3 else b"")
-    signer += lp(lp(struct.pack("<I", 0x0201) + lp(signature))) + lp((claimed or key).spki)
-    value = lp(lp(signer))
-    pair = struct.pack("<QI", len(value) + 4, {2: 0x7109871A, 3: 0xF05368C0}[scheme]) + value
+    pair = b""
+    for number in (scheme,) if isinstance(scheme, int) else scheme:
+        signer = lp(signed) + (struct.pack("<II", 24, 0x7FFFFFFF) if number == 3 else b"")
+        signer += lp(lp(struct.pack("<I", 0x0201) + lp(signature))) + lp((claimed or key).spki)
+        value = lp(lp(signer))
+        pair += struct.pack("<QI", len(value) + 4, {2: 0x7109871A, 3: 0xF05368C0}[number]) + value
     block = struct.pack("<Q", len(pair) + 24) + pair + struct.pack("<Q", len(pair) + 24) + apk.MAGIC
     path.write_bytes(parts[0] + block + parts[1] + parts[2][:16] + struct.pack("<I", directory + len(block)) + parts[2][20:])
     return path
@@ -178,6 +182,41 @@ class ApkTests(unittest.TestCase):
         with self.assertRaisesRegex(apk.ApkError, "does not match its certificate"):
             apk.inspect(self.path)
         self.assertEqual(apk.inspect(package(self.path, STRANGER))["certificates"], [STRANGER.fingerprint])
+
+    def test_unsigned_packages_are_read_and_signed_ones_refused(self):
+        with zipfile.ZipFile(self.path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("AndroidManifest.xml", manifest("com.example.app", 42, "1.2.3"))
+            archive.writestr("lib/x86_64/libapp.so", b"native code")
+        self.assertEqual(apk.unsigned(self.path), {
+            "package": "com.example.app", "version": "1.2.3", "version_code": 42, "min_sdk": 31,
+            "abis": ["x86_64"], "size": self.path.stat().st_size,
+        })
+        with zipfile.ZipFile(self.path, "a") as archive:
+            archive.writestr("META-INF/CERT.RSA", b"v1 signature")
+        with self.assertRaisesRegex(apk.ApkError, "already signed .JAR signature"):
+            apk.unsigned(self.path)
+        with self.assertRaisesRegex(apk.ApkError, "already signed"):
+            apk.unsigned(package(self.path))
+        self.path.write_bytes(b"not a package at all" * 8)
+        with self.assertRaisesRegex(apk.ApkError, "not an Android package"):
+            apk.unsigned(self.path)
+
+    def test_misaligned_uncompressed_entries_are_found(self):
+        with zipfile.ZipFile(self.path, "w") as archive:
+            for name, size in (("a", 3), ("resources.arsc", 5), ("lib/arm64-v8a/libapp.so", 7)):
+                archive.writestr(zipfile.ZipInfo(name), b"x" * size)
+            archive.writestr("classes.dex", b"compressed entries are never mapped", zipfile.ZIP_DEFLATED)
+        self.assertEqual(apk.misaligned(self.path), ["a", "resources.arsc", "lib/arm64-v8a/libapp.so"])
+        # Padding in the local header's extra field aligns an entry, as zipalign does. Native
+        # libraries need a whole memory page.
+        with zipfile.ZipFile(self.path, "w") as archive:
+            for name, boundary in (("resources.arsc", apk.ALIGNMENT), ("lib/arm64-v8a/libapp.so", apk.PAGE),
+                                   ("lib/x86/libapp.so", apk.ALIGNMENT)):
+                info = zipfile.ZipInfo(name)
+                start = archive.fp.tell() + 30 + len(name)
+                info.extra = bytes(-(start + 4) % boundary + 4)
+                archive.writestr(info, b"data")
+        self.assertEqual(apk.misaligned(self.path), ["lib/x86/libapp.so"])
 
     def test_unsigned_and_foreign_files_are_rejected(self):
         with zipfile.ZipFile(self.path, "w") as archive:
@@ -382,6 +421,284 @@ class AndroidTests(unittest.TestCase):
             self.android.build(app, first, 0, self.job)
         with self.assertRaisesRegex(BuildError, "Unknown app recipe"):
             self.android.app("youtube")
+
+    def test_the_patcher_reads_the_keystore_password_from_a_private_file(self):
+        app = self.android.app("android-youtube")
+        with redirect_stdout(io.StringIO()) as out:
+            self.android.plan(app, {})
+        plan = json.loads(out.getvalue())["plan"]
+        password = 'pass"word\\#1 2'
+        original = self.apk("base.apk")
+        self.android.java = lambda: Path("/jre/bin/java")
+        self.android.tool = lambda name: Path(f"/tools/{name}")
+        self.android.keystore = lambda java: (Path("/keys/keystore.p12"), password, "f" * 64)
+        self.android.original = lambda app, plan, job_dir: ([original], "Google Play")
+        seen = []
+
+        def command(args, **_):
+            args = [str(a) for a in args]
+            # picocli reads "@<file>" as the arguments in that file.
+            secret = Path(next(a for a in args if a.startswith("@"))[1:])
+            seen.append((args, stat.S_IMODE(secret.stat().st_mode), shlex.split(secret.read_text())))
+            raise BuildError("Patching failed")
+
+        self.builder.command = command
+        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(BuildError, "Patching failed"):
+            self.android.build(app, plan, 1, self.job)
+        [(args, mode, secret)] = seen
+        self.assertNotIn("pass", " ".join(args))
+        self.assertEqual(args[args.index("--keystore") + 1], "/keys/keystore.p12")
+        self.assertEqual(mode, 0o600)
+        self.assertEqual(secret, ["--keystore-password", password, "--keystore-entry-password", password])
+        # The file is gone once the patcher has run.
+        self.assertEqual(list(self.job.glob("*.args")), [])
+        with self.assertRaises(BuildError):
+            android.argument_file(self.job / "other.args", ["line\nbreak"])
+
+    def test_loading_the_key_records_its_certificate_for_the_server(self):
+        certificate = PUBLISHER.certificate
+        pem = "-----BEGIN CERTIFICATE-----\n" + base64.encodebytes(certificate).decode() + "-----END CERTIFICATE-----\n"
+        commands = []
+
+        def command(args, **kwargs):
+            commands.append([str(a) for a in args])
+            if "-genkeypair" in args:
+                Path(args[args.index("-keystore") + 1]).write_bytes(b"keystore")
+            return pem if kwargs.get("capture") else None
+
+        self.builder.command = command
+        java = self.root / "java" / "bin" / "java"
+        store, password, signer = self.android.keystore(java)
+        self.assertEqual(signer, PUBLISHER.fingerprint)
+        self.assertEqual([c[1] for c in commands], ["-genkeypair", "-exportcert"])
+        recorded = self.android.private / "signer.json"
+        self.assertEqual(json.loads(recorded.read_text()), {"sha256": PUBLISHER.fingerprint})
+        self.assertNotIn(password, recorded.read_text())
+        self.assertEqual(sorted(p.name for p in self.android.private.iterdir()),
+                         ["keystore.p12", "keystore.pass", "originals", "signer.json"])
+        # Loading the key again records it again; the key itself is kept.
+        recorded.unlink()
+        self.assertEqual(self.android.keystore(java), (store, password, signer))
+        self.assertTrue(recorded.is_file())
+        self.assertEqual(len(commands), 3)
+
+
+KIWI_KEY = Key(0x5EED)
+KIWI_RELEASE = "https://github.com/DigitalPals/Kiwi/releases/download/android-v1.2.0/kiwi-android-1.2.0-unsigned.apk"
+
+
+def unsigned_package(path, *, name=android.KIWI_APP_PACKAGE, code=1_002_000, version="1.2.0"):
+    """An APK as Gradle's assembleRelease leaves it: built, not signed."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("AndroidManifest.xml", manifest(name, code, version))
+        archive.writestr("classes.dex", b"dex" * 100)
+    return path
+
+
+class KiwiAppTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name)
+        self.data = self.root / "data"
+        self.builder = Builder(self.data)
+        self.builder.log = io.BytesIO()
+        self.android = android.Android(self.builder)
+        self.unsigned = self.data / "android-app" / "unsigned"
+        self.unsigned.mkdir(parents=True)
+        self.job = self.root / "job"
+        self.job.mkdir()
+        self.commands = []
+        self.signing_key = KIWI_KEY
+        self.android.java = lambda: Path("/jre/bin/java")
+        self.android.apksigner = lambda: Path("/tools/apksigner.jar")
+        self.android.keystore = lambda java: (Path("/keys/keystore.p12"), "keystore-secret", KIWI_KEY.fingerprint)
+        self.builder.command = self.apksigner
+        self.pin = self.root / "kiwi-app.json"
+        self.pin.write_text(json.dumps({"schema": 1, "package": android.KIWI_APP_PACKAGE, "release": None}))
+        originals = (android.KIWI_APP_PATH, android.download)
+        self.addCleanup(lambda: (setattr(android, "KIWI_APP_PATH", originals[0]), setattr(android, "download", originals[1])))
+        android.KIWI_APP_PATH = self.pin
+        android.download = self.offline
+
+    def offline(self, url, *_args, **_kwargs):
+        raise AssertionError(f"unexpected request to {url}")
+
+    def apksigner(self, argv, env=None, **_):
+        """Stands in for `java -jar apksigner.jar`: signs like it, with `self.signing_key`."""
+        self.commands.append(([str(a) for a in argv], env))
+        if argv[3] == "sign":
+            facts = apk.unsigned(argv[-1])
+            package(Path(argv[argv.index("--out") + 1]), self.signing_key, name=facts["package"],
+                    code=facts["version_code"], version=facts["version"], abi=None, scheme=(2, 3),
+                    compression=zipfile.ZIP_DEFLATED)
+        return ""
+
+    def run_kiwi_app(self, request=None):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            description = self.android.kiwi_app(request or {}, self.job)
+        return description, [json.loads(line) for line in output.getvalue().splitlines()]
+
+    def served(self):
+        folder = self.data / "android-app"
+        meta = json.loads((folder / "kiwi.json").read_text())
+        data = (folder / "kiwi.apk").read_bytes()
+        # What Kiwi's server checks before it offers the app.
+        self.assertEqual((meta["size"], meta["sha256"]), (len(data), hashlib.sha256(data).hexdigest()))
+        return meta
+
+    def test_the_newest_unsigned_apk_in_the_data_folder_is_signed_with_kiwis_key(self):
+        unsigned_package(self.unsigned / "kiwi-1.1.0.apk", code=1_001_000, version="1.1.0")
+        newest = unsigned_package(self.unsigned / "kiwi-1.2.0.apk")
+        (self.unsigned / "notes.txt").write_text("not an app")
+        key = "ab" * 32
+        description, events = self.run_kiwi_app({"input": key})
+        meta = self.served()
+        self.assertEqual(meta, description)
+        self.assertEqual({k: meta[k] for k in ("package", "version_name", "version_code", "signer", "source", "input")}, {
+            "package": android.KIWI_APP_PACKAGE, "version_name": "1.2.0", "version_code": 1_002_000,
+            "signer": KIWI_KEY.fingerprint, "source": "local", "input": key,
+        })
+        self.assertEqual(meta["unsigned_sha256"], android.digest(newest))
+        self.assertEqual(apk.inspect(self.data / "android-app" / "kiwi.apk")["certificates"], [KIWI_KEY.fingerprint])
+        self.assertEqual(events[-1], {"event": "kiwi_app", "package": android.KIWI_APP_PACKAGE, "version_name": "1.2.0",
+                                      "version_code": 1_002_000, "sha256": meta["sha256"], "size": meta["size"],
+                                      "source": "local"})
+        self.assertTrue(all(e["event"] in ("stage", "kiwi_app") for e in events))
+        # apksigner gets the password through its environment, never on its command line.
+        (sign, env), (verify, _) = self.commands
+        self.assertEqual(sign[3], "sign")
+        self.assertEqual(env["KIWI_KEYSTORE"], "keystore-secret")
+        self.assertNotIn("keystore-secret", " ".join(sign + verify))
+        self.assertNotIn(b"keystore-secret", self.builder.log.getvalue())
+        self.assertEqual([sign[sign.index(f"--v{n}-signing-enabled") + 1] for n in (1, 2, 3, 4)],
+                         ["false", "true", "true", "false"])
+        self.assertEqual(sign[-1], str(newest))
+        self.assertEqual(verify[3], "verify")
+        self.assertEqual(sorted(p.name for p in (self.data / "android-app").iterdir()), ["kiwi.apk", "kiwi.json", "unsigned"])
+
+    def test_unusable_files_in_the_data_folder_are_named(self):
+        package(self.unsigned / "signed.apk", name=android.KIWI_APP_PACKAGE)
+        unsigned_package(self.unsigned / "other.apk", name="com.example.app")
+        with self.assertRaisesRegex(BuildError, r"other\.apk: it is not Kiwi's app but com\.example\.app; signed\.apk: "
+                                                r"the package is already signed\)") as caught:
+            self.run_kiwi_app()
+        self.assertTrue(caught.exception.blocked)
+        self.assertFalse((self.data / "android-app" / "kiwi.json").exists())
+        # A usable file wins; the others are only logged.
+        unsigned_package(self.unsigned / "kiwi.apk")
+        self.assertEqual(self.run_kiwi_app()[0]["source"], "local")
+        self.assertIn(b"android-app/unsigned/signed.apk: the package is already signed", self.builder.log.getvalue())
+
+    def test_the_pinned_release_is_downloaded_and_checked(self):
+        with self.assertRaisesRegex(BuildError, "No release of Kiwi's Android app is pinned yet"):
+            self.run_kiwi_app()
+        released = unsigned_package(self.root / "released.apk")
+        release = {"version_name": "1.2.0", "version_code": 1_002_000, "url": KIWI_RELEASE,
+                   "sha256": android.digest(released), "size": released.stat().st_size}
+        self.pin.write_text(json.dumps({"schema": 1, "package": android.KIWI_APP_PACKAGE, "release": release}))
+        fetched = []
+
+        def download(url, target, *, limit, sha256, **_):
+            fetched.append((url, limit, sha256))
+            data = released.read_bytes()
+            if len(data) > limit or hashlib.sha256(data).hexdigest() != sha256:
+                raise android.SourceError("a download did not match its pinned checksum")
+            Path(target).write_bytes(data)
+            return sha256
+
+        android.download = download
+        description, _ = self.run_kiwi_app()
+        self.assertEqual((description["source"], description["version_name"]), ("release", "1.2.0"))
+        self.assertEqual(description["unsigned_sha256"], release["sha256"])
+        self.assertEqual(fetched, [(KIWI_RELEASE, release["size"], release["sha256"])])
+        # A file that is not the pinned one is refused.
+        self.pin.write_text(json.dumps({"schema": 1, "package": android.KIWI_APP_PACKAGE,
+                                        "release": {**release, "sha256": "0" * 64}}))
+        with self.assertRaisesRegex(BuildError, "could not fetch its Android app 1.2.0: a download did not match"):
+            self.run_kiwi_app()
+        # So is a release whose manifest is another version than the pin says.
+        unsigned_package(released, code=1_002_001, version="1.2.1")
+        self.pin.write_text(json.dumps({"schema": 1, "package": android.KIWI_APP_PACKAGE, "release": {
+            **release, "sha256": android.digest(released), "size": released.stat().st_size}}))
+        with self.assertRaisesRegex(BuildError, "not the pinned version"):
+            self.run_kiwi_app()
+
+    def test_a_newer_release_wins_over_an_older_local_apk(self):
+        unsigned_package(self.unsigned / "kiwi-1.1.0.apk", code=1_001_000, version="1.1.0")
+        released = unsigned_package(self.root / "released.apk")
+        release = {"version_name": "1.2.0", "version_code": 1_002_000, "url": KIWI_RELEASE,
+                   "sha256": android.digest(released), "size": released.stat().st_size}
+        self.pin.write_text(json.dumps({"schema": 1, "package": android.KIWI_APP_PACKAGE, "release": release}))
+
+        def download(url, target, **_):
+            Path(target).write_bytes(released.read_bytes())
+
+        android.download = download
+        # A test build left in the folder does not hold back a newer release ...
+        self.assertEqual(self.run_kiwi_app()[0]["source"], "release")
+        # ... but one at least as new as the release is still preferred.
+        unsigned_package(self.unsigned / "kiwi-1.2.0.apk")
+        self.assertEqual(self.run_kiwi_app()[0]["source"], "local")
+
+    def test_an_app_signed_with_another_key_is_not_served(self):
+        unsigned_package(self.unsigned / "kiwi.apk")
+        self.signing_key = STRANGER
+        with self.assertRaisesRegex(BuildError, "not signed with Kiwi's key"):
+            self.run_kiwi_app()
+        self.assertFalse((self.data / "android-app" / "kiwi.apk").exists())
+
+    def test_the_committed_pin_is_valid(self):
+        # setUp points KIWI_APP_PATH elsewhere; this is the file in the repository.
+        release = android.check_pin(json.loads(Path(android.__file__).with_name("kiwi-app.json").read_text()))
+        self.assertTrue(release is None or release["url"].startswith("https://github.com/"))
+
+    def test_pins_must_have_the_expected_shape(self):
+        good = {"schema": 1, "package": android.KIWI_APP_PACKAGE, "release": {
+            "version_name": "1.2.0", "version_code": 1_002_000, "url": KIWI_RELEASE, "sha256": "ab" * 32, "size": 2_000_000}}
+        self.assertEqual(android.check_pin(good), good["release"])
+        self.assertIsNone(android.check_pin({**good, "release": None}))
+        # A fork releases from its own repository.
+        fork = KIWI_RELEASE.replace("DigitalPals/Kiwi", "someone/kiwi-fork")
+        self.assertEqual(android.check_pin({**good, "release": {**good["release"], "url": fork}})["url"], fork)
+        for change, reason in (
+            ({"schema": 2}, "schema 1"),
+            ({"package": "com.example.app"}, "schema 1"),
+            ({"extra": True}, "exactly schema"),
+            ({"release": {**good["release"], "notes": ""}}, "exactly version_name"),
+            ({"release": {**good["release"], "version_code": 1_002_001}}, "follow from version_name"),
+            ({"release": {**good["release"], "version_code": "1002000"}}, "follow from version_name"),
+            ({"release": {**good["release"], "version_name": "1.2"}}, "not a version"),
+            ({"release": {**good["release"], "url": KIWI_RELEASE.replace("https", "http")}}, "release asset"),
+            ({"release": {**good["release"], "url": KIWI_RELEASE.replace("v1.2.0", "v1.3.0")}}, "release asset"),
+            ({"release": {**good["release"], "url": "https://example.com/kiwi.apk"}}, "release asset"),
+            ({"release": {**good["release"], "sha256": "AB" * 32}}, "lowercase hex"),
+            ({"release": {**good["release"], "size": 0}}, "size in bytes"),
+            ({"release": {**good["release"], "size": True}}, "size in bytes"),
+        ):
+            with self.assertRaisesRegex(ValueError, reason):
+                android.check_pin({**good, **change})
+
+    def test_version_codes_follow_the_version(self):
+        self.assertEqual([android.version_code(v) for v in ("0.1.0", "1.0.0", "1.2.3", "2099.999.999")],
+                         [1_000, 1_000_000, 1_002_003, 2_099_999_999])
+        for bad in ("1.2", "1.2.3.4", "01.2.3", "1.1000.0", "v1.2.3", "1.2.3-beta", "0.0.0", ""):
+            with self.assertRaises(ValueError):
+                android.version_code(bad)
+
+    def test_apksigner_does_not_change_the_build_plans(self):
+        self.assertNotIn("apksigner", self.android.build_toolchain())
+        self.assertEqual(self.android.toolchain["apksigner"]["member"].rsplit("/", 1)[-1], "apksigner.jar")
+
+
+class PythonTests(unittest.TestCase):
+    def test_an_old_python_is_refused_plainly(self):
+        android.require_python((3, 12, 0, "final", 0))
+        android.require_python((3, 13, 5))
+        with self.assertRaisesRegex(BuildError, r"needs Python 3\.12 or newer, but Kiwi runs it with Python 3\.11\.2\.") as caught:
+            android.require_python((3, 11, 2, "final", 0))
+        self.assertTrue(caught.exception.blocked)
 
 
 class TransportTests(unittest.TestCase):

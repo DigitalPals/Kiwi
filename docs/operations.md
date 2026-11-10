@@ -1,8 +1,11 @@
 # Operations
 
-Where Kiwi lives on the Mac, how to configure it, and how to look after it.
+Where Kiwi lives on a Mac, on Linux and in Docker, how to configure it, and how to look
+after it.
 
 ## What runs where
+
+### On a Mac
 
 | What | Where |
 |---|---|
@@ -21,6 +24,32 @@ Signing uses the Apple Development identity in your login keychain and the profi
 `~/Library/Developer/Xcode/UserData/Provisioning Profiles/` and
 `~/Library/MobileDevice/Provisioning Profiles/`; Kiwi only reads them.
 
+### On Linux
+
+| What | Where |
+|---|---|
+| Service | The system service `kiwi.service` (`/etc/systemd/system/kiwi.service`, rendered from `deploy/kiwi.service.in`), running as the user `kiwi`. Starts at boot; restarted after a crash. Sandboxed: it can write only its data directory |
+| Program | `/opt/kiwi/app/kiwi` and `/opt/kiwi/app/web`, owned by root. The previous build is kept in `app.prev/`; after an automatic rollback, the failed build is in `app.bad/` |
+| Listens on | `127.0.0.1:8742`, loopback only |
+| Address | `https://<this computer>.<your tailnet>.ts.net/` through `tailscale serve`, as on a Mac |
+| Tailscale | tailscaled's LocalAPI socket, `/var/run/tailscale/tailscaled.sock` |
+| Data | `/var/lib/kiwi/` (owned by `kiwi`, mode 0700) |
+| Log | The journal: `journalctl -u kiwi` |
+
+Signing uses an identity and profiles uploaded to Kiwi, kept in the data directory under
+`signing/` ([Install](install.md#signing-ios-apps-on-linux)).
+
+### In Docker
+
+| What | Where |
+|---|---|
+| Containers | `kiwi` (the image from `Dockerfile`, as the user `kiwi`, uid 10001) and `tailscale`, whose network Kiwi shares (`compose.yaml`) |
+| Listens on | `127.0.0.1:8742` inside the shared network; nothing is published on the host |
+| Address | `https://<TS_HOSTNAME>.<your tailnet>.ts.net/`, from the Tailscale container's `tailscale serve` |
+| Tailscale | The Tailscale container's socket, shared through the volume `tailscale-socket` |
+| Data | The volume `kiwi-data`, `/data` in the container; the Tailscale machine in `tailscale-state` |
+| Log | `docker compose logs kiwi` |
+
 ### The data directory
 
 | File | |
@@ -30,30 +59,40 @@ Signing uses the Apple Development identity in your login keychain and the profi
 | `vapid.json` | The Web Push key pair (0600). If it's lost, every device has to turn notifications on again. An unreadable one is moved to `vapid.json.corrupt-<time>` and replaced |
 | `downloads/`, `builds/`, `icons/` | Downloaded IPAs, signed builds and icons; caches that Kiwi cleans up |
 | `automation/` | Kiwi Builds' runner, recipes, jobs and artifacts (see [Kiwi Builds](kiwi-builds.md)) |
+| `android-app/` | Kiwi's Android app as this Kiwi signed it, and unsigned builds you place in `unsigned/` (see [Kiwi's Android app](android-app.md)) |
 | `work/` | Temporary files, emptied at every start |
 | `kiwi.lock` | Held by the running Kiwi; a second instance on the same data stops |
 
 ## Configuration
 
-`install.sh` writes Kiwi's options into the LaunchAgent. Change them by running
-`./install.sh` again with other options (see [Install](install.md#5-install-kiwi)). The
-server's own flags, also settable through environment variables:
+`install.sh` writes Kiwi's options into the LaunchAgent (on Linux, into `kiwi.service`).
+Change them by running `./install.sh` again with other options (see
+[Install](install.md#5-install-kiwi)). In Docker, set them as environment variables in
+`compose.yaml`. The server's own flags, also settable through environment variables:
 
 | Flag | Environment | Default |
 |---|---|---|
 | `--listen` | `KIWI_LISTEN` | `127.0.0.1:8742` |
-| `--data-dir` | `KIWI_DATA_DIR` | `~/Library/Application Support/Kiwi` |
+| `--data-dir` | `KIWI_DATA_DIR` | `~/Library/Application Support/Kiwi` on a Mac; elsewhere `$XDG_DATA_HOME/kiwi`, that is `~/.local/share/kiwi` (the installer uses `/var/lib/kiwi`, the image `/data`) |
 | `--web-dir` | `KIWI_WEB_DIR` | `<program's directory>/web` |
-| `--public-url` | `KIWI_PUBLIC_URL` | `https://` + the Mac's Tailscale DNS name; requests must use this host or the listen address |
-| `--tailscale-socket` | `KIWI_TAILSCALE_SOCKET` | `/var/run/tailscaled.socket` |
-| `--tailscale-bin` | `KIWI_TAILSCALE_BIN` | `/opt/homebrew/bin/tailscale` (the installer passes the one it found) |
-| `--owner` | `KIWI_OWNER` | The Tailscale user who owns the Mac |
+| `--public-url` | `KIWI_PUBLIC_URL` | `https://` + this computer's Tailscale DNS name; requests must use this host or the listen address |
+| `--tailscale-socket` | `KIWI_TAILSCALE_SOCKET` | `/var/run/tailscaled.socket` on a Mac, `/var/run/tailscale/tailscaled.sock` on Linux |
+| `--tailscale-bin` | `KIWI_TAILSCALE_BIN` | `/opt/homebrew/bin/tailscale` on a Mac, `/usr/bin/tailscale` on Linux (the installer passes the one it found) |
+| `--python` | `KIWI_PYTHON` | The Python for Kiwi Builds' runners: `/opt/homebrew/bin/python3.13` on a Mac, `python3` on Linux (Android builds need 3.12 or newer) |
+| `--owner` | `KIWI_OWNER` | The Tailscale user who owns this computer |
+| `--proxy-uid` | `KIWI_PROXY_UID` | Not on a Mac: `0`, the user tailscaled runs as; only its connections may forward tailnet addresses (see [Install](install.md)) |
+| `--trust-local` | `KIWI_TRUST_LOCAL` | Off; takes every user and program on the computer for the owner, as on a Mac (development, or a computer only you use) |
 | `--allow-simulators` | `KIWI_ALLOW_SIMULATORS` | Off; treats simulators as linkable devices, for testing |
 
-`RUST_LOG` sets the log level (`info` in the LaunchAgent). Everything else is in the app
-under Settings.
+Without `--public-url`, Kiwi asks Tailscale for this computer's name at start, and keeps
+asking in the background while tailscaled is still starting. The App Store country starts as the
+region of the Mac's locale, on Linux of `LC_ALL`, `LC_MESSAGES` or `LANG`, until you pick one
+in Settings. `RUST_LOG` sets the log level (`info` in the LaunchAgent, the service and the
+image). Everything else is in the app under Settings.
 
 ## Day to day
+
+On a Mac:
 
 ```sh
 tail -f ~/Library/Logs/Kiwi/kiwi.log                  # the log
@@ -61,6 +100,25 @@ launchctl print gui/$(id -u)/local.kiwi | head -30    # state, pid, last exit
 launchctl kickstart -k gui/$(id -u)/local.kiwi        # restart
 curl -s http://127.0.0.1:8742/api/health              # {"ok":true,"pid":…,"version":"…"}
 tailscale serve status                                # / -> http://127.0.0.1:8742
+```
+
+On Linux:
+
+```sh
+journalctl -u kiwi -f                                 # the log
+systemctl status kiwi                                 # state, pid, last exit
+sudo systemctl restart kiwi                           # restart
+curl -s http://127.0.0.1:8742/api/health              # {"ok":true,"pid":…,"version":"…"}
+tailscale serve status                                # / -> http://127.0.0.1:8742
+```
+
+In Docker, from the directory with `compose.yaml`:
+
+```sh
+docker compose logs -f kiwi                           # the log
+docker compose ps                                     # state and health
+docker compose restart kiwi                           # restart
+docker compose exec tailscale tailscale serve status  # / -> http://127.0.0.1:8742
 ```
 
 ## Updating
@@ -80,6 +138,10 @@ If launchctl fails or Kiwi doesn't become healthy within 90 s, the installer rol
 itself: the failed build moves to `app.bad/`, `app.prev/` and the previous LaunchAgent come
 back, Kiwi restarts, and the installer exits with an error naming the database backup. It
 never restores the database by itself.
+
+On Linux it does the same with `/opt/kiwi/app` and `kiwi.service`, and takes the backup as
+the `kiwi` user. In Docker, `git pull && docker compose up -d --build` builds a new image and
+replaces the container; take a backup first (below).
 
 ## Roll back
 
@@ -104,12 +166,50 @@ cp kiwi.db.bak-<time> kiwi.db && chmod 600 kiwi.db
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.kiwi.plist
 ```
 
+On Linux the builds are in `/opt/kiwi` and the data in `/var/lib/kiwi`:
+
+```sh
+cd /opt/kiwi && sudo rm -rf app.bad && sudo mv app app.bad && sudo mv app.prev app
+sudo systemctl restart kiwi
+```
+
+To restore a database backup there, stop Kiwi with `sudo systemctl stop kiwi`, move the
+files as above in `/var/lib/kiwi` as root, `sudo chown kiwi:kiwi kiwi.db`, and start it with
+`sudo systemctl start kiwi`.
+
 ## Backups
 
-Back up `kiwi.db` and `vapid.json`. Use `sqlite3 kiwi.db ".backup kiwi.db.bak"` for a
-consistent copy of the database while Kiwi runs. The `kiwi.db.bak-*` copies the installer
-keeps are on the same disk, so they don't count as a backup. Everything else in the data
-directory can be rebuilt.
+Back up these files from the data directory, to another disk:
+
+| File | Why |
+|---|---|
+| `kiwi.db` | Sources, devices, installs and settings. Use `sqlite3 kiwi.db ".backup kiwi.db.bak"` for a consistent copy while Kiwi runs |
+| `vapid.json` | The Web Push key: without it every device has to turn notifications on again |
+| `automation/android/keystore.p12` and `automation/android/keystore.pass` | Kiwi's Android signing key and its password: it signs Kiwi Builds' Android apps and [Kiwi's own Android app](android-app.md). **Android only accepts an update signed with the same key** as the installed app: without these two files, every Android app Kiwi installed, Kiwi's app included, has to be removed from each phone before Kiwi can install it again, losing the app's data |
+| `signing/` | On Linux and in Docker: the uploaded Apple Development identity (`.p12`) and profiles. You can upload them again from your own copies |
+
+The `kiwi.db.bak-*` copies the installer keeps are on the same disk, so they don't count as
+a backup. Everything else in the data directory can be rebuilt. The data directory is
+private (on Linux owned by `kiwi`), so copy it as root and keep the copy private too: it
+holds signing keys.
+
+In Docker, copy the files out of the running container into a private directory of their
+own, outside the Kiwi clone (where they would be one `git add` away from being published).
+Run this in the clone, where `compose.yaml` is; each run makes a new dated copy:
+
+```sh
+b=~/kiwi-backup/$(date +%Y%m%d-%H%M%S)
+install -d -m 700 ~/kiwi-backup "$b"
+docker compose exec kiwi python3 -c "import os, sqlite3; os.umask(0o077); sqlite3.connect('/data/kiwi.db').backup(sqlite3.connect('/data/kiwi.db.bak'))"
+docker compose cp kiwi:/data/kiwi.db.bak "$b/kiwi.db"
+docker compose cp kiwi:/data/vapid.json "$b/"
+docker compose cp kiwi:/data/automation/android "$b/android"   # keystore.p12, keystore.pass
+docker compose cp kiwi:/data/signing "$b/signing"              # when you upload an iOS identity
+```
+
+Then copy `~/kiwi-backup` to another disk and keep it private: it holds signing keys.
+`docker compose cp` fails for a path that doesn't exist yet (no Android build, no uploaded
+identity); that's fine.
 
 ## Uninstall
 
@@ -121,6 +221,12 @@ directory can be rebuilt.
 Without `--purge`, the data directory and logs stay, so installing again picks up where
 you left off. The Kiwi Builds toolchain in `~/.kiwi-builder-tools` is never removed;
 delete it yourself if you used Kiwi Builds.
+
+On Linux, `./uninstall.sh` removes `kiwi.service`, the serve mapping and `/opt/kiwi`, and
+keeps `/var/lib/kiwi` and the user `kiwi`; `--purge` deletes them too. When `KIWI_MAC` is
+set (below), `./uninstall.sh` removes Kiwi from that Mac instead; `--local` removes it from
+this Linux computer. In Docker, `docker compose down` stops and removes the containers and
+keeps the volumes; `docker compose down --volumes` deletes them, Kiwi's data included.
 
 ## Working from another machine
 

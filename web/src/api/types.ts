@@ -5,14 +5,26 @@ export type Timestamp = string;
 /** What a device installs: signed IPAs, or the APKs of Kiwi Builds' Android apps. */
 export type Platform = "ios" | "android";
 
+/** Where a device's platform comes from: the owner's choice, Tailscale or a User-Agent, or nothing (iOS is assumed). */
+export type PlatformSource = "chosen" | "detected" | "assumed";
+
+/** The program that sent a request: the web app (browser or Home Screen app) or Kiwi's Android app. */
+export type Client = "web" | "android_app";
+
 export interface Device {
   id: string; // "ts:<StableID>" | "local:<random>"
   name: string;
   kind: "tailscale" | "browser";
+  /** What the device installs: the owner's choice, else the detected platform, else "ios". */
   platform: Platform;
+  platform_source: PlatformSource;
+  /** What Kiwi would take without a choice; null when nothing tells (desktop browsers). */
+  detected_platform: Platform | null;
+  /** This request's client; other devices (in `/api/devices`) are "web". */
+  client: Client;
   tailscale_name: string | null;
   os_version: string | null;
-  os_version_source: "devicectl" | "installer" | "manual" | "safari" | "android" | null;
+  os_version_source: "devicectl" | "installer" | "manual" | "safari" | "android" | "android_app" | null;
   model: string | null;
   devicectl: LinkedCoreDevice | null;
   last_seen: Timestamp;
@@ -47,17 +59,68 @@ export interface Warning {
   link: string | null;
 }
 
+/**
+ * What to show on a device. `ios_apps` and `android_apps` follow the device's platform and
+ * exclude each other.
+ * - `ios_apps`: iOS installs, AltStore sources, apps from links, signing, expiry timers
+ * - `android_apps`: Android installs (Kiwi Builds' APKs)
+ * - `home_screen_app`: the web app on iOS: Add to Home Screen and Web Push
+ * - `web_push`: the web app, which can use Web Push (iOS Home Screen app, Android and desktop browsers)
+ * - `android_app_offer`: the web app on an Android device while Kiwi serves its Android app
+ * - `devicectl`: an iOS device on a Mac: linking it to a paired CoreDevice
+ */
+export type Feature = "ios_apps" | "android_apps" | "home_screen_app" | "web_push" | "android_app_offer" | "devicectl";
+
+/** The computer Kiwi runs on. */
+export interface Host {
+  os: "macos" | "linux" | "other";
+  /** How this Kiwi signs iOS apps: the Mac's login keychain, or an uploaded identity file. */
+  ios_signing: "keychain" | "files";
+  devicectl: boolean;
+  /** SHA-256 (hex) of the certificate of the key Kiwi signs Android apps with; null until Kiwi Builds has loaded it. */
+  android_signer_sha256: string | null;
+}
+
+/** Kiwi's Android app, when this Kiwi serves it. */
+export interface AndroidApp {
+  package: string; // "io.github.digitalpals.kiwi"
+  version_name: string;
+  version_code: number;
+  size: number;
+  install_url: string; // "<public_url>/android/kiwi.apk"
+}
+
 export interface Me {
   device: Device;
+  /** The first-run setup was completed on this device. */
+  onboarded: boolean;
   server: {
     version: string;
     public_url: string;
     team_id: string | null;
     devicectl_available: boolean;
   };
+  host: Host;
+  features: Feature[];
+  android_app: AndroidApp | null;
   push: { vapid_public_key: string; subscribed: boolean };
   counts: { updates: number; installed: number; sources: number; source_errors: number; preparing: number };
   warnings: Warning[];
+}
+
+/** One installed package, as Kiwi's Android app reports it (`PUT /api/me/packages`). */
+export interface InstalledPackage {
+  package: string;
+  version_name: string | null;
+  version_code: number;
+  /** SHA-256 (hex) of each signing certificate. */
+  signer_sha256: string[];
+  installer: string | null;
+}
+
+/** `PUT /api/me/packages` (Kiwi's Android app): every user-installed package. */
+export interface PackageReport {
+  packages: InstalledPackage[];
 }
 
 export interface Source {
@@ -128,6 +191,8 @@ export interface AppState {
   install_url: string | null;
   open_url: string | null;
   replaces: Replaces | null;
+  /** The app's package is installed with another signature (Android): remove that app first. */
+  foreign_install: boolean;
 }
 
 /** An app in the App Store storefront chosen in Settings. */
@@ -240,13 +305,35 @@ export interface Profile {
   entitlements: string[];
   usable: boolean;
   reason: string | null;
+  /** Uploaded to Kiwi (DELETE /api/signing/profiles/:uuid removes it), not found in Xcode's folders. */
+  uploaded: boolean;
 }
 
+/**
+ * How this Kiwi signs iOS apps: "keychain" (macOS: the login keychain and codesign) or
+ * "files" (other systems: an uploaded .p12 identity and rcodesign).
+ */
+export type SigningBackend = "keychain" | "files";
+
 export interface Signing {
+  backend: SigningBackend;
   identities: Identity[];
   profiles: Profile[];
   active: { identity_sha1: string; profile_uuid: string; expires_at: Timestamp } | null;
   error: string | null;
+}
+
+/** POST /api/signing/identity ("files" backend only; 409 on "keychain"). */
+export interface IdentityUpload {
+  /** The .p12 file, base64. */
+  p12: string;
+  password: string;
+}
+
+/** POST /api/signing/profiles. */
+export interface ProfileUpload {
+  /** The .mobileprovision file, base64. */
+  profile: string;
 }
 
 export interface Settings {
@@ -272,9 +359,13 @@ export interface Health {
   version: string;
 }
 
+/** `PATCH /api/me`. `os_version: null` clears a manual value; `platform: null` clears the choice. */
 export interface MePatch {
   name?: string;
   os_version?: string | null;
+  platform?: Platform | null;
+  /** `false` shows the first-run setup again. */
+  onboarded?: boolean;
 }
 
 export interface SourcePatch {

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  fingerprint,
+  shortFingerprint,
   expiryInfo,
   formatBytes,
   formatDate,
@@ -151,5 +153,15 @@ describe("splitBytes", () => {
   it("separates the number and the unit", () => {
     expect(splitBytes(152_400_000)).toEqual(["152.4", "MB"]);
     expect(splitBytes(null)).toEqual(["—", ""]);
+  });
+});
+
+describe("fingerprints", () => {
+  const sha = "3d7a" + "0".repeat(56) + "994a";
+  it("groups a SHA-256 like Android and shortens it to its ends", () => {
+    expect(fingerprint("3d7a99")).toBe("3D:7A:99");
+    expect(fingerprint(sha).split(":")).toHaveLength(32);
+    expect(shortFingerprint(sha)).toBe("3D7A…994A");
+    expect(shortFingerprint("abc")).toBe("ABC");
   });
 });

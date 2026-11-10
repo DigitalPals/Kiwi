@@ -1,12 +1,13 @@
 import { useCallback, useState } from "preact/hooks";
 import { api, errorMessage } from "../api/client";
 import type { AppState, AppSummary } from "../api/types";
-import { AppRow, ExpiryLabel, SignedIcon } from "../components/AppRow";
+import { AppRow, ExpiryLabel, ForeignInstallNote, SignedIcon } from "../components/AppRow";
 import { Icon } from "../components/Icon";
 import { Banner, Empty, ErrorState, ExpandableText, Page, SkeletonRows, Spinner, VersionChange } from "../components/ui";
 import { libraryKey, needsPrepare, versionChange, withAppState, withLibraryState } from "../lib/action";
 import { deviceName, expiryInfo, formatBytes, formatDate, formatRelative, formatVersion } from "../lib/format";
 import { useOnForeground, useResource, useTask } from "../lib/hooks";
+import { hasFeature } from "../lib/features";
 import { useMe, useOnUpdateCountChange } from "../lib/me";
 
 /** "21.43.5 → 21.44.0 · 152.4 MB", or when a re-sign's current build expires. */
@@ -54,7 +55,7 @@ export function MyApps() {
   const library = useResource("library", api.library);
   const sources = useResource("sources", api.sources);
   const { me, reload: reloadMe } = useMe();
-  const android = me?.device.platform === "android";
+  const android = hasFeature(me, "android_apps");
   const device = deviceName(me?.device.platform);
   const [editing, setEditing] = useState(false);
   const [forgetError, setForgetError] = useState<string | null>(null);
@@ -185,6 +186,7 @@ export function MyApps() {
                   detail={<UpdateDetail app={app} />}
                   trailing={forgetButton(app)}
                 >
+                  <ForeignInstallNote app={app} />
                   {app.state.target?.notes && app.state.update_reason !== "resign" && (
                     <div class="row-notes">
                       <ExpandableText text={app.state.target.notes} lines={2} />
@@ -215,7 +217,9 @@ export function MyApps() {
                   detail={<InstalledDetail app={app} />}
                   // Everything here is installed: a button only when Kiwi can open the app.
                   trailing={forgetButton(app) ?? (app.state.action === "open" && !app.state.open_url ? false : undefined)}
-                />
+                >
+                  <ForeignInstallNote app={app} />
+                </AppRow>
               ))}
             </ul>
           </>

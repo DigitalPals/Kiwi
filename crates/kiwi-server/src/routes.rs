@@ -1,7 +1,6 @@
 //! HTTP routes: `/api` (JSON, CSRF-checked), `/ota` and the web app.
 
 use std::{
-    net::SocketAddr,
     path::{Component, Path as FsPath},
     sync::{Arc, Mutex},
     time::Instant,
@@ -14,19 +13,20 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header, request::Parts},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    Kiwi, builds,
+    Kiwi, android, builds,
     catalog::SourceJson,
-    db::{BrowseMode, DeviceRow, OriginalChoice, SourceRow},
-    devices::{self, COOKIE, Requester, device_json},
+    db::{BrowseMode, DeviceRow, OriginalChoice, Platform, SourceRow},
+    devices::{self, COOKIE, Client, Requester, device_json},
     error::{ApiError, ApiResult},
     ota, owner,
+    peers::{self, Connection},
     push::{self, Payload, SubscribeBody},
     sources,
     store::{self, StoreAppJson},
@@ -47,6 +47,7 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .route("/automation/{app}/check", post(automation_check))
         .route("/automation/{app}/cancel", post(automation_cancel))
         .route("/me", get(me).patch(patch_me))
+        .route("/me/packages", put(put_packages))
         .route("/sources", get(list_sources).post(add_source))
         .route("/sources/refresh", post(refresh_sources))
         .route("/sources/{id}", patch(patch_source).delete(delete_source))
@@ -66,6 +67,12 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .route("/updates/prepare", post(prepare_updates))
         .route("/signing", get(signing))
         .route("/signing/rescan", post(rescan_signing))
+        .route(
+            "/signing/identity",
+            post(upload_identity).delete(delete_identity),
+        )
+        .route("/signing/profiles", post(upload_profile))
+        .route("/signing/profiles/{uuid}", delete(delete_profile))
         .route("/settings", get(get_settings).patch(patch_settings))
         .route("/push/subscribe", post(push_subscribe))
         .route("/push/unsubscribe", post(push_unsubscribe))
@@ -88,6 +95,7 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .route("/ota/{token}/app.ipa", get(ota::ipa_handler))
         .route("/ota/{token}/app.apk", get(ota::apk_handler))
         .route("/ota/{token}/icon.png", get(ota::icon_handler))
+        .route("/android/kiwi.apk", get(android_app_apk))
         .fallback(web)
         .layer(middleware::from_fn_with_state(kiwi.clone(), host_guard))
         .layer(middleware::from_fn(log_requests))
@@ -111,7 +119,7 @@ async fn host_guard(State(kiwi): K, req: Request, next: Next) -> Response {
         [one] => Some(one.to_str().unwrap_or("")),
         _ => Some(""),
     };
-    if !kiwi.hosts.allows(host, forwarded) {
+    if !kiwi.allows_host(host, forwarded) {
         tracing::warn!(
             "rejected a request for host {:?} (forwarded host {:?})",
             host.unwrap_or(""),
@@ -205,6 +213,8 @@ async fn api_guard(mut req: Request, next: Next) -> Response {
 pub struct Ctx {
     pub device: DeviceRow,
     pub public_url: String,
+    /// The program that sent the request: the web app or Kiwi's Android app.
+    pub client: Client,
 }
 
 impl FromRequestParts<Arc<Kiwi>> for Ctx {
@@ -219,16 +229,19 @@ impl FromRequestParts<Arc<Kiwi>> for Ctx {
                 .collect();
             (!values.is_empty()).then(|| values.join("; "))
         };
+        let connection = parts
+            .extensions
+            .get::<ConnectInfo<Connection>>()
+            .map(|c| &c.0);
+        // `tailscale serve` sends one; with several, the last one is the proxy's.
+        let forwarded_for = parts
+            .headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .next_back()
+            .and_then(|v| v.to_str().ok());
         let requester = Requester {
-            peer: parts
-                .extensions
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|c| c.0),
-            forwarded_for: parts
-                .headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned),
+            origin: peers::origin(kiwi, connection, forwarded_for).await,
             cookie: text(header::COOKIE),
             user_agent: parts
                 .headers
@@ -246,17 +259,23 @@ impl FromRequestParts<Arc<Kiwi>> for Ctx {
         Ok(Self {
             device,
             public_url: kiwi.public_url(&parts.headers),
+            client: Client::of(requester.user_agent.as_deref()),
         })
     }
 }
 
-/// A JSON body; empty bodies read as `{}`.
-pub struct JsonBody<T>(pub T);
+/// Largest JSON body most endpoints accept.
+const BODY_LIMIT: usize = 64 * 1024;
 
-impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for JsonBody<T> {
+/// A JSON body of at most `LIMIT` bytes; empty bodies read as `{}`.
+pub struct JsonBody<T, const LIMIT: usize = BODY_LIMIT>(pub T);
+
+impl<S: Send + Sync, T: DeserializeOwned, const LIMIT: usize> FromRequest<S>
+    for JsonBody<T, LIMIT>
+{
     type Rejection = ApiError;
     async fn from_request(req: Request, _: &S) -> ApiResult<Self> {
-        let bytes: Bytes = axum::body::to_bytes(req.into_body(), 64 * 1024)
+        let bytes: Bytes = axum::body::to_bytes(req.into_body(), LIMIT)
             .await
             .map_err(|_| ApiError::bad_request("Request body is too large."))?;
         let bytes: &[u8] = if bytes.iter().all(u8::is_ascii_whitespace) {
@@ -315,6 +334,47 @@ fn days_until(t: chrono::DateTime<Utc>, now: chrono::DateTime<Utc>) -> String {
     }
 }
 
+/// The operating system Kiwi runs on (`Me.host.os`).
+const HOST_OS: &str = if cfg!(target_os = "macos") {
+    "macos"
+} else if cfg!(target_os = "linux") {
+    "linux"
+} else {
+    "other"
+};
+
+/// What to show on a device (`Me.features` in api.md): its platform's apps, the web app's
+/// Home Screen and Web Push features in a browser, the offer of Kiwi's Android app in an
+/// Android browser, and devicectl linking for an iOS device on a Mac.
+///
+/// The Kiwi app is offered only where it can be installed: in a browser on a device detected
+/// as Android, not in a desktop browser whose owner chose Android.
+pub fn features(
+    platform: Platform,
+    detected: Option<Platform>,
+    client: Client,
+    macos_host: bool,
+    android_app: bool,
+) -> Vec<&'static str> {
+    let web = client == Client::Web;
+    let ios = platform == Platform::Ios;
+    let android_device = detected == Some(Platform::Android);
+    [
+        (ios, "ios_apps"),
+        (!ios, "android_apps"),
+        (web && ios, "home_screen_app"),
+        (web, "web_push"),
+        (
+            web && !ios && android_device && android_app,
+            "android_app_offer",
+        ),
+        (ios && macos_host, "devicectl"),
+    ]
+    .into_iter()
+    .filter_map(|(on, feature)| on.then_some(feature))
+    .collect()
+}
+
 async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
     let view = View::load(kiwi, &ctx.device, &ctx.public_url)?;
     let now = view.now;
@@ -326,7 +386,8 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
     let mut warnings = Vec::new();
     // An Android device installs what Kiwi Builds signed itself, at any Android version
     // the app supports: Apple signing and the OS version don't concern it.
-    let android = crate::devices::is_android(&ctx.device);
+    let platform = devices::effective_platform(&ctx.device);
+    let android = platform == Platform::Android;
     let signing = || {
         if view.signing.identities.is_empty() {
             let message = view.signing.error(now).unwrap_or_default();
@@ -339,8 +400,12 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
             .signing
             .active(now)
             .filter(|a| a.expires_at - now < Duration::days(30))?;
+        let renew = match view.signing.backend {
+            kiwi_signer::Backend::Keychain => "Renew it in Xcode, then rescan.",
+            kiwi_signer::Backend::Files => "Upload a renewed one in Settings › Signing.",
+        };
         let message = format!(
-            "The signing certificate or profile expires {}. Renew it in Xcode, then rescan.",
+            "The signing certificate or profile expires {}. {renew}",
             days_until(active.expires_at, now)
         );
         Some(warning("warning", "expiring", message, "/settings"))
@@ -377,6 +442,15 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
             warnings.push(warning("warning", "expiring", message, "/apps"));
         }
     }
+    // Signing Kiwi's own Android app failed: it is offered to Android devices only.
+    if android && let Some(failure) = crate::kiwi_app::failure(kiwi) {
+        warnings.push(warning(
+            "warning",
+            "android_app",
+            format!("Kiwi couldn't prepare its Android app: {}", failure.message),
+            "/settings",
+        ));
+    }
     if ctx.device.os_version.is_none() && !android {
         warnings.push(warning(
             "info",
@@ -391,14 +465,34 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
         .iter()
         .filter(|b| b.status.is_active())
         .count();
+    let devicectl = kiwi
+        .devicectl_available
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let android_app = kiwi.android_app.get(&kiwi.paths.android_app).await;
+    let android_signer = android::kiwi_signer(kiwi, &android::catalog_apps(kiwi));
     Ok(json!({
-        "device": device_json(&ctx.device),
+        "device": device_json(&ctx.device, ctx.client),
+        "onboarded": ctx.device.onboarded_at.is_some(),
         "server": {
             "version": env!("CARGO_PKG_VERSION"),
             "public_url": ctx.public_url,
             "team_id": view.team,
-            "devicectl_available": kiwi.devicectl_available.load(std::sync::atomic::Ordering::Relaxed),
+            "devicectl_available": devicectl,
         },
+        "host": {
+            "os": HOST_OS,
+            "ios_signing": if HOST_OS == "macos" { "keychain" } else { "files" },
+            "devicectl": devicectl,
+            "android_signer_sha256": android_signer,
+        },
+        "features": features(
+            platform,
+            ctx.device.detected_platform,
+            ctx.client,
+            HOST_OS == "macos",
+            android_app.is_some(),
+        ),
+        "android_app": android_app.map(|app| app.json(&ctx.public_url)),
         "push": {
             "vapid_public_key": kiwi.vapid_public_key,
             "subscribed": !kiwi.db.subscriptions(&ctx.device.id)?.is_empty(),
@@ -424,6 +518,11 @@ struct MePatch {
     name: Option<String>,
     #[serde(default, deserialize_with = "nullable")]
     os_version: Option<Option<String>>,
+    /// `null` clears the owner's choice (back to detection).
+    #[serde(default, deserialize_with = "nullable")]
+    platform: Option<Option<Platform>>,
+    /// `false` shows the first-run setup again.
+    onboarded: Option<bool>,
 }
 
 fn device_name(name: &str) -> ApiResult<Option<String>> {
@@ -462,19 +561,71 @@ async fn patch_me(
     if let Some(version) = os_version {
         kiwi.db.set_manual_os(&id, version.as_deref())?;
     }
+    if let Some(platform) = body.platform {
+        kiwi.db.set_device_platform(&id, platform)?;
+        // Updates and notifications follow the platform.
+        kiwi.kick.notify_one();
+    }
+    if let Some(onboarded) = body.onboarded {
+        kiwi.db.set_device_onboarded(&id, onboarded, Utc::now())?;
+    }
     if let Some(device) = kiwi.db.device(&id)? {
         ctx.device = device;
     }
     me_json(&kiwi, &ctx).await.map(Json)
 }
 
-async fn list_devices(State(kiwi): K, _: Ctx) -> ApiResult<Json<devices::DevicesJson>> {
-    devices::devices_json(&kiwi, false).await.map(Json)
+/// The installed packages Kiwi's Android app reports (api.md "PUT /api/me/packages").
+async fn put_packages(
+    State(kiwi): K,
+    ctx: Ctx,
+    JsonBody(report): JsonBody<android::PackageReport, { 2 * 1024 * 1024 }>,
+) -> ApiResult<StatusCode> {
+    if devices::effective_platform(&ctx.device) != Platform::Android {
+        return Err(ApiError::bad_request(
+            "Only Android devices report their installed packages.",
+        ));
+    }
+    android::record_packages(&kiwi, &ctx.device.id, report)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
-async fn sync_devices(State(kiwi): K, _: Ctx) -> ApiResult<Json<devices::DevicesJson>> {
+/// Kiwi's Android app, for the owner's devices like every API (api.md "Kiwi's Android
+/// app"), with `Range` support.
+async fn android_app_apk(
+    State(kiwi): K,
+    _: Ctx,
+    method: Method,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let dir = &kiwi.paths.android_app;
+    let app = kiwi
+        .android_app
+        .get(dir)
+        .await
+        .ok_or_else(|| ApiError::not_found("Kiwi's Android app is not available here."))?;
+    Ok(ota::send_file(
+        &dir.join(android::APK_FILE),
+        app.size,
+        &method,
+        &headers,
+        "application/vnd.android.package-archive",
+        &app.file_name(),
+    )
+    .await)
+}
+
+async fn list_devices(State(kiwi): K, ctx: Ctx) -> ApiResult<Json<devices::DevicesJson>> {
+    devices::devices_json(&kiwi, false, (&ctx.device.id, ctx.client))
+        .await
+        .map(Json)
+}
+
+async fn sync_devices(State(kiwi): K, ctx: Ctx) -> ApiResult<Json<devices::DevicesJson>> {
     devices::sync(&kiwi).await?;
-    devices::devices_json(&kiwi, false).await.map(Json)
+    devices::devices_json(&kiwi, false, (&ctx.device.id, ctx.client))
+        .await
+        .map(Json)
 }
 
 #[derive(Deserialize)]
@@ -487,15 +638,15 @@ struct DevicePatch {
 
 async fn patch_device(
     State(kiwi): K,
-    _: Ctx,
+    ctx: Ctx,
     P(id): P<String>,
     JsonBody(body): JsonBody<DevicePatch>,
 ) -> ApiResult<Json<devices::DeviceJson>> {
     let not_found = || ApiError::not_found("Device not found.");
-    kiwi.db.device(&id)?.ok_or_else(not_found)?;
+    let device = kiwi.db.device(&id)?.ok_or_else(not_found)?;
     let name = body.name.as_deref().map(device_name).transpose()?;
     if let Some(core) = body.devicectl_id
-        && let Some(core) = devices::link(&kiwi, &id, core.as_deref()).await?
+        && let Some(core) = devices::link(&kiwi, &device, core.as_deref()).await?
         && let Some(v) = &core.os_version
         && core.reachable()
     {
@@ -505,7 +656,8 @@ async fn patch_device(
         kiwi.db.set_device_name(&id, name.as_deref())?;
     }
     let device = kiwi.db.device(&id)?.ok_or_else(not_found)?;
-    Ok(Json(device_json(&device)))
+    let client = devices::client_of(&device, (&ctx.device.id, ctx.client));
+    Ok(Json(device_json(&device, client)))
 }
 
 // ---- sources ----
@@ -865,6 +1017,141 @@ async fn rescan_signing(State(kiwi): K, _: Ctx) -> Response {
     Json(kiwi.rescan_signing().await.json(Utc::now())).into_response()
 }
 
+/// Base64 grows files by a third; leave room for the JSON around it.
+const IDENTITY_BODY_LIMIT: usize = kiwi_signer::MAX_P12_BYTES / 3 * 4 + 8 * 1024;
+const PROFILE_BODY_LIMIT: usize = kiwi_signer::MAX_PROFILE_BYTES / 3 * 4 + 8 * 1024;
+
+/// An uploaded `.p12` and its password. Both are secrets: they are never logged or
+/// returned, and the request body and the strings parsed from it are zeroed after use.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdentityUpload {
+    p12: String,
+    #[serde(default)]
+    password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileUpload {
+    profile: String,
+}
+
+/// Maps signer errors on uploads: unusable files are the client's, the rest are Kiwi's.
+fn upload_error(e: kiwi_signer::Error) -> ApiError {
+    use kiwi_signer::Error;
+    match e {
+        Error::InvalidIdentity(_)
+        | Error::InvalidProfile(_)
+        | Error::NoProfile(_)
+        | Error::InvalidRequest(_) => ApiError::bad_request(e.to_string()),
+        Error::Unsupported(message) => ApiError::conflict(message),
+        other => ApiError::internal(other),
+    }
+}
+
+/// Runs a change to the signing files on a blocking thread: parsing an upload and writing
+/// files must not hold up (or overflow the smaller stack of) an async worker.
+async fn signing_files<T: Send + 'static>(
+    kiwi: &Kiwi,
+    change: impl FnOnce(&kiwi_signer::SigningDir) -> Result<T, kiwi_signer::Error> + Send + 'static,
+) -> ApiResult<T> {
+    let dir = kiwi.paths.signing.clone();
+    tokio::task::spawn_blocking(move || change(&dir))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(upload_error)
+}
+
+/// A JSON body holding secrets (like [`JsonBody`]), read into a buffer that is zeroed when
+/// it is dropped. Copies the HTTP server made while receiving it are out of Kiwi's reach.
+async fn secret_json<T: DeserializeOwned>(body: Body, limit: usize) -> ApiResult<T> {
+    let bytes = axum::body::to_bytes(body, limit)
+        .await
+        .map_err(|_| ApiError::bad_request("Request body is too large."))?;
+    // Takes over the buffer when nothing else shares it, else copies it.
+    let bytes = zeroize::Zeroizing::new(Vec::from(bytes));
+    let json: &[u8] = if bytes.iter().all(u8::is_ascii_whitespace) {
+        b"{}"
+    } else {
+        &bytes
+    };
+    serde_json::from_slice(json)
+        .map_err(|e| ApiError::bad_request(format!("Invalid request body: {e}")))
+}
+
+fn decode_upload(field: &str, base64: &str) -> ApiResult<zeroize::Zeroizing<Vec<u8>>> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let compact: String = base64.split_ascii_whitespace().collect();
+    let compact = zeroize::Zeroizing::new(compact);
+    STANDARD
+        .decode(compact.as_bytes())
+        .map(zeroize::Zeroizing::new)
+        .map_err(|_| ApiError::bad_request(format!("{field} must be base64.")))
+}
+
+/// Files backend only: stores a `.p12` identity with its password, then rescans.
+async fn upload_identity(State(kiwi): K, _: Ctx, body: Body) -> ApiResult<Response> {
+    let IdentityUpload { p12, password } = secret_json(body, IDENTITY_BODY_LIMIT).await?;
+    let (p12, password) = (
+        zeroize::Zeroizing::new(p12),
+        zeroize::Zeroizing::new(password),
+    );
+    require_files_backend(&kiwi)?;
+    let p12 = decode_upload("p12", &p12)?;
+    let identity = signing_files(&kiwi, move |dir| {
+        dir.set_identity(&p12, &password, Utc::now())
+    })
+    .await?;
+    tracing::info!("signing identity uploaded: {}", identity.name);
+    Ok(Json(kiwi.rescan_signing().await.json(Utc::now())).into_response())
+}
+
+async fn delete_identity(State(kiwi): K, _: Ctx) -> ApiResult<Response> {
+    require_files_backend(&kiwi)?;
+    if !signing_files(&kiwi, |dir| dir.remove_identity()).await? {
+        return Err(ApiError::not_found("No signing identity was uploaded."));
+    }
+    tracing::info!("signing identity removed");
+    Ok(Json(kiwi.rescan_signing().await.json(Utc::now())).into_response())
+}
+
+fn require_files_backend(kiwi: &Kiwi) -> ApiResult<()> {
+    match kiwi.signer.backend() {
+        kiwi_signer::Backend::Files => Ok(()),
+        kiwi_signer::Backend::Keychain => Err(ApiError::conflict(
+            "This Kiwi signs with the Mac's login keychain. Add the certificate to the keychain (for example in Xcode) instead of uploading it.",
+        )),
+    }
+}
+
+/// Stores a provisioning profile (any backend), then rescans.
+async fn upload_profile(
+    State(kiwi): K,
+    _: Ctx,
+    JsonBody(body): JsonBody<ProfileUpload, PROFILE_BODY_LIMIT>,
+) -> ApiResult<Response> {
+    let bytes = decode_upload("profile", &body.profile)?;
+    let profile = signing_files(&kiwi, move |dir| dir.add_profile(&bytes, Utc::now())).await?;
+    tracing::info!("provisioning profile uploaded: {}", profile.uuid);
+    Ok(Json(kiwi.rescan_signing().await.json(Utc::now())).into_response())
+}
+
+/// Deletes an uploaded profile; Xcode's profiles are not Kiwi's to delete.
+async fn delete_profile(State(kiwi): K, _: Ctx, P(uuid): P<String>) -> ApiResult<Response> {
+    let removed = {
+        let uuid = uuid.clone();
+        signing_files(&kiwi, move |dir| dir.remove_profile(&uuid)).await?
+    };
+    if !removed {
+        return Err(ApiError::not_found(
+            "No uploaded provisioning profile has this UUID. Profiles from Xcode can't be removed here.",
+        ));
+    }
+    tracing::info!("provisioning profile removed: {uuid}");
+    Ok(Json(kiwi.rescan_signing().await.json(Utc::now())).into_response())
+}
+
 async fn get_settings(State(kiwi): K, _: Ctx) -> Response {
     Json(kiwi.settings()).into_response()
 }
@@ -1003,6 +1290,7 @@ async fn push_test(State(kiwi): K, ctx: Ctx) -> ApiResult<Json<Value>> {
 const ASSET_EXTENSIONS: &[&str] = &[
     "js", "mjs", "css", "map", "png", "jpg", "jpeg", "gif", "svg", "ico", "webp", "json",
     "webmanifest", "txt", "woff", "woff2", "ttf", "html", "xml", "wasm", "ipa", "plist",
+    "apk",
 ];
 
 fn content_type(path: &FsPath) -> &'static str {

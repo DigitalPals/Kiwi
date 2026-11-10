@@ -62,4 +62,47 @@ jobs:
     runs-on: *linux-x64
     steps:
       - uses: actions/checkout@v5
-      - run: shellcheck install.sh uninstall.sh deploy/deploy.sh
+      - run: shellcheck install.sh uninstall.sh deploy/deploy.sh android/scripts/build-in-docker.sh
+
+  docker:
+    name: Docker image
+    # Builds the image without publishing it, and checks compose.yaml. GitHub-hosted on
+    # purpose: the Beast runner VMs may not provide a Docker daemon.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          tags: kiwi:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: docker compose config --quiet
+
+  android:
+    name: Android app
+    # Always GitHub-hosted: ubuntu-latest comes with an Android SDK, while the Beast runner VMs
+    # have no JDK or Android SDK and the Kiwi lane (2 vCPUs, 3 GiB) is too small for Gradle and R8.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v5
+      # The committed gradle-wrapper.jar must be one Gradle published.
+      - uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+          cache-dependency-path: |
+            android/gradle/libs.versions.toml
+            android/gradle/wrapper/gradle-wrapper.properties
+            android/**/*.gradle.kts
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: "platforms;android-37.0 build-tools;36.0.0"
+      - run: ./gradlew --no-daemon --console=plain test assembleRelease

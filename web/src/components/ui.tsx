@@ -4,11 +4,14 @@ import type { Warning } from "../api/types";
 import { goBack } from "../lib/router";
 import { Icon, type IconName } from "./Icon";
 
-/** "‹ Settings": back in history, or to `fallback` when the page was opened directly. */
-export function BackBar({ label, fallback }: { label: string; fallback: string }) {
+/**
+ * "‹ Settings": back in history, or to `fallback` when the page was opened directly;
+ * `onBack` replaces both (e.g. the previous step of the setup).
+ */
+export function BackBar({ label, fallback = "/", onBack }: { label: string; fallback?: string; onBack?: () => void }) {
   return (
     <div class="back-bar">
-      <button type="button" class="back-button" onClick={() => goBack(fallback)}>
+      <button type="button" class="back-button" onClick={onBack ?? (() => goBack(fallback))}>
         <Icon name="back" size={24} strokeWidth={2.2} />
         {label}
       </button>
@@ -202,10 +205,10 @@ const TILE_COLORS: Partial<Record<IconName, string>> = {
   wrench: "#1e6b4d",
 };
 
-/** A white glyph on a coloured tile in front of a cell. */
-export function CellIcon({ name }: { name: IconName }) {
+/** A white glyph on a coloured tile in front of a cell; `color` overrides the glyph's tile colour. */
+export function CellIcon({ name, color }: { name: IconName; color?: string }) {
   return (
-    <span class="cell-icon" style={{ "--tile": TILE_COLORS[name] ?? "var(--accent)" }} aria-hidden="true">
+    <span class="cell-icon" style={{ "--tile": color ?? TILE_COLORS[name] ?? "var(--accent)" }} aria-hidden="true">
       <Icon name={name} size={17} strokeWidth={2} />
     </span>
   );

@@ -18,8 +18,11 @@ use serde::Serialize;
 use crate::{
     Kiwi,
     catalog::CatalogApp,
-    db::{Db, DeviceRow, InstallRow, Time},
+    config::LocalTrust,
+    db::{Db, DeviceRow, InstallRow, Platform, Time},
     error::{ApiError, ApiResult},
+    owner,
+    peers::Origin,
 };
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -29,6 +32,8 @@ pub trait DeviceTools: Send + Sync + 'static {
     fn whois(&self, ip: IpAddr) -> BoxFuture<'_, Result<Option<TailscalePeer>, String>>;
     /// The Tailscale user who owns the Mac; `None` for a tagged machine.
     fn owner(&self) -> BoxFuture<'_, Result<Option<TailscaleUser>, String>>;
+    /// This computer's own Tailscale node (its StableID); `None` before it has joined.
+    fn node_id(&self) -> BoxFuture<'_, Result<Option<String>, String>>;
     fn devicectl_available(&self) -> BoxFuture<'_, bool>;
     fn list_devices(&self) -> BoxFuture<'_, Result<Vec<CoreDevice>, String>>;
     fn list_apps<'a>(&'a self, device: &'a str) -> BoxFuture<'a, Result<Vec<DeviceApp>, String>>;
@@ -45,6 +50,9 @@ impl DeviceTools for SystemDevices {
     }
     fn owner(&self) -> BoxFuture<'_, Result<Option<TailscaleUser>, String>> {
         Box::pin(async move { self.tailscale.owner().await.map_err(|e| e.to_string()) })
+    }
+    fn node_id(&self) -> BoxFuture<'_, Result<Option<String>, String>> {
+        Box::pin(async move { self.tailscale.node_id().await.map_err(|e| e.to_string()) })
     }
     fn devicectl_available(&self) -> BoxFuture<'_, bool> {
         Box::pin(kiwi_device::devicectl_available())
@@ -70,7 +78,7 @@ const CORE_DEVICES_TTL: Duration = Duration::from_secs(60);
 /// devicectl may not list a Kiwi install completed less than this long ago yet, or still
 /// list the version it replaces: such installs are neither marked removed nor given the
 /// listed version.
-const INSTALL_GRACE: chrono::Duration = chrono::Duration::minutes(10);
+pub(crate) const INSTALL_GRACE: chrono::Duration = chrono::Duration::minutes(10);
 
 #[derive(Default)]
 pub struct DeviceCaches {
@@ -81,6 +89,8 @@ pub struct DeviceCaches {
     whois_queries: Mutex<HashMap<IpAddr, Weak<tokio::sync::Mutex<()>>>>,
     core: Mutex<Option<(Instant, Vec<CoreDevice>)>>,
     core_query: tokio::sync::Mutex<()>,
+    /// This computer's Tailscale node, when known.
+    node: Mutex<Option<(Instant, String)>>,
 }
 
 impl DeviceCaches {
@@ -135,6 +145,29 @@ impl DeviceCaches {
         failed.retain(|_, at| at.elapsed() < WHOIS_ERROR_TTL);
         failed.insert(ip, Instant::now());
         Err(ApiError::device_unidentified())
+    }
+
+    /// This computer's own Tailscale node, cached like a whois answer.
+    async fn node_id(&self, tools: &dyn DeviceTools) -> ApiResult<String> {
+        if let Some((at, id)) = self.node.lock().unwrap().as_ref()
+            && at.elapsed() < WHOIS_TTL
+        {
+            return Ok(id.clone());
+        }
+        match tools.node_id().await {
+            Ok(Some(id)) => {
+                *self.node.lock().unwrap() = Some((Instant::now(), id.clone()));
+                Ok(id)
+            }
+            Ok(None) => {
+                tracing::warn!("Tailscale doesn't name this computer's node yet");
+                Err(ApiError::device_unidentified())
+            }
+            Err(e) => {
+                tracing::warn!("could not ask Tailscale for this computer's node: {e}");
+                Err(ApiError::device_unidentified())
+            }
+        }
     }
 
     async fn core_devices(&self, tools: &dyn DeviceTools, force: bool) -> Vec<CoreDevice> {
@@ -214,11 +247,13 @@ pub fn random_token() -> String {
     B64.encode(bytes)
 }
 
+/// The `os_version_source` priority; `Db::observe_device_os` repeats it in SQL.
 fn priority(source: Option<&str>) -> u8 {
     match source {
-        Some("devicectl") => 4,
-        Some("installer") => 3,
-        Some("manual") => 2,
+        Some("devicectl") => 5,
+        Some("installer") => 4,
+        Some("manual") => 3,
+        Some("android_app") => 2,
         Some("safari" | "android") => 1,
         _ => 0,
     }
@@ -237,26 +272,98 @@ pub fn observe_os(device: &mut DeviceRow, version: &str, source: &str) -> bool {
     true
 }
 
-/// Whether the device is an Android phone or tablet (architecture.md "Android devices").
-pub fn is_android(device: &DeviceRow) -> bool {
-    device.model.as_deref() == Some(kiwi_device::ANDROID_MODEL)
+/// Where a device's platform comes from (`Device.platform_source` in api.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlatformSource {
+    /// The owner chose it.
+    Chosen,
+    /// Tailscale or a User-Agent reported it.
+    Detected,
+    /// Nothing told: Kiwi assumes iOS.
+    Assumed,
 }
 
-/// Takes the OS version and model from a Safari, OTA installer or Android browser
-/// User-Agent.
+/// The platform a device installs for (architecture.md "Device platforms"): the owner's
+/// choice, else the one Tailscale or a User-Agent reported, else iOS.
+pub fn platform(device: &DeviceRow) -> (Platform, PlatformSource) {
+    match (device.platform, device.detected_platform) {
+        (Some(chosen), _) => (chosen, PlatformSource::Chosen),
+        (None, Some(detected)) => (detected, PlatformSource::Detected),
+        (None, None) => (Platform::Ios, PlatformSource::Assumed),
+    }
+}
+
+/// The platform a device installs for (see [`platform`]).
+pub fn effective_platform(device: &DeviceRow) -> Platform {
+    platform(device).0
+}
+
+/// Which program sent a request (`Device.client` in api.md).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Client {
+    /// The web app, in a browser or as a Home Screen app.
+    #[default]
+    Web,
+    /// Kiwi's Android app.
+    AndroidApp,
+}
+
+impl Client {
+    pub fn of(user_agent: Option<&str>) -> Self {
+        match user_agent.is_some_and(kiwi_device::is_native_android) {
+            true => Self::AndroidApp,
+            false => Self::Web,
+        }
+    }
+}
+
+/// The platform of a Tailscale node's OS (`iOS` for iPhones and iPads, `android`).
+fn tailscale_platform(os: &str) -> Option<Platform> {
+    match os.to_ascii_lowercase().as_str() {
+        "ios" | "ipados" => Some(Platform::Ios),
+        "android" => Some(Platform::Android),
+        _ => None,
+    }
+}
+
+/// Records the platform Tailscale or a User-Agent reported, unless one was recorded
+/// before: the first report wins, so an iPhone never turns into an Android device.
+fn observe_platform(device: &mut DeviceRow, platform: Option<Platform>) -> bool {
+    match platform {
+        Some(platform) if device.detected_platform.is_none() => {
+            device.detected_platform = Some(platform);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Takes the platform, OS version and model from a Safari, OTA installer, Android browser
+/// or Kiwi Android app User-Agent.
 pub fn observe_user_agent(device: &mut DeviceRow, user_agent: Option<&str>) -> bool {
-    let Some(info) = user_agent.and_then(kiwi_device::parse_user_agent) else {
+    let Some(user_agent) = user_agent else {
         return false;
     };
-    let mut changed = false;
+    let reported = kiwi_device::user_agent_platform(user_agent).and_then(Platform::parse);
+    let mut changed = observe_platform(device, reported);
+    let Some(info) = kiwi_device::parse_user_agent(user_agent) else {
+        return changed;
+    };
+    // A client of the other platform (a desktop-mode or spoofed User-Agent) tells nothing
+    // about this device.
+    if reported != device.detected_platform {
+        return changed;
+    }
     if let Some(version) = &info.os_version {
         changed |= observe_os(device, version, info.source.as_str());
     }
-    // An installer names the exact hardware. An Android browser only tells the platform,
+    // An installer names the exact hardware. An Android client only tells the platform,
     // which never replaces a model Apple's tools reported.
     let trusted = match info.source {
         UaSource::Installer => true,
-        UaSource::Android => device.model.is_none(),
+        UaSource::Android | UaSource::AndroidApp => device.model.is_none(),
         UaSource::Safari => false,
     };
     if trusted
@@ -280,6 +387,11 @@ pub fn record_user_agent(
     if !observe_user_agent(device, user_agent) {
         return Ok(());
     }
+    if let Some(platform) = device.detected_platform
+        && before.detected_platform.is_none()
+    {
+        db.set_detected_platform(&device.id, platform)?;
+    }
     if let (Some(version), Some(source)) = (&device.os_version, &device.os_version_source)
         && (device.os_version != before.os_version
             || device.os_version_source != before.os_version_source)
@@ -294,45 +406,72 @@ pub fn record_user_agent(
     Ok(())
 }
 
-/// What the device can install; `None` while nothing is known about it (every release is
-/// then offered).
-pub fn device_profile(device: &DeviceRow) -> Option<DeviceProfile> {
-    if is_android(device) {
+/// What the device can install: releases for its platform (see [`platform`]) and, once
+/// its OS version is known, for that version. Without a version (an empty one) every
+/// release of the platform is offered.
+pub fn device_profile(device: &DeviceRow) -> DeviceProfile {
+    // A version reported for the detected platform says nothing about the one the owner
+    // chose instead.
+    let other_platform = device.platform.is_some()
+        && device.detected_platform.is_some()
+        && device.platform != device.detected_platform
+        && device.os_version_source.as_deref() != Some("manual");
+    let os_version = match other_platform {
+        true => String::new(),
+        false => device.os_version.clone().unwrap_or_default(),
+    };
+    match effective_platform(device) {
         // Android browsers rarely report the OS version, so Android releases declare no
         // minimum; the platform alone decides.
-        return Some(DeviceProfile {
-            os_version: device.os_version.clone().unwrap_or_default(),
+        Platform::Android => DeviceProfile {
+            os_version,
             platform: "android".into(),
             family: 1,
-        });
+        },
+        Platform::Ios => {
+            let ipad = device
+                .model
+                .as_deref()
+                .is_some_and(|m| m.starts_with("iPad"));
+            DeviceProfile {
+                os_version,
+                platform: "ios".into(),
+                family: if ipad { 2 } else { 1 },
+            }
+        }
     }
-    let os_version = device.os_version.clone()?;
-    let ipad = device
-        .model
-        .as_deref()
-        .is_some_and(|m| m.starts_with("iPad"));
-    Some(DeviceProfile {
-        os_version,
-        platform: "ios".into(),
-        family: if ipad { 2 } else { 1 },
-    })
 }
 
 /// What identified a request.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Requester {
-    pub peer: Option<SocketAddr>,
-    pub forwarded_for: Option<String>,
+    /// Where it comes from ([`crate::peers::origin`]).
+    pub origin: Origin,
     pub cookie: Option<String>,
     pub user_agent: Option<String>,
 }
 
 /// The device of a request, and a `kiwi_device` cookie value to set when it is new.
+/// Off macOS (unless `--trust-local`), a request that doesn't come through Tailscale, or
+/// comes from this computer's own node, belongs to no device: anyone on the computer could
+/// have made it (`403 not_owner`, see [`owner::not_on_this_computer`]).
 pub async fn resolve(kiwi: &Kiwi, req: &Requester) -> ApiResult<(DeviceRow, Option<String>)> {
     let now = Utc::now();
-    let peer = match forwarded_client(req.peer, req.forwarded_for.as_deref()) {
-        Some(ip) => whois(kiwi, ip).await?,
-        None => None,
+    let anyone = kiwi.config.local == LocalTrust::Anyone;
+    let peer = match req.origin {
+        Origin::Tailnet(ip) => match whois(kiwi, ip).await? {
+            Some(peer)
+                if !anyone
+                    && peer.stable_id == kiwi.caches.node_id(kiwi.devices.as_ref()).await? =>
+            {
+                return Err(owner::not_on_this_computer(kiwi));
+            }
+            Some(peer) => Some(peer),
+            None if anyone => None,
+            None => return Err(owner::not_on_this_computer(kiwi)),
+        },
+        Origin::Local => None,
+        Origin::Unknown => return Err(owner::not_on_this_computer(kiwi)),
     };
     let mut set_cookie = None;
     let (id, kind) = match &peer {
@@ -348,10 +487,10 @@ pub async fn resolve(kiwi: &Kiwi, req: &Requester) -> ApiResult<(DeviceRow, Opti
     };
     let user = peer.as_ref().map(user_of);
     // Tailscale knows a peer's OS even when its browser asks for desktop sites.
-    let android_peer = peer
+    let peer_platform = peer
         .as_ref()
         .and_then(|p| p.os.as_deref())
-        .is_some_and(|os| os.eq_ignore_ascii_case("android"));
+        .and_then(tailscale_platform);
     let mut device = match kiwi.db.device(&id)? {
         Some(d) => d,
         None => {
@@ -379,7 +518,12 @@ pub async fn resolve(kiwi: &Kiwi, req: &Requester) -> ApiResult<(DeviceRow, Opti
             device.tailscale_name = name;
         }
     }
-    if android_peer && device.model.is_none() {
+    if observe_platform(&mut device, peer_platform)
+        && let Some(platform) = device.detected_platform
+    {
+        kiwi.db.set_detected_platform(&id, platform)?;
+    }
+    if device.detected_platform == Some(Platform::Android) && device.model.is_none() {
         kiwi.db.set_device_model(&id, kiwi_device::ANDROID_MODEL)?;
         device.model = Some(kiwi_device::ANDROID_MODEL.into());
     }
@@ -422,8 +566,13 @@ pub struct DeviceJson {
     pub os_version: Option<String>,
     pub os_version_source: Option<String>,
     pub model: Option<String>,
-    /// `ios` or `android`: what the device installs.
-    pub platform: &'static str,
+    /// What the device installs (see [`platform`]).
+    pub platform: Platform,
+    pub platform_source: PlatformSource,
+    /// What Kiwi would take without the owner's choice; `None` when nothing told.
+    pub detected_platform: Option<Platform>,
+    /// The program that sent this request; other devices' are `web`.
+    pub client: Client,
     pub devicectl: Option<LinkedJson>,
     pub last_seen: Time,
 }
@@ -458,12 +607,15 @@ pub struct DevicesJson {
     pub core_devices: Vec<CoreDeviceJson>,
 }
 
-pub fn device_json(d: &DeviceRow) -> DeviceJson {
+/// A device as the API shows it; `client` is the program of the request (`Web` for other
+/// devices than the requesting one).
+pub fn device_json(d: &DeviceRow, client: Client) -> DeviceJson {
     let fallback = if d.kind == "tailscale" {
         "Device"
     } else {
         "Browser"
     };
+    let (platform, platform_source) = platform(d);
     DeviceJson {
         id: d.id.clone(),
         name: d
@@ -476,7 +628,10 @@ pub fn device_json(d: &DeviceRow) -> DeviceJson {
         os_version: d.os_version.clone(),
         os_version_source: d.os_version_source.clone(),
         model: d.model.clone(),
-        platform: if is_android(d) { "android" } else { "ios" },
+        platform,
+        platform_source,
+        detected_platform: d.detected_platform,
+        client,
         devicectl: d.devicectl_id.as_ref().map(|id| LinkedJson {
             id: id.clone(),
             name: d.devicectl_name.clone().unwrap_or_else(|| id.clone()),
@@ -488,7 +643,12 @@ pub fn device_json(d: &DeviceRow) -> DeviceJson {
     }
 }
 
-pub async fn devices_json(kiwi: &Kiwi, force: bool) -> ApiResult<DevicesJson> {
+/// Every device and CoreDevice; `current` is the requesting device and its client.
+pub async fn devices_json(
+    kiwi: &Kiwi,
+    force: bool,
+    current: (&str, Client),
+) -> ApiResult<DevicesJson> {
     let devices = kiwi.db.devices()?;
     let cores = core_devices(kiwi, force).await;
     Ok(DevicesJson {
@@ -511,8 +671,16 @@ pub async fn devices_json(kiwi: &Kiwi, force: bool) -> ApiResult<DevicesJson> {
                 transport: c.transport,
             })
             .collect(),
-        devices: devices.iter().map(device_json).collect(),
+        devices: devices
+            .iter()
+            .map(|d| device_json(d, client_of(d, current)))
+            .collect(),
     })
+}
+
+/// The client of a device in a list: the request's for the requesting device.
+pub fn client_of(device: &DeviceRow, (id, client): (&str, Client)) -> Client {
+    if device.id == id { client } else { Client::Web }
 }
 
 // ---- linking and sync ----
@@ -531,16 +699,23 @@ fn link_columns(core: &CoreDevice) -> (&str, &str, bool, Option<&str>) {
 }
 
 /// Links a Kiwi device to a CoreDevice (or unlinks it with `None`) and returns the
-/// CoreDevice. A CoreDevice is linked to at most one Kiwi device.
+/// CoreDevice. A CoreDevice is linked to at most one Kiwi device, and only an iOS device
+/// can be linked.
 pub async fn link(
     kiwi: &Kiwi,
-    device_id: &str,
+    device: &DeviceRow,
     core_id: Option<&str>,
 ) -> ApiResult<Option<CoreDevice>> {
+    let device_id = device.id.as_str();
     let Some(core_id) = core_id else {
         kiwi.db.set_device_link(device_id, None)?;
         return Ok(None);
     };
+    if effective_platform(device) != Platform::Ios {
+        return Err(ApiError::bad_request(
+            "Only an iPhone or iPad can be linked to a Mac device; this is an Android device.",
+        ));
+    }
     let mut cores = core_devices(kiwi, false).await;
     if !cores.iter().any(|c| c.identifier == core_id) {
         cores = core_devices(kiwi, true).await;
@@ -566,18 +741,23 @@ pub async fn link(
     Ok(Some(core))
 }
 
-/// Links automatically when exactly one linkable paired CoreDevice and one Kiwi device exist.
-pub fn auto_link_candidate<'a>(
+/// Links automatically when exactly one linkable paired CoreDevice and one iOS device (see
+/// [`effective_platform`]) exist. Returns the pair.
+pub fn auto_link_candidate<'a, 'b>(
     cores: &'a [CoreDevice],
-    devices: &[DeviceRow],
+    devices: &'b [DeviceRow],
     allow_simulators: bool,
-) -> Option<&'a CoreDevice> {
+) -> Option<(&'a CoreDevice, &'b DeviceRow)> {
     let candidates: Vec<&CoreDevice> = cores
         .iter()
         .filter(|c| linkable(c, allow_simulators) && c.paired())
         .collect();
-    match (candidates.as_slice(), devices) {
-        ([core], [device]) if device.devicectl_id.is_none() => Some(core),
+    let ios: Vec<&DeviceRow> = devices
+        .iter()
+        .filter(|d| effective_platform(d) == Platform::Ios)
+        .collect();
+    match (candidates.as_slice(), ios.as_slice()) {
+        ([core], [device]) if device.devicectl_id.is_none() => Some((core, device)),
         _ => None,
     }
 }
@@ -676,10 +856,12 @@ pub async fn sync(kiwi: &Arc<Kiwi>) -> ApiResult<()> {
     let now = Utc::now();
     let cores = core_devices(kiwi, true).await;
     let devices = kiwi.db.devices()?;
-    if let Some(core) = auto_link_candidate(&cores, &devices, kiwi.config.allow_simulators) {
-        tracing::info!("linking {} to CoreDevice {}", devices[0].id, core.name);
+    if let Some((core, device)) =
+        auto_link_candidate(&cores, &devices, kiwi.config.allow_simulators)
+    {
+        tracing::info!("linking {} to CoreDevice {}", device.id, core.name);
         kiwi.db
-            .set_device_link(&devices[0].id, Some(link_columns(core)))?;
+            .set_device_link(&device.id, Some(link_columns(core)))?;
     }
     let team = kiwi.team_id();
     let catalog = kiwi.catalog.apps(None, None);
@@ -687,6 +869,10 @@ pub async fn sync(kiwi: &Arc<Kiwi>) -> ApiResult<()> {
         let Some(core_id) = device.devicectl_id.clone() else {
             continue;
         };
+        // An Android device linked before Kiwi refused that gets nothing from an iPhone.
+        if effective_platform(&device) != Platform::Ios {
+            continue;
+        }
         let record = |reachable: bool, name: Option<&str>, error: Option<&str>| {
             kiwi.db
                 .record_device_sync(&device.id, &core_id, now, reachable, name, error)
@@ -711,10 +897,9 @@ pub async fn sync(kiwi: &Arc<Kiwi>) -> ApiResult<()> {
         };
         let error = match kiwi.devices.list_apps(&core_id).await {
             Ok(apps) => {
-                let installs = kiwi.db.installs(&device.id, true)?;
-                for row in reconcile(&device.id, &installs, &apps, &catalog, team.as_deref(), now) {
-                    kiwi.db.save_install(&row)?;
-                }
+                kiwi.db.change_installs(&device.id, |installs| {
+                    reconcile(&device.id, installs, &apps, &catalog, team.as_deref(), now)
+                })?;
                 None
             }
             Err(e) => Some(e),
@@ -773,6 +958,10 @@ mod tests {
 
         fn owner(&self) -> BoxFuture<'_, Result<Option<TailscaleUser>, String>> {
             Box::pin(async { Ok(None) })
+        }
+
+        fn node_id(&self) -> BoxFuture<'_, Result<Option<String>, String>> {
+            Box::pin(async { Ok(Some("nTHISHOST".into())) })
         }
 
         fn devicectl_available(&self) -> BoxFuture<'_, bool> {
@@ -952,24 +1141,35 @@ mod tests {
         assert!(!observe_user_agent(&mut d, Some(installer)));
         assert_eq!(d.os_version.as_deref(), Some("27.1"));
         assert!(!observe_user_agent(&mut d, Some("curl/8.7.1")));
-        let profile = device_profile(&d).unwrap();
+        let profile = device_profile(&d);
         assert_eq!((profile.os_version.as_str(), profile.family), ("27.1", 1));
         assert_eq!(profile.platform, "ios");
-        // An Android browser never turns an iPhone into an Android device.
+        // An Android browser never turns an iPhone into an Android device, nor gives it
+        // an Android version.
         let chrome = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36";
         assert!(!observe_user_agent(&mut d, Some(chrome)));
-        assert!(!is_android(&d));
+        let firefox = "Mozilla/5.0 (Android 15; Mobile; rv:143.0) Gecko/143.0 Firefox/143.0";
+        assert!(!observe_user_agent(&mut d, Some(firefox)));
+        assert_eq!(d.os_version.as_deref(), Some("27.1"));
+        assert_eq!(platform(&d), (Platform::Ios, PlatformSource::Detected));
     }
 
     #[test]
     fn android_browsers_set_the_platform() {
         let mut d = device();
-        assert!(device_profile(&d).is_none());
+        assert_eq!(platform(&d), (Platform::Ios, PlatformSource::Assumed));
+        let unknown = device_profile(&d);
+        assert_eq!(
+            (unknown.platform.as_str(), unknown.os_version.as_str()),
+            ("ios", "")
+        );
         let chrome = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36";
         assert!(observe_user_agent(&mut d, Some(chrome)));
-        assert!(is_android(&d) && d.os_version.is_none());
+        assert_eq!(platform(&d), (Platform::Android, PlatformSource::Detected));
+        assert_eq!(d.model.as_deref(), Some("Android"));
+        assert!(d.os_version.is_none());
         assert!(!observe_user_agent(&mut d, Some(chrome)));
-        let profile = device_profile(&d).unwrap();
+        let profile = device_profile(&d);
         assert_eq!((profile.platform.as_str(), profile.family), ("android", 1));
         let firefox = "Mozilla/5.0 (Android 15; Mobile; rv:143.0) Gecko/143.0 Firefox/143.0";
         assert!(observe_user_agent(&mut d, Some(firefox)));
@@ -980,7 +1180,80 @@ mod tests {
         // Desktop mode sends a Linux User-Agent; the device stays an Android one.
         let desktop = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
         assert!(!observe_user_agent(&mut d, Some(desktop)));
-        assert!(is_android(&d));
+        assert_eq!(effective_platform(&d), Platform::Android);
+        // An iOS User-Agent doesn't turn it into an iPhone either.
+        let safari = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Mobile/15E148 Safari/604.1";
+        assert!(!observe_user_agent(&mut d, Some(safari)));
+        assert_eq!(d.os_version.as_deref(), Some("15"));
+        assert_eq!(effective_platform(&d), Platform::Android);
+    }
+
+    #[test]
+    fn kiwis_android_app_reports_the_exact_release() {
+        let mut d = device();
+        let app = "Kiwi-Android/1.2.0 (12; Android 15; SDK 35; Google Pixel 9a)";
+        assert_eq!(Client::of(Some(app)), Client::AndroidApp);
+        assert_eq!(Client::of(None), Client::Web);
+        assert!(observe_user_agent(&mut d, Some(app)));
+        assert_eq!(platform(&d), (Platform::Android, PlatformSource::Detected));
+        assert_eq!(
+            (
+                d.model.as_deref(),
+                d.os_version.as_deref(),
+                d.os_version_source.as_deref()
+            ),
+            (Some("Android"), Some("15"), Some("android_app"))
+        );
+        // The app outranks a browser's guess, and the owner's own entry outranks the app.
+        let firefox = "Mozilla/5.0 (Android 16; Mobile; rv:143.0) Gecko/143.0 Firefox/143.0";
+        assert!(!observe_user_agent(&mut d, Some(firefox)));
+        assert_eq!(d.os_version.as_deref(), Some("15"));
+        assert!(observe_os(&mut d, "16", "manual"));
+        assert!(!observe_user_agent(&mut d, Some(app)));
+        assert_eq!(d.os_version.as_deref(), Some("16"));
+    }
+
+    #[test]
+    fn the_owners_choice_wins_over_detection() {
+        let mut d = device();
+        // A desktop browser tells nothing: iOS is assumed until the owner chooses.
+        let desktop = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15";
+        assert!(!observe_user_agent(&mut d, Some(desktop)));
+        assert_eq!(platform(&d), (Platform::Ios, PlatformSource::Assumed));
+        d.platform = Some(Platform::Android);
+        assert_eq!(platform(&d), (Platform::Android, PlatformSource::Chosen));
+        assert_eq!(device_profile(&d).platform, "android");
+        // Also over what Tailscale or a User-Agent reported.
+        let mut iphone = device();
+        iphone.detected_platform = Some(Platform::Ios);
+        iphone.os_version = Some("27.0".into());
+        iphone.os_version_source = Some("safari".into());
+        iphone.platform = Some(Platform::Android);
+        assert_eq!(
+            platform(&iphone),
+            (Platform::Android, PlatformSource::Chosen)
+        );
+        let profile = device_profile(&iphone);
+        assert_eq!(
+            (profile.platform.as_str(), profile.os_version.as_str()),
+            ("android", ""),
+            "iOS's version is not an Android one"
+        );
+        iphone.os_version_source = Some("manual".into());
+        assert_eq!(device_profile(&iphone).os_version, "27.0");
+        let json = device_json(&iphone, Client::Web);
+        assert_eq!(json.detected_platform, Some(Platform::Ios));
+        assert_eq!(
+            serde_json::to_value(&json).unwrap()["platform_source"],
+            "chosen"
+        );
+        iphone.platform = None;
+        assert_eq!(platform(&iphone), (Platform::Ios, PlatformSource::Detected));
+        // Tailscale names the OS of iPhones and iPads alike.
+        assert_eq!(tailscale_platform("iOS"), Some(Platform::Ios));
+        assert_eq!(tailscale_platform("android"), Some(Platform::Android));
+        assert_eq!(tailscale_platform("macOS"), None);
+        assert_eq!(tailscale_platform("linux"), None);
     }
 
     fn core(id: &str, physical: bool, paired: bool) -> CoreDevice {
@@ -1007,9 +1280,10 @@ mod tests {
         assert!(auto_link_candidate(&sims, &one, false).is_none());
         assert!(auto_link_candidate(&sims, &one, true).is_none());
         let phone = vec![core("sim1", false, true), core("phone", true, true)];
+        let (core_device, linked_device) = auto_link_candidate(&phone, &one, false).unwrap();
         assert_eq!(
-            auto_link_candidate(&phone, &one, false).unwrap().identifier,
-            "phone"
+            (core_device.identifier.as_str(), linked_device.id.as_str()),
+            ("phone", "ts:n1")
         );
         assert!(auto_link_candidate(&[core("phone", true, false)], &one, false).is_none());
         let two = vec![
@@ -1020,6 +1294,27 @@ mod tests {
         let mut linked = device();
         linked.devicectl_id = Some("phone".into());
         assert!(auto_link_candidate(&phone, &[linked], false).is_none());
+    }
+
+    #[test]
+    fn android_devices_are_never_linked_to_an_iphone() {
+        let phone = vec![core("phone", true, true)];
+        let mut android = DeviceRow::new("ts:pixel".into(), "tailscale", Utc::now());
+        android.detected_platform = Some(Platform::Android);
+        // The only device is an Android phone: nothing to link.
+        assert!(auto_link_candidate(&phone, std::slice::from_ref(&android), false).is_none());
+        // Next to one iPhone it doesn't count, so the iPhone is linked.
+        let devices = vec![android.clone(), device()];
+        let (_, linked) = auto_link_candidate(&phone, &devices, false).unwrap();
+        assert_eq!(linked.id, "ts:n1");
+        // The owner's choice counts too, both ways.
+        let mut chosen = device();
+        chosen.platform = Some(Platform::Android);
+        assert!(auto_link_candidate(&phone, &[chosen], false).is_none());
+        android.platform = Some(Platform::Ios);
+        let chosen_ios = [android];
+        let (_, linked) = auto_link_candidate(&phone, &chosen_ios, false).unwrap();
+        assert_eq!(linked.id, "ts:pixel");
     }
 
     fn device_app(bundle_id: &str, version: &str) -> DeviceApp {

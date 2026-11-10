@@ -199,6 +199,29 @@ DROP TABLE app_access;
 DROP TABLE people;
 ALTER TABLE builds DROP COLUMN devices;
 "#,
+    // Device platforms (architecture.md "Device identification"): the owner's choice, what
+    // Tailscale or a User-Agent reported, and the first-run setup. Devices that were in use
+    // already count as set up. Android packages installed with another signature.
+    r#"
+ALTER TABLE devices ADD COLUMN platform TEXT;
+ALTER TABLE devices ADD COLUMN detected_platform TEXT;
+ALTER TABLE devices ADD COLUMN onboarded_at TEXT;
+UPDATE devices SET detected_platform = CASE
+    WHEN model = 'Android' THEN 'android'
+    WHEN model LIKE 'iPhone%' OR model LIKE 'iPad%' OR model LIKE 'iPod%'
+        OR os_version_source IN ('safari', 'installer', 'devicectl') THEN 'ios'
+    END;
+UPDATE devices SET onboarded_at = first_seen
+WHERE EXISTS (SELECT 1 FROM installs WHERE device_id = devices.id)
+    OR EXISTS (SELECT 1 FROM attempts WHERE device_id = devices.id)
+    OR EXISTS (SELECT 1 FROM push_subscriptions WHERE device_id = devices.id);
+CREATE TABLE foreign_packages (
+    device_id TEXT NOT NULL,
+    package TEXT NOT NULL,
+    seen_at TEXT NOT NULL,
+    PRIMARY KEY (device_id, package)
+);
+"#,
 ];
 
 pub struct Db {
@@ -327,8 +350,45 @@ pub struct DeviceRow {
     /// The Tailscale user the device belongs to; `None` for browser devices on the Mac and
     /// devices seen before Kiwi recorded users (both count as the owner's).
     pub person_id: Option<String>,
+    /// The platform the owner chose for the device (`devices::platform`).
+    pub platform: Option<Platform>,
+    /// The platform Tailscale or a User-Agent reported first; `None` for desktop browsers.
+    pub detected_platform: Option<Platform>,
+    /// When the owner finished the first-run setup on the device.
+    pub onboarded_at: Option<Time>,
     pub first_seen: Time,
     pub last_seen: Time,
+}
+
+/// What a device installs: iOS apps or Android apps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    Ios,
+    Android,
+}
+
+impl Platform {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ios => "ios",
+            Self::Android => "android",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "ios" => Some(Self::Ios),
+            "android" => Some(Self::Android),
+            _ => None,
+        }
+    }
+}
+
+impl rusqlite::types::ToSql for Platform {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.as_str().into())
+    }
 }
 
 impl DeviceRow {
@@ -348,6 +408,9 @@ impl DeviceRow {
             last_sync_error: None,
             udid: None,
             person_id: None,
+            platform: None,
+            detected_platform: None,
+            onboarded_at: None,
             first_seen: now,
             last_seen: now,
         }
@@ -580,9 +643,17 @@ fn device_row(row: &Row) -> rusqlite::Result<DeviceRow> {
         last_sync_error: row.get("last_sync_error")?,
         udid: row.get("udid")?,
         person_id: row.get("person_id")?,
+        platform: platform_column(row, "platform")?,
+        detected_platform: platform_column(row, "detected_platform")?,
+        onboarded_at: row.get("onboarded_at")?,
         first_seen: row.get("first_seen")?,
         last_seen: row.get("last_seen")?,
     })
+}
+
+fn platform_column(row: &Row, column: &str) -> rusqlite::Result<Option<Platform>> {
+    let text: Option<String> = row.get(column)?;
+    Ok(text.as_deref().and_then(Platform::parse))
 }
 
 fn build_row(row: &Row) -> rusqlite::Result<BuildRow> {
@@ -664,6 +735,49 @@ fn subscription_row(row: &Row) -> rusqlite::Result<SubscriptionRow> {
         last_success_at: row.get("last_success_at")?,
         failures: row.get("failures")?,
     })
+}
+
+fn installs_in(
+    c: &Connection,
+    device_id: &str,
+    include_removed: bool,
+) -> rusqlite::Result<Vec<InstallRow>> {
+    c.prepare(
+        "SELECT * FROM installs WHERE device_id = ?1 AND (?2 OR removed_at IS NULL)
+         ORDER BY name COLLATE NOCASE",
+    )?
+    .query_map(params![device_id, include_removed], install_row)?
+    .collect()
+}
+
+fn save_install_in(c: &Connection, i: &InstallRow) -> rusqlite::Result<()> {
+    c.execute(
+        "INSERT OR REPLACE INTO installs (device_id, signed_bundle_id, source_id, bundle_id,
+             name, icon_url, developer, build_id, version, build, release, url_scheme,
+             expires_at, origin, verified, installed_at, last_seen_at, removed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        params![
+            i.device_id,
+            i.signed_bundle_id,
+            i.source_id,
+            i.bundle_id,
+            i.name,
+            i.icon_url,
+            i.developer,
+            i.build_id,
+            i.version,
+            i.build,
+            i.release.as_ref().map(to_json),
+            i.url_scheme,
+            i.expires_at,
+            i.origin,
+            i.verified,
+            i.installed_at,
+            i.last_seen_at,
+            i.removed_at
+        ],
+    )
+    .map(drop)
 }
 
 fn migrate(conn: &mut Connection) -> Result<(), String> {
@@ -971,8 +1085,10 @@ impl Db {
             c.execute(
                 "INSERT OR IGNORE INTO devices (id, kind, name, tailscale_name, os_version,
                      os_version_source, model, devicectl_id, devicectl_name, devicectl_reachable,
-                     last_sync_at, last_sync_error, udid, first_seen, last_seen, person_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                     last_sync_at, last_sync_error, udid, first_seen, last_seen, person_id,
+                     platform, detected_platform, onboarded_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                     ?17, ?18, ?19)",
                 params![
                     d.id,
                     d.kind,
@@ -989,7 +1105,10 @@ impl Db {
                     d.udid,
                     d.first_seen,
                     d.last_seen,
-                    d.person_id
+                    d.person_id,
+                    d.platform,
+                    d.detected_platform,
+                    d.onboarded_at
                 ],
             )
             .map(drop)
@@ -1041,12 +1160,59 @@ impl Db {
         self.with(|c| {
             c.execute(
                 "UPDATE devices SET os_version = ?2, os_version_source = ?3
-                 WHERE id = ?1 AND (CASE os_version_source WHEN 'devicectl' THEN 4
-                     WHEN 'installer' THEN 3 WHEN 'manual' THEN 2 WHEN 'safari' THEN 1 ELSE 0 END)
-                     <= (CASE ?3 WHEN 'devicectl' THEN 4 WHEN 'installer' THEN 3 WHEN 'manual' THEN 2
-                     WHEN 'safari' THEN 1 ELSE 0 END)",
+                 WHERE id = ?1 AND (CASE os_version_source WHEN 'devicectl' THEN 5
+                     WHEN 'installer' THEN 4 WHEN 'manual' THEN 3 WHEN 'android_app' THEN 2
+                     WHEN 'safari' THEN 1 WHEN 'android' THEN 1 ELSE 0 END)
+                     <= (CASE ?3 WHEN 'devicectl' THEN 5 WHEN 'installer' THEN 4 WHEN 'manual' THEN 3
+                     WHEN 'android_app' THEN 2 WHEN 'safari' THEN 1 WHEN 'android' THEN 1 ELSE 0 END)",
                 params![id, version, source],
             )
+            .map(drop)
+        })
+    }
+
+    /// Records the platform Tailscale or a User-Agent reported, unless one was recorded
+    /// before (an iPhone never turns into an Android device).
+    pub fn set_detected_platform(&self, id: &str, platform: Platform) -> rusqlite::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE devices SET detected_platform = ?2 WHERE id = ?1 AND detected_platform IS NULL",
+                params![id, platform],
+            )
+            .map(drop)
+        })
+    }
+
+    /// The owner's choice of platform; `None` goes back to detection.
+    pub fn set_device_platform(
+        &self,
+        id: &str,
+        platform: Option<Platform>,
+    ) -> rusqlite::Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE devices SET platform = ?2 WHERE id = ?1",
+                params![id, platform],
+            )
+            .map(drop)
+        })
+    }
+
+    /// Marks the first-run setup done (keeping the first time) or to be shown again.
+    pub fn set_device_onboarded(
+        &self,
+        id: &str,
+        onboarded: bool,
+        now: Time,
+    ) -> rusqlite::Result<()> {
+        self.with(|c| {
+            match onboarded {
+                true => c.execute(
+                    "UPDATE devices SET onboarded_at = COALESCE(onboarded_at, ?2) WHERE id = ?1",
+                    params![id, now],
+                ),
+                false => c.execute("UPDATE devices SET onboarded_at = NULL WHERE id = ?1", [id]),
+            }
             .map(drop)
         })
     }
@@ -1142,7 +1308,8 @@ impl Db {
             let mut deleted = 0;
             for (id, last_seen) in candidates {
                 if last_seen < before {
-                    deleted += c.execute("DELETE FROM devices WHERE id = ?1", [id])?;
+                    deleted += c.execute("DELETE FROM devices WHERE id = ?1", [&id])?;
+                    c.execute("DELETE FROM foreign_packages WHERE device_id = ?1", [&id])?;
                 }
             }
             Ok(deleted)
@@ -1384,14 +1551,19 @@ impl Db {
         device_id: &str,
         include_removed: bool,
     ) -> rusqlite::Result<Vec<InstallRow>> {
-        self.with(|c| {
-            c.prepare(
-                "SELECT * FROM installs WHERE device_id = ?1 AND (?2 OR removed_at IS NULL)
-                 ORDER BY name COLLATE NOCASE",
-            )?
-            .query_map(params![device_id, include_removed], install_row)?
-            .collect()
-        })
+        self.with(|c| installs_in(c, device_id, include_removed))
+    }
+
+    /// Reads a device's installs (removed ones too), lets `change` decide which rows to
+    /// save, and saves those, in one transaction while holding the connection: a download
+    /// completed meanwhile is never overwritten with a row read before it. Returns the saved
+    /// rows.
+    pub fn change_installs(
+        &self,
+        device_id: &str,
+        change: impl FnOnce(&[InstallRow]) -> Vec<InstallRow>,
+    ) -> rusqlite::Result<Vec<InstallRow>> {
+        self.save_package_report_with(device_id, None, |installs| (change(installs), None))
     }
 
     pub fn all_installs(&self) -> rusqlite::Result<Vec<InstallRow>> {
@@ -1403,35 +1575,7 @@ impl Db {
     }
 
     pub fn save_install(&self, i: &InstallRow) -> rusqlite::Result<()> {
-        self.with(|c| {
-            c.execute(
-                "INSERT OR REPLACE INTO installs (device_id, signed_bundle_id, source_id, bundle_id,
-                     name, icon_url, developer, build_id, version, build, release, url_scheme,
-                     expires_at, origin, verified, installed_at, last_seen_at, removed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-                params![
-                    i.device_id,
-                    i.signed_bundle_id,
-                    i.source_id,
-                    i.bundle_id,
-                    i.name,
-                    i.icon_url,
-                    i.developer,
-                    i.build_id,
-                    i.version,
-                    i.build,
-                    i.release.as_ref().map(to_json),
-                    i.url_scheme,
-                    i.expires_at,
-                    i.origin,
-                    i.verified,
-                    i.installed_at,
-                    i.last_seen_at,
-                    i.removed_at
-                ],
-            )
-            .map(drop)
-        })
+        self.with(|c| save_install_in(c, i))
     }
 
     pub fn delete_install(
@@ -1444,6 +1588,63 @@ impl Db {
                 "DELETE FROM installs WHERE device_id = ?1 AND signed_bundle_id = ?2",
                 [device_id, signed_bundle_id],
             )? > 0)
+        })
+    }
+
+    /// Android packages a device has installed with another signature than this Kiwi's
+    /// (`PUT /api/me/packages`).
+    pub fn foreign_packages(&self, device_id: &str) -> rusqlite::Result<Vec<String>> {
+        self.with(|c| {
+            c.prepare("SELECT package FROM foreign_packages WHERE device_id = ?1 ORDER BY package")?
+                .query_map([device_id], |r| r.get(0))?
+                .collect()
+        })
+    }
+
+    /// Saves a package report like [`Db::change_installs`]: `reconcile` turns the device's
+    /// installs into the rows to save and the device's foreign packages, which replace the
+    /// previous ones, all in one transaction. Returns the saved rows.
+    pub fn save_package_report(
+        &self,
+        device_id: &str,
+        now: Time,
+        reconcile: impl FnOnce(&[InstallRow]) -> (Vec<InstallRow>, Vec<String>),
+    ) -> rusqlite::Result<Vec<InstallRow>> {
+        self.save_package_report_with(device_id, Some(now), |installs| {
+            let (rows, foreign) = reconcile(installs);
+            (rows, Some(foreign))
+        })
+    }
+
+    /// [`Db::change_installs`], also replacing the foreign packages when `change` returns
+    /// them (seen at `now`).
+    fn save_package_report_with(
+        &self,
+        device_id: &str,
+        now: Option<Time>,
+        change: impl FnOnce(&[InstallRow]) -> (Vec<InstallRow>, Option<Vec<String>>),
+    ) -> rusqlite::Result<Vec<InstallRow>> {
+        self.with(|c| {
+            let tx = c.unchecked_transaction()?;
+            let (rows, foreign) = change(&installs_in(&tx, device_id, true)?);
+            for row in &rows {
+                save_install_in(&tx, row)?;
+            }
+            if let (Some(foreign), Some(now)) = (foreign, now) {
+                tx.execute(
+                    "DELETE FROM foreign_packages WHERE device_id = ?1",
+                    [device_id],
+                )?;
+                for package in foreign {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO foreign_packages (device_id, package, seen_at)
+                         VALUES (?1, ?2, ?3)",
+                        params![device_id, package, now],
+                    )?;
+                }
+            }
+            tx.commit()?;
+            Ok(rows)
         })
     }
 
@@ -1640,6 +1841,150 @@ mod tests {
         db.save_build(&crate::testutil::build_row("b1", BuildStatus::Ready, now))
             .unwrap();
         assert_eq!(db.builds().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migration_6_detects_platforms_and_keeps_devices_in_use_set_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kiwi.db");
+        {
+            // A database from a Kiwi before device platforms (schema 5).
+            let conn = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..5] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 5).unwrap();
+            conn.execute_batch(
+                "INSERT INTO devices (id, kind, model, os_version, os_version_source, first_seen, last_seen)
+                 VALUES
+                     ('ts:iphone', 'tailscale', 'iPhone19,4', '27.0.1', 'installer',
+                         '2026-10-01T00:00:00Z', '2026-11-01T00:00:00Z'),
+                     ('ts:android', 'tailscale', 'Android', NULL, NULL,
+                         '2026-10-02T00:00:00Z', '2026-11-01T00:00:00Z'),
+                     ('local:desktop', 'browser', NULL, NULL, NULL,
+                         '2026-10-03T00:00:00Z', '2026-11-01T00:00:00Z'),
+                     ('ts:new', 'tailscale', NULL, '27.0', 'safari',
+                         '2026-10-04T00:00:00Z', '2026-11-01T00:00:00Z'),
+                     ('ts:blank', 'tailscale', NULL, NULL, NULL,
+                         '2026-10-05T00:00:00Z', '2026-11-01T00:00:00Z');
+                 INSERT INTO installs (device_id, signed_bundle_id, source_id, bundle_id, name,
+                     version, origin, installed_at)
+                 VALUES ('ts:iphone', 'com.example.app.A1B2C3D4E5', 'src', 'com.example.app',
+                     'Example', '1.0', 'kiwi', '2026-10-10T00:00:00Z');
+                 INSERT INTO builds (id, source_id, bundle_id, app_name, version, release,
+                     signed_bundle_id, status, created_at)
+                 VALUES ('b1', 'src', 'com.example.app', 'Example', '1.0', '{}',
+                     'com.example.app', 'ready', '2026-10-10T00:00:00Z');
+                 INSERT INTO attempts (token, build_id, device_id, created_at)
+                 VALUES ('tok', 'b1', 'ts:android', '2026-10-10T00:00:00Z');
+                 INSERT INTO push_subscriptions (endpoint, device_id, p256dh, auth, created_at)
+                 VALUES ('https://web.push.apple.com/x', 'local:desktop', 'k', 'a',
+                     '2026-10-10T00:00:00Z');",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), MIGRATIONS.len() as i64);
+        let state = |id: &str| {
+            let d = db.device(id).unwrap().unwrap();
+            (d.platform, d.detected_platform, d.onboarded_at)
+        };
+        let at = |day: u32| {
+            Some("2026-10-0".to_owned() + &day.to_string() + "T00:00:00Z")
+                .map(|t| t.parse::<Time>().unwrap())
+        };
+        assert_eq!(state("ts:iphone"), (None, Some(Platform::Ios), at(1)));
+        assert_eq!(state("ts:android"), (None, Some(Platform::Android), at(2)));
+        assert_eq!(state("local:desktop"), (None, None, at(3)));
+        assert_eq!(state("ts:new"), (None, Some(Platform::Ios), None));
+        assert_eq!(state("ts:blank"), (None, None, None));
+        assert!(db.foreign_packages("ts:android").unwrap().is_empty());
+    }
+
+    #[test]
+    fn device_platform_columns() {
+        let db = Db::open_in_memory().unwrap();
+        let now = Utc::now();
+        db.insert_device(&DeviceRow::new("ts:n1".into(), "tailscale", now))
+            .unwrap();
+        // The first report wins.
+        db.set_detected_platform("ts:n1", Platform::Ios).unwrap();
+        db.set_detected_platform("ts:n1", Platform::Android)
+            .unwrap();
+        db.set_device_platform("ts:n1", Some(Platform::Android))
+            .unwrap();
+        let d = db.device("ts:n1").unwrap().unwrap();
+        assert_eq!(
+            (d.platform, d.detected_platform),
+            (Some(Platform::Android), Some(Platform::Ios))
+        );
+        db.set_device_platform("ts:n1", None).unwrap();
+        assert_eq!(db.device("ts:n1").unwrap().unwrap().platform, None);
+        // Set up keeps its first time; showing the setup again clears it.
+        let later = now + chrono::Duration::hours(1);
+        db.set_device_onboarded("ts:n1", true, now).unwrap();
+        db.set_device_onboarded("ts:n1", true, later).unwrap();
+        let onboarded = db.device("ts:n1").unwrap().unwrap().onboarded_at;
+        assert_eq!(onboarded, Some(now));
+        db.set_device_onboarded("ts:n1", false, later).unwrap();
+        assert_eq!(db.device("ts:n1").unwrap().unwrap().onboarded_at, None);
+        // A package report replaces the foreign packages.
+        let foreign = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        db.save_package_report("ts:n1", now, |_| (Vec::new(), foreign(&["b.b", "a.a"])))
+            .unwrap();
+        assert_eq!(db.foreign_packages("ts:n1").unwrap(), ["a.a", "b.b"]);
+        db.save_package_report("ts:n1", now, |_| (Vec::new(), foreign(&["c.c"])))
+            .unwrap();
+        assert_eq!(db.foreign_packages("ts:n1").unwrap(), ["c.c"]);
+    }
+
+    #[test]
+    fn a_download_completed_during_a_report_is_not_overwritten() {
+        use std::sync::{Arc, mpsc};
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let now = Utc::now();
+        let mut old = crate::testutil::install_of(
+            &crate::testutil::release("1.0", None),
+            "kiwi",
+            now - Duration::hours(1),
+        );
+        old.verified = true;
+        db.save_install(&old).unwrap();
+        let new = InstallRow {
+            version: "2.0".into(),
+            verified: false,
+            installed_at: now,
+            ..old.clone()
+        };
+        // The download of 2.0 completes while a package report of the phone is reconciled
+        // with the installs it read (1.0, now missing from the phone).
+        let (started, completes) = mpsc::channel();
+        let download = std::thread::spawn({
+            let db = db.clone();
+            let new = new.clone();
+            move || {
+                completes.recv().unwrap();
+                db.save_install(&new).unwrap();
+            }
+        });
+        let saved = db
+            .change_installs("ts:test", |installs| {
+                started.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                installs
+                    .iter()
+                    .map(|i| InstallRow {
+                        removed_at: Some(now),
+                        verified: false,
+                        ..i.clone()
+                    })
+                    .collect()
+            })
+            .unwrap();
+        assert_eq!(saved.len(), 1);
+        download.join().unwrap();
+        // The report's change came first; the completed download is what stays.
+        assert_eq!(db.installs("ts:test", true).unwrap(), [new]);
     }
 
     #[test]

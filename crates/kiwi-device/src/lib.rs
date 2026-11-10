@@ -13,10 +13,12 @@ pub use devicectl::{
     parse_devices,
 };
 pub use tailscale::{
-    TAILSCALED_SOCKET, Tailscale, TailscalePeer, TailscaleUser, parse_dns_name, parse_owner,
-    parse_whois, tailscale_owner, tailscale_whois,
+    TAILSCALED_SOCKET, Tailscale, TailscalePeer, TailscaleUser, parse_dns_name, parse_node_id,
+    parse_owner, parse_whois, tailscale_owner, tailscale_whois,
 };
-pub use ua::{ANDROID_MODEL, UaInfo, UaSource, parse_user_agent};
+pub use ua::{
+    ANDROID_MODEL, UaInfo, UaSource, is_native_android, parse_user_agent, user_agent_platform,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

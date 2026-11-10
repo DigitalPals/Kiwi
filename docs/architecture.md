@@ -37,27 +37,39 @@ Kiwi runs as the LaunchAgent `local.kiwi` in the user's GUI (Aqua) session: `cod
 with `errSecInternalComponent` from a plain SSH session because the login keychain is not
 usable there, and works in the GUI session, so its child processes can sign directly.
 
+Kiwi also runs on Linux: as the system service `kiwi.service` under its own user (`install.sh`,
+`deploy/kiwi.service.in`; data in `/var/lib/kiwi`, program in `/opt/kiwi/app`), or in Docker
+(`Dockerfile`, `compose.yaml`) next to a Tailscale container whose network namespace and
+LocalAPI socket it shares. There is no keychain, `devicectl` or iOS build there; Kiwi Builds
+builds Android apps only (see "Kiwi Builds on Linux").
+
 ## Repository layout
 
 ```
 Cargo.toml              workspace (shared dependency versions in [workspace.dependencies])
 crates/kiwi-source      AltStore source fetching/parsing, release selection, IPA download+validation
-crates/kiwi-signer      provisioning profiles, identities, IPA re-signing with codesign (macOS)
+crates/kiwi-signer      provisioning profiles, identities, IPA re-signing (codesign on macOS,
+                        rcodesign's library elsewhere)
 crates/kiwi-device      devicectl wrapper, Tailscale (LocalAPI or CLI), user-agent parsing
 crates/kiwi-push        VAPID keys + Web Push (RFC 8030/8291/8292) sender
 crates/kiwi-server      axum HTTP server, SQLite state, jobs, scheduler; binary `kiwi`
 web/                    Vite + Preact + TypeScript PWA (built to web/dist, served by kiwi-server)
-automation/             Kiwi Builds: the build runner (Python) and pinned app recipes
-install.sh              installs or updates Kiwi on the Mac (build, LaunchAgent, tailscale serve)
+android/                native Android client (Kotlin, Jetpack Compose); see android/README.md
+automation/             Kiwi Builds: the build runners (Python), pinned app recipes and the pinned
+                        release of Kiwi's Android app (kiwi-app.json)
+install.sh              installs or updates Kiwi on a Mac (build, LaunchAgent, tailscale serve)
+                        or on Linux (build, systemd service, tailscale serve)
 uninstall.sh            removes it again
-deploy/                 LaunchAgent and log rotation templates; deploy.sh deploys a checkout
-                        from another machine over SSH
+deploy/                 LaunchAgent, log rotation and systemd unit templates; deploy.sh deploys
+                        a checkout to a Mac from another machine over SSH
+Dockerfile, compose.yaml  the container image, and Kiwi with a Tailscale sidecar
 docs/                   this file, the HTTP API (api.md) and the guides
+.github/workflows/      CI, and the release of Kiwi's unsigned Android app (android-release.yml)
 ```
 
 Library crates do not depend on each other; only `kiwi-server` depends on them. All crates
-compile and their platform-neutral tests pass on Linux; macOS-only behaviour (codesign,
-devicectl) is exercised on a Mac.
+compile and their platform-neutral tests pass on Linux, including signing with the files
+backend; macOS-only behaviour (codesign and the keychain, devicectl) is exercised on a Mac.
 
 ## Crates
 
@@ -81,21 +93,51 @@ release), and `ipa_icon` converts their loose Xcode icon (CgBI PNG) into a stand
 server's `linked` module builds their one-app catalog and refreshes it: page first, then a
 `HEAD` request whose ETag, Last-Modified and length are compared with the stored ones.
 
-### kiwi-signer (macOS)
+### kiwi-signer (macOS and Linux backends)
 
-Lists signing identities (`security find-identity` / `find-certificate`), loads and parses
-provisioning profiles in pure Rust (the plist embedded in the CMS envelope: team, App ID
-pattern, devices, entitlements, certificates, expiry, `get-task-allow`), matches a bundle id
-against a profile (exact before wildcard), checks a profile is usable with an identity
-(certificate in profile, team matches, not expired) and re-signs IPAs. A signed bundle id is
-`<original>.<team>` (`com.google.ios.youtube.A1B2C3D4E5`); its URL scheme is `kiwi-` plus 12
-hex characters of its SHA-256.
+Lists signing identities, loads and parses provisioning profiles in pure Rust (the plist
+embedded in the CMS envelope: team, App ID pattern, devices, entitlements, certificates,
+expiry, `get-task-allow`), matches a bundle id against a profile (exact before wildcard),
+checks a profile is usable with an identity (certificate in profile, team matches, not
+expired) and re-signs IPAs. A signed bundle id is `<original>.<team>`
+(`com.google.ios.youtube.A1B2C3D4E5`); its URL scheme is `kiwi-` plus 12 hex characters of
+its SHA-256.
 
-Signing algorithm:
+Two backends sign (`Backend`, `Signing.backend` in the API):
+
+- **`keychain`** (macOS): identities come from the login keychain (`security find-identity`
+  / `find-certificate`); `codesign` signs and verifies and `/usr/bin/zip` packages.
+- **`files`** (every other system): the identity is a `.p12` uploaded to
+  `<data>/signing/identity`, stored together with its password in that one file (0600, the
+  directory 0700). It is written to a new file that is renamed over the old one, so the
+  `.p12` and its password are always replaced together, and uploads and removals take a
+  lock; the earlier layout (`identity.p12` and `identity.password`) is still read and is
+  removed by the next upload or removal. Neither is logged or returned. The buffers Kiwi
+  holds them in (the request body, the parsed strings, the decoded `.p12`, the stored
+  file's contents, the decrypted key while it is read) are zeroed when dropped; copies
+  made inside the HTTP server, the JSON parser (for a password with escaped characters)
+  and the PKCS#12 and key libraries are out of its reach. rcodesign's library
+  ([`apple-codesign`](https://github.com/indygreg/apple-platform-rs), MPL-2.0, default
+  features off, a dependency only on non-macOS targets) signs; Kiwi reads the `.p12`
+  (with the `p12` crate, as rcodesign does), verifies and packages in Rust. A `.p12` is
+  accepted when it opens with the password (the legacy PKCS#12 encryption Keychain Access
+  exports; an AES-encrypted file from OpenSSL 3 is refused with advice how to convert it),
+  holds one private key (RSA, P-256 or Ed25519) and the certificate for it (further
+  certificates, such as Apple's intermediate, are ignored), and that certificate's Extended
+  Key Usage includes code signing, its subject has a team id (OU) and it has not expired.
+
+Profiles uploaded to `<data>/signing/profiles/<uuid>.mobileprovision` are scanned on every
+host, before Xcode's folders (`~/Library/Developer/Xcode/UserData/Provisioning Profiles`,
+`~/Library/MobileDevice/Provisioning Profiles`). An upload must parse, be an iOS profile
+and not have expired; its UUID (letters, digits, `-`, `_`, `.`) names the file. Only
+uploaded profiles can be deleted through Kiwi.
+
+Signing algorithm (shared; the backends differ only in signing, verifying and packaging):
 
 1. Validate the archive (no absolute paths, no `..`, no symlinks escaping the root,
-   exactly one `Payload/*.app`) then extract preserving symlinks and permissions
-   (with `/usr/bin/ditto -x -k`, after validation).
+   exactly one `Payload/*.app`) then extract it with the zip crate, preserving symlinks
+   and permissions; symlinks are created last and resolved again to catch chains that
+   escape.
 2. Remove `iTunesMetadata.plist`, `META-INF`, `SC_Info`, `UISupportedDevices`; remove
    `Watch/` when `strip_watch`.
 3. Set main `CFBundleIdentifier` to `bundle_id`; for every nested bundle (`PlugIns/*.appex`,
@@ -110,17 +152,41 @@ Signing algorithm:
    `com.apple.developer.team-identifier`, `get-task-allow` from the profile,
    `keychain-access-groups = [TEAM.<id>]`, plus every other entitlement the profile
    grants that the original binary requested (for explicit App IDs, e.g. app groups).
-   Record original entitlements (`codesign -d --entitlements - --xml`, empty when
-   unsigned) and which were dropped.
+   The original entitlements are read from the executable's code signature in pure Rust
+   (the XML entitlements slot, arm64 slice first; empty when unsigned); the requested keys
+   no profile grants are reported as dropped.
 6. Sign inside-out (deepest path first): dylibs and frameworks plain, appex/nested apps
-   with `embedded.mobileprovision` + entitlements, then the main app:
-   `codesign --force --timestamp=none --generate-entitlement-der -s <sha1> [--entitlements f] <path>`.
-7. `codesign --verify --deep --strict` on the main app, then zip `Payload` into
-   `output_ipa` (`/usr/bin/zip -qry`, symlinks preserved).
+   with `embedded.mobileprovision` + entitlements, then the main app. Without a timestamp
+   and with DER entitlements next to the XML ones:
+   - `keychain`: `codesign --force --timestamp=none --generate-entitlement-der -s <sha1>
+     [--entitlements f] <path>`.
+   - `files`: like `codesign --force`, nothing is taken from an existing signature (its
+     identifier, flags, entitlements and launch constraints are never parsed). A dylib is
+     signed as its file name (`Lib.dylib` as `Lib`, binding an Info.plist linked into it),
+     without entitlements. A bundle is sealed like `codesign` seals an iOS bundle: every
+     file except the main executable goes into `_CodeSignature/CodeResources` with Apple's
+     rules for bundles without a `Resources` directory, by its hash as it is (shallow: nested
+     code signed in an earlier step keeps its signature, and other Mach-O files such as
+     object files or dSYM contents are data), then the main executable is signed with its
+     bundle id, digests of `Info.plist` and that file, and for apps and extensions their
+     entitlements (frameworks get none). Code directories use SHA-256, with a SHA-1 one
+     first when the binary targets an OS without SHA-256 support or names none. The CMS
+     signature carries the certificate and, for an Apple-issued certificate, Apple's
+     intermediate and root; the code directory carries the team id. Signing runs on a
+     thread of its own with a 64 MiB stack.
+7. Set directories and executables to 0755 and other files to 0644, verify, then zip
+   `Payload` into `output_ipa` (via `<output>.partial`, symlinks preserved):
+   - `keychain`: `codesign --verify --deep --strict` on the main app; `/usr/bin/zip -qry`.
+   - `files`: for the app and every framework, extension and dylib in it: rcodesign's
+     Mach-O verifier (code and slot digests, CMS signature) on every architecture, the
+     team id, the identifier, the `Info.plist` and `CodeResources` digests, every sealed
+     file's SHA-256 and symlink target, and no file left unsealed (Apple's omissions
+     aside); then the zip crate (Deflate, Unix modes, symlinks as links).
 
 Signing reports its steps (extracting, preparing, signing n of m, verifying, packaging), can be
-cancelled, and returns the new bundle ids, the profiles used, the expiry, and the original and
-dropped entitlements (shown on an app's page before it is installed).
+cancelled (between items; `codesign` and `zip` are killed), and returns the new bundle ids,
+the profiles used, the expiry, and the original and dropped entitlements (shown on an app's
+page before it is installed).
 
 ### kiwi-device
 
@@ -133,14 +199,19 @@ gracefully.
 
 Tailscale is asked through tailscaled's LocalAPI socket (one HTTP request, 10 s timeout):
 `whois?addr=<ip>` for the node and user behind a request (`404` for a non-peer) and
-`status?peers=false` for this Mac's own user and MagicDNS name. Only where the socket does not
-exist (the Mac App Store and standalone Tailscale apps have none) it runs the `tailscale` CLI
-(`whois --json`, `status --json`); the socket is looked for on every call. A socket that exists
+`status?peers=false` for this computer's own user, node (`Self.ID`) and MagicDNS name. Only
+where the socket does not exist (the Mac App Store and standalone Tailscale apps have none)
+it runs the `tailscale` CLI (`whois --json`, `status --json`); the socket is looked for on
+every call. A socket that exists
 but does not answer is an error, not a reason to try the CLI, which would use the same socket.
 
 User agents: Safari `Version/27.0` gives an approximate OS version (the `iPhone OS 18_6` token is
 frozen and is ignored); the OTA installer (`... iOS/27.0.1 model/iPhone19,4 build/24A434 ...`)
-gives the exact OS version and model.
+gives the exact OS version and model; Kiwi's Android app
+(`Kiwi-Android/1.2.0 (12; Android 15; SDK 35; Google Pixel 9a)`) the Android release.
+`user_agent_platform` tells the platform of a client also when it reports no version (Chrome
+on iOS, the Home Screen app); desktop browsers, an iPad asking for desktop sites among them,
+tell none.
 
 ### kiwi-push
 
@@ -155,23 +226,43 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
 
 - axum on `127.0.0.1:8742` (`--listen`). Only `tailscale serve` exposes it.
 - Flags (each also an environment variable, `KIWI_<FLAG>`): `--data-dir` (default
-  `~/Library/Application Support/Kiwi`), `--web-dir` (default `<exe dir>/web`),
-  `--public-url` (default `https://<this Mac's MagicDNS name>`, asked from Tailscale at start;
-  without Tailscale, the listen address with a warning; also the only host name requests may
-  use besides the listen address, see "Security"), `--tailscale-socket` (tailscaled's
-  LocalAPI, default `/var/run/tailscaled.socket`), `--tailscale-bin` (the CLI, used without
-  that socket; default `/opt/homebrew/bin/tailscale`), `--owner` (the owner's Tailscale
-  login, see "The owner"), `--allow-simulators` (treat simulators as linkable devices, for
-  testing only). `install.sh` passes the address and the Tailscale CLI it found explicitly.
+  `~/Library/Application Support/Kiwi` on macOS, `$XDG_DATA_HOME/kiwi` or
+  `~/.local/share/kiwi` elsewhere), `--web-dir` (default `<exe dir>/web`),
+  `--public-url` (default `https://<this computer's MagicDNS name>`, asked from Tailscale at
+  start; when Tailscale can't name it yet, because tailscaled is still starting, its socket
+  doesn't exist yet or it isn't logged in, Kiwi warns, answers only on the listen address and
+  keeps asking in the background, every 2 s and then less often, up to every 30 s, until it
+  takes the name: allowed hosts, links and the Web Push subject switch to it without a
+  restart; also the only host name requests may use besides the listen address, see
+  "Security"), `--tailscale-socket` (tailscaled's LocalAPI, default
+  `/var/run/tailscaled.socket` on macOS and `/var/run/tailscale/tailscaled.sock` on Linux),
+  `--tailscale-bin` (the CLI, used without that socket; default
+  `/opt/homebrew/bin/tailscale` on macOS, `/usr/bin/tailscale` on Linux), `--owner` (the
+  owner's Tailscale login, see "The owner"), `--python` (runs Kiwi Builds' runners; default
+  `/opt/homebrew/bin/python3.13` on macOS, `python3` elsewhere), `--proxy-uid` (not on
+  macOS: the user tailscaled runs as, as `/proc/net/tcp` shows it to Kiwi; default 0, root;
+  see "Security"), `--trust-local` (take every user and program on the computer for the
+  owner, as on a Mac: for development without Tailscale, or a computer only the owner uses;
+  off by default), `--allow-simulators` (treat simulators as linkable devices, for testing
+  only).
+  `install.sh` passes the address and the Tailscale CLI it found explicitly.
+- The App Store country, until the owner picks one, is the region of the Mac's locale
+  (`AppleLocale`), elsewhere of the first of `LC_ALL`, `LC_MESSAGES` and `LANG` that names
+  one (`nl_NL.UTF-8` -> `nl`), else `us`.
 - SQLite (`rusqlite`, bundled) at `<data>/kiwi.db`, migrations embedded and versioned.
 - Data layout: `downloads/<sha256>.ipa` (content addressed), `builds/<build_id>/<Name>.ipa`,
   `work/` (temporary, cleared at start), `icons/<sha256(url)>.png`, `vapid.json` (0600),
-  `automation/` (Kiwi Builds), `kiwi.lock`.
+  `signing/` (0700: `identity`, the `.p12` with its password, 0600, on `files` hosts;
+  uploaded `profiles/<uuid>.mobileprovision` on every host),
+  `automation/` (Kiwi Builds; `automation/android/signer.json` names the certificate of the
+  Android signing key), `android-app/` (Kiwi's Android app, `kiwi.apk` + `kiwi.json`, written
+  by the Android runner's `kiwi-app` command; `unsigned/` holds the owner's own builds),
+  `kiwi.lock`.
 - At start Kiwi takes an exclusive lock on `<data>/kiwi.lock` before any startup cleanup
   (clearing `work/`, failing interrupted builds); a second instance exits with an error
   instead of damaging the running one.
 - Logging with `tracing` to stdout/stderr (LaunchAgent redirects to
-  `~/Library/Logs/Kiwi/kiwi.log`).
+  `~/Library/Logs/Kiwi/kiwi.log`; on Linux the journal, in Docker the container log).
 
 ### State
 
@@ -187,10 +278,15 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
   App Store app has the bundle id), name, developer, version, released_at, icon_url,
   store_url, checked_at.
 - `devices`: id (`ts:<StableID>` or `local:<random>`), kind, name, tailscale_name,
-  os_version + os_version_source (`devicectl` > `installer` > `manual` > `safari`), model,
-  devicectl_id (link to a paired CoreDevice), udid, person_id (the device's Tailscale user:
-  their login, or `node:<StableID>`; `NULL` for browser devices on the Mac and devices from
-  before Kiwi recorded users), first_seen, last_seen.
+  os_version + os_version_source (`devicectl` > `installer` > `manual` > `android_app` >
+  `safari` = `android`), model, devicectl_id (link to a paired CoreDevice), udid, person_id
+  (the device's Tailscale user: their login, or `node:<StableID>`; `NULL` for browser
+  devices on the Mac and devices from before Kiwi recorded users), platform (`ios` |
+  `android`, only the owner's choice), detected_platform (the first platform Tailscale or a
+  User-Agent reported), onboarded_at (first-run setup done), first_seen, last_seen.
+- `foreign_packages`: per device, the packages of Kiwi's Android apps its Android app
+  reported installed with another signature (device_id, package, seen_at); each report
+  replaces them.
 - `builds`: device-independent signed artifacts. id, source_id, bundle_id (original),
   version, build, release JSON, artifact_sha256, signed_bundle_id, url_scheme,
   identity_sha1, profile_uuids, expires_at, ipa_path, size, status
@@ -214,21 +310,48 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
   already had apps added keeps it on.
 - `meta`: also `owner_login` (the last owner Tailscale reported).
 - Schema 5 dropped the family's `people`, `app_access`, `registrations`, `enrollments` and
-  `builds.devices`.
+  `builds.devices`. Schema 6 added the device platform columns: detected_platform from the
+  model (`Android`, `iPhone…`/`iPad…`/`iPod…`) or an iOS OS version source, and
+  onboarded_at (= first_seen) for devices with an install, an attempt or a push
+  subscription, so devices in use are not sent through the first-run setup.
 
 ### Device identification
 
-Requests come from `tailscale serve` on loopback. When the peer is loopback and
-`X-Forwarded-For` is present, take the client IP, resolve it with tailscaled's whois
-(cache 10 min) and use device `ts:<StableID>`; Safari and the Home Screen app on the same
-phone therefore share one device. When whois fails (error or timeout, as opposed to "not a
-peer"), it is retried once, then the request fails with `503 device_unidentified` rather
-than splitting the phone into a cookie device; requests from that address fail the same
-way for 15 s without running whois again. Otherwise use (and set) a `kiwi_device`
-cookie (`local:<random>`); the web app sends `/api/me` first so concurrent first requests
-do not each create one, and cleanup deletes `local:` devices without installs, attempts or
-push subscriptions that were not seen for 24 h. Update `last_seen`, the Tailscale name and,
-from the User-Agent, the OS version (never downgrading the source priority).
+Requests come from `tailscale serve` on loopback. `peers::origin` decides where a request
+comes from (`config::LocalTrust`, see "Security"): when the peer is loopback, carries
+`X-Forwarded-For` (the rightmost entry of the last header, the one the proxy added) and, off
+macOS (without `--trust-local`), its connection belongs to tailscaled's user
+(`--proxy-uid`), take that client IP, resolve it with tailscaled's whois (cache 10 min) and
+use device `ts:<StableID>`; Safari and the Home Screen app on the same phone therefore share
+one device. When whois fails (error or timeout, as opposed to "not a peer"), it is retried
+once, then the request fails with `503 device_unidentified` rather than splitting the phone
+into a cookie device; requests from that address fail the same way for 15 s without running
+whois again. Otherwise, on a Mac (or with `--trust-local`), use (and set) a `kiwi_device`
+cookie (`local:<random>`): a browser on the Mac; the web app sends `/api/me` first so
+concurrent first requests do not each create one, and cleanup deletes `local:` devices
+without installs, attempts or push subscriptions that were not seen for 24 h. On other
+computers there is no cookie device: a request without a trusted forwarded address, one
+whose address whois doesn't know, and one from the computer's own Tailscale node (whois
+`StableID` = `Self.ID` of tailscaled's status, cached 10 min; reachable by any local user
+through the computer's tailnet address) get `403 not_owner` before any device is made
+(`owner::not_on_this_computer`). Update `last_seen`, the Tailscale name and, from the
+User-Agent, the OS version (never downgrading the source priority). Kiwi's Android app is
+identified the same way, so it and the phone's browser are one device; `Ctx.client` tells
+them apart by the User-Agent.
+
+### Device platforms
+
+A device's platform (`devices::platform`) is the owner's choice (`devices.platform`), else
+the first platform Tailscale (the node's OS: `iOS`, `android`) or a User-Agent
+(`kiwi_device::user_agent_platform`) reported (`detected_platform`, written only while
+empty: an iPhone never turns into an Android device, and an Android client's OS version
+is ignored on an iPhone and the other way round), else iOS. Desktop browsers report
+nothing; the owner chooses in the first-run setup. The device profile
+(`devices::device_profile`) carries the platform, so Browse, compatibility, `prepare`, the
+warnings, the scheduler's updates and notifications all follow it; an unknown OS version
+(an empty one in the profile) only checks the platform. `/api/me` also reports
+`features`, what the clients show on the device (`routes::features`), and `host`, the
+computer Kiwi runs on (`ios_signing` is `keychain` on macOS, `files` elsewhere).
 
 Device rows are changed with targeted updates of the columns each operation owns (request
 bookkeeping, rename, manual OS version, link/unlink, devicectl sync), never by writing back
@@ -245,9 +368,15 @@ device records its Tailscale user from whois (`UserProfile.LoginName`) in `perso
 
 The `Ctx` extractor every API handler but `/api/health` takes answers `403 not_owner` for a
 device whose user is not the owner (also while the owner is unknown, when only browser
-devices on the Mac get in), so other people on the tailnet can't browse, install, sign or
+devices on a Mac get in), so other people on the tailnet can't browse, install, sign or
 change anything. The message names the owner, or says to pass `--owner` for a tagged Mac.
-The scheduler likewise prepares updates and sends notifications only for the owner's devices.
+Devices without a recorded user count as the owner's when they came through Tailscale
+(before Kiwi recorded users) or are browser devices on a Mac. On other computers, which
+other users and services may share, a request made on the computer itself is nobody's (see
+"Device identification"), and so is a browser device left from before; the message says
+to open Kiwi's Tailscale address on one of the owner's devices. The scheduler likewise
+prepares updates and sends notifications only for the owner's devices, and Kiwi signs its
+Android app only for an Android device of the owner's.
 
 ### Android devices
 
@@ -256,11 +385,12 @@ Kiwi installs on Android only what Kiwi Builds made: a patched app the Android r
 to it (no `codesign`, profiles, expiry, manifest or URL scheme), and the model is kept
 small:
 
-- **Which device.** `devices.model` is `Android` (`kiwi_device::ANDROID_MODEL`) for a
-  device that Tailscale reports as Android or whose browser sends an Android User-Agent,
-  set only while no model is recorded. Chrome's User-Agent hides the OS version
-  ("Android 10; K"), so `os_version` usually stays empty; Firefox reports it (source
-  `android`, the priority of `safari`). The device profile's platform is `android`.
+- **Which device.** One whose platform is `android` (see "Device platforms").
+  `devices.model` is `Android` (`kiwi_device::ANDROID_MODEL`) for a device detected as
+  Android, set only while no model is recorded. Chrome's User-Agent hides the OS version
+  ("Android 10; K"), so a browser alone usually leaves `os_version` empty; Firefox reports
+  it (source `android`, the priority of `safari`), Kiwi's Android app the exact release
+  (source `android_app`). The device profile's platform is `android`.
 - **Which apps.** A release names its platforms; one that names none is an iOS release.
   Kiwi Builds publishes Android releases with platform `Android`, no `min_os` and the
   artifact `automation/artifacts/<sha256>.apk`. Browse leaves out the apps of the other
@@ -273,14 +403,68 @@ small:
   are refused.
 - **The install.** `install_url` is `<public>/ota/<token>/app.apk`. The browser downloads
   the APK and the owner opens it with Android's installer. Kiwi cannot observe that step,
-  so the completed download is the install, as for an IPA. There is no `open_url`.
+  so the completed download is the install, as for an IPA. There is no `open_url`. The
+  Android app (see "Android app") installs the APK itself and reports the installed packages.
 - **Updates.** A newer revision is an `update` like any other; Android accepts it over the
   installed app because every build carries the same signature.
+- **What is installed.** Kiwi's Android app reports the phone's packages
+  (`PUT /api/me/packages`). `android::reconcile_packages` turns the report into the
+  `DeviceApp`s of a devicectl sync and reuses `devices::reconcile`: packages of Kiwi Builds'
+  Android apps signed with Kiwi's key are verified installs (or `device` installs), missing
+  ones are marked removed (after the same 10-minute grace for a fresh download), and the
+  ones signed with another key are saved in `foreign_packages` (`AppState.foreign_install`).
+  When Kiwi's Android app downloaded the APK (the attempt's User-Agent is `Kiwi-Android/…`,
+  `android::app_downloads`), it installs it at once and reports right after, inside the
+  grace period, and Android's install can fail after the download. So Kiwi keeps the
+  device's last report in memory (`android::PackageReports`) while such an install waits
+  for it, with only the packages of the waiting installs, and, every minute, applies it to
+  those unverified `kiwi` installs that completed before it and whose grace period has
+  ended since (`android::settle_reports`): a package the report lacked is removed then,
+  without waiting for the next report. A report nothing waits for any more, or of a
+  deleted device, is dropped. A browser download is not settled this way: the owner opens
+  it in Android's installer whenever they like, possibly after a report, so only a report
+  made after its grace period decides. Reports and settling read, reconcile and write the
+  device's installs in one SQLite transaction holding the connection
+  (`Db::change_installs`, `Db::save_package_report`), as the devicectl sync does, so a
+  download completed meanwhile is never overwritten with a row read before it.
+  Kiwi's key is the certificate SHA-256 the Android runner writes to
+  `automation/android/signer.json` whenever it loads the key (before that, the `signer`
+  of a published build's provenance); without either only removals are recorded. `/api/me`
+  reports the same fingerprint as `host.android_signer_sha256`, for Settings on Android.
+- **Kiwi's own app.** `android::AndroidAppCache` reads `android-app/kiwi.json`, checks
+  the package, version, size and SHA-256 of `kiwi.apk` against it (again only when either
+  file's size or modification time changes) and offers it as `Me.android_app`;
+  `/android/kiwi.apk` serves it to the owner's devices with `Range` support (the OTA
+  routes' `ota::send_file`). The route wins over the web app's files, and missing `.apk`
+  paths are 404s rather than the app shell.
+- **Delivering it.** The project publishes the app unsigned (`android-release.yml`);
+  `automation/kiwi-app.json` pins a release (URL, SHA-256, size; `null` before the first).
+  `kiwi_app::tick` (at startup and every minute, while Kiwi Builds is on and the owner has
+  an Android device or an added Android recipe) computes an input key over the pinned
+  release's digest and the name, size and time of each APK in `android-app/unsigned/`.
+  When `kiwi.json` does not carry that key (its `input`) or another signer than
+  `signer.json`, it queues the Android runner's `kiwi-app` command on Kiwi Builds' worker
+  (`automation::start_next` runs it before the next build; one job at a time). The runner
+  signs the newest local APK, else the downloaded and checked pinned one, with the Kiwi
+  Builds key (`apksigner` from pinned build-tools, v2 + v3), verifies it and replaces
+  `kiwi.apk` and `kiwi.json`. A failure is logged, kept in memory as the `android_app`
+  warning of Android devices and retried after an hour or when the key changes. See
+  [android-app.md](android-app.md).
 
 The Android runner needs no Mac-specific tool: it downloads a pinned Java runtime, patcher
 and patch bundle, fetches the original app, verifies the publisher's signature over the
 whole file with its own verifier (`automation/apk.py`, standard library only) and emits
 the same events as `runner.py`. Details are in [kiwi-builds.md](kiwi-builds.md#android-apps).
+
+### Kiwi Builds on Linux
+
+The iOS runner needs macOS (Xcode's SDK, FairPlay decryption). `Automation::builds_ios` is
+true on macOS only (tests turn it on with a fake runner); without it, adding or checking an
+iOS recipe answers `409 needs_mac` without starting a runner, the scheduler skips iOS apps
+(an iOS app added on a Mac whose data moved to Linux waits), and the shared setup `checks`
+are a single `{"name":"macOS","ready":false}`. Android recipes build as on a Mac. Both
+runners run with `--python`; the Android runner stops with a blocked error on Python older
+than 3.12.
 
 ### App actions
 
@@ -370,10 +554,13 @@ without one, the same bundle id).
   finished build fails (e.g. a full disk), it is retried once, then the build is marked
   failed and retryable with a minimal update, so it never stays active until a restart.
 - Untrusted input is bounded before it is parsed: JSON5 feeds nested deeper than 128
-  levels are rejected, and plists from an IPA (Info.plist, entitlements; at most 4 MiB)
-  deeper than 64 levels or with more than a million values, so a hostile file cannot
-  overflow the stack. Downloads may take 20 minutes plus 1 s per 128 KiB of their size
-  (stalls fail after 30 s without data) and are flushed to disk before they are cached.
+  levels are rejected, and plists from an IPA (Info.plist, entitlements; at most 4 MiB) or
+  a provisioning profile (uploaded or in Xcode's folders) deeper than 64 levels or with
+  more than a million values, so a hostile file cannot overflow the stack. Of the code
+  signatures already in an IPA, Kiwi reads only the entitlements of apps and extensions,
+  checked the same way. Signing uploads are checked on blocking threads. Downloads may
+  take 20 minutes plus 1 s per 128 KiB of their size (stalls fail after 30 s without data)
+  and are flushed to disk before they are cached.
 - A cached download is reused only while its SHA-256 matches its name; a damaged one is
   deleted and downloaded again, as is one that `sign_ipa` cannot extract.
 - External tools have deadlines: `codesign` 10 minutes per call (a keychain prompt blocks
@@ -381,7 +568,9 @@ without one, the same bundle id).
   reported unavailable, keeping the known profiles).
 - Scheduler tick every minute:
   - when Kiwi Builds is on, queue the added apps whose check is due (see
-    [kiwi-builds.md](kiwi-builds.md));
+    [kiwi-builds.md](kiwi-builds.md)), and sign Kiwi's Android app again when its input
+    changed (see "Android devices");
+  - apply Android devices' last package reports to installs whose grace period ended;
   - refresh enabled sources older than `refresh_interval_minutes` (conditional requests;
     `last_attempt_at` is written before the fetch, so a fetch that crashes the server is
     not repeated right after the restart);
@@ -410,8 +599,10 @@ without one, the same bundle id).
   - every `devicectl_sync_minutes` when `devicectl_sync`: for each device linked to a
     reachable CoreDevice, list apps, mark Kiwi installs present (`verified`) or removed,
     record apps from enabled sources installed outside Kiwi (origin `device`), and take
-    the OS version; auto-link when exactly one physical paired device and one Kiwi device
-    exist. A Kiwi install completed in the last 10 minutes is neither marked removed nor
+    the OS version; auto-link when exactly one physical paired device and one iOS device
+    (by its platform, "Device platforms") exist. Devices of another platform are never
+    linked (`PATCH /api/devices/:id` refuses it with `400`) nor synced, also when linked
+    before. A Kiwi install completed in the last 10 minutes is neither marked removed nor
     given (or verified with) another listed version: iOS may still be replacing the old
     one;
   - cleanup: after 7 days, delete builds not referenced by a current install, except the
@@ -438,6 +629,25 @@ subscriptions made with the old key are deleted (each device subscribes again).
   with HTTPS to the tailnet only. `install.sh` refuses to install while Funnel is on for the
   Mac's name and never replaces another `/` mapping. Within the tailnet, only the owner's
   devices may use the API (see "The owner").
+- Who is on the other end of a loopback connection (`peers`, `config::LocalTrust`): a Mac is
+  its owner's alone, so Kiwi trusts `X-Forwarded-For` from any loopback connection and a
+  request without it is the owner's browser (`LocalTrust::Anyone`; elsewhere only with
+  `--trust-local`, which Kiwi warns about at start). Other computers may have other users
+  and services, which can all reach the loopback port. There Kiwi trusts `X-Forwarded-For`
+  only from connections whose client socket belongs to tailscaled's user (`--proxy-uid`,
+  `KIWI_PROXY_UID`, default 0: tailscaled runs as root). It finds that user in the kernel's
+  socket tables of its network namespace (`/proc/net/tcp` and `/proc/net/tcp6`, read through
+  `/proc/self/net`): the open socket (inode not 0, so not a time-wait or orphaned one, which
+  the kernel reports as root's) whose local address is the client's and whose remote address
+  is Kiwi's end of the connection, comparing IPv4-mapped IPv6 addresses as IPv4. The answer
+  is kept for the connection, which `tailscale serve` reuses. When the connection can't be
+  found or the tables can't be read, Kiwi logs it and trusts nothing. A request that isn't
+  trusted this way, or that comes from the computer's own Tailscale node (any local user can
+  reach `tailscale serve` through the computer's tailnet address), is nobody's:
+  `403 not_owner` on every endpoint but `/api/health`, and no device. In Docker, the Tailscale
+  container's tailscaled runs as root and shares Kiwi's network namespace, so the default
+  fits; with user namespaces that map the containers differently, Kiwi logs the uid it saw
+  ("ignored X-Forwarded-For … uid N") and `KIWI_PROXY_UID=N` names it.
 - Requests must name the public URL's host or the listen address
   (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`) in `Host`, and an
   `X-Forwarded-Host` must be the public host; otherwise `421 bad_host`. A DNS-rebinding
@@ -471,11 +681,73 @@ Four tabs; routes: `/` (Browse), `/apps` (My Apps), `/sources`, `/settings`, `/s
 `/settings/device`, `/settings/notifications` and `/app/:sourceId/:bundleId`. `/updates` and `/library` (the earlier Updates and Library tabs,
 still used by older notifications) open My Apps.
 
+What a device shows follows `Me.features` (`hasFeature`/`useFeatures`, `web/src/lib/features.ts`),
+not checks of the platform scattered through the screens:
+
+- `ios_apps` (an iPhone): the tabs above; Kiwi Builds lists the iPhone recipes.
+- `android_apps` (Android): **Builds** (`/builds`, a wrench) replaces Sources as the third tab
+  (`tabsFor`, `web/src/lib/routes.ts`), because AltStore sources list iPhone apps: `/sources`
+  redirects there, and AltStore sources, apps from links and the add-source sheet are not
+  reachable (Kiwi Builds' own source page is, from Builds). Kiwi Builds lists only the Android
+  recipes, without the Mac's setup, and offers to turn Kiwi Builds on when it is off. Browse
+  keeps to Android apps (with hidden apps the API lists every platform's) and has no source
+  picker. Settings has no Signing or Mac sections: This Phone (the device, Notifications, the
+  Kiwi app), "Android Signing Key" (the certificate's fingerprint, `Me.host.android_signer_sha256`,
+  and where to back the key up; the key itself never leaves the server), Kiwi Builds' switch
+  and Notify About Updates.
+- `android_app_offer` (a browser on a device detected as Android; not a desktop browser or an
+  iPhone whose owner chose Android, which can't install an APK): a slim "Get the Kiwi app" card
+  on top of Browse (dismissed for good in `localStorage`) and a Kiwi App row in Settings, both
+  downloading `android_app.install_url`. The router and the service worker leave `/android/`
+  to the server, like `/api` and `/ota`.
+- `devicectl`: the Linked Mac Device and Sync rows and Sync with devicectl in This iPhone.
+- `home_screen_app`: Browse's Add to Home Screen hint. `web_push`: the Notifications row and
+  re-registering a lost push subscription.
+
+An app whose package Android has from another publisher (`AppState.foreign_install`) shows
+"Another <Name> is installed with a different signature. Remove it first, then install
+Kiwi's." in amber on its page and under its row in My Apps.
+
+First-run setup (`web/src/screens/Onboarding.tsx`, `web/src/lib/onboarding.ts`): while
+`Me.onboarded` is false it replaces the tabs. It asks "iPhone or iPad" or "Android phone or
+tablet" in two radio cards, preselecting an earlier choice or `device.detected_platform`;
+with nothing detected (a desktop browser) nothing is preselected, Continue waits, the copy
+asks "Which device do you use Kiwi on?" and the cards sit side by side from 760 px. Continue
+sends `PATCH /api/me {platform}`, the detected platform too, so it becomes the owner's
+choice. Then, by platform:
+
+- iPhone: "Set Up This iPhone": the Add to Home Screen steps when not standalone,
+  Notifications (turned on with the usual push flow in the Home Screen app; in Safari it says
+  they need the Home Screen app) and whether this Kiwi can sign, from the signing warnings and
+  `/api/signing` ("Signing ready … until <date>", or in amber "Signing isn't set up on this
+  Kiwi yet"). "Continue in Safari", or "Done" in the Home Screen app.
+- Android with `android_app`, on a device detected as Android: "Set Up This Phone": the Kiwi
+  app card with the one filled button (Download Kiwi for Android), three steps, and "Continue
+  in the Browser". Downloading completes the setup too, in the background.
+- Android without `android_app` or on another device, or a desktop browser: nothing to set up;
+  Continue sends the platform with `onboarded: true`. The Android card only promises the Kiwi
+  app where it is offered.
+
+The setup page is a history entry of its own at the same address (`pushStep` in
+`web/src/lib/router.ts`), so the system Back returns to the question instead of leaving Kiwi
+and Forward opens the page again; the in-page Back pops it too. When the setup ends, the entry
+is popped, and a step left in the current entry (a reload) is forgotten when the setup starts,
+so Back from the tabs never lands on a setup page.
+
+Finishing sends `PATCH /api/me {onboarded: true}` and the tabs appear. Settings has "Show
+Setup Again" (`onboarded: false`) and This iPhone/This Phone a Device Type picker
+(`platform`). `MeProvider` counts every change to Me (a `PATCH /api/me` answer or a reload)
+and drops a reload's answer when Me changed while it was on its way, so a reload that left
+before a choice can't undo it (`web/src/lib/me-loader.ts`).
+
 Warnings appear where they are fixed rather than as banners on every screen: an expiring
 app in My Apps (its re-sign is an update, so the badge counts it), a failed source in Sources,
 signing problems and an unknown iOS version in Settings. Sources and Settings get a dot on
-their tab (amber, or red when signing is impossible); only warnings that stop every install
-(no identity or profile) also show on Browse.
+their tab (amber, or red when signing is impossible), and the tab shows why: a Settings
+warning without a row of its own (on Android, Kiwi's Android app that couldn't be prepared,
+`android_app`) is listed in This Phone with its message, in amber, and Android's Kiwi card
+says "Kiwi app not ready" (`listedSettingsWarnings`, `web/src/lib/warnings.ts`). Only
+warnings that stop every install (no identity or profile) also show on Browse.
 
 - Browse: the large title, search, then "Fresh This Week": a shelf of cards in each app's
   colour with its button, for releases from the last week that still need something (updates
@@ -487,7 +759,10 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
   re-sign, the version change of an update, "Replaces <name> (<source>)", why it is
   unavailable, "Based on <App Store name>", or the subtitle. The button shows the rest of the
   state. Under the list, "N apps hidden · Show" lists the hidden apps dimmed, each with a Show
-  button; searches list hidden matches in a "Hidden" group after the others.
+  button; searches list hidden matches in a "Hidden" group after the others. Browse always
+  asks for hidden apps and counts them from the list kept to this device's platform (a
+  source's own counts include other platforms' apps). A search on Android with every source
+  off says "No Results", not the iPhone's "Add a Source" welcome.
 - App page: the top takes the app's colour and fades into the page: a centred icon, name,
   subtitle, developer and source, a wide action button with the version change
   ("21.43.5 → 21.44.0") and its status (step, error, what it replaces, why it is
@@ -532,13 +807,29 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
 - Another person's device: once `/api/me` answers `403 not_owner`, "Not Your Kiwi" with the
   server's message replaces the tabs.
 - Settings is a short index: Kiwi's card (deep green with a slowly turning kiwi slice, the
-  version, public host, and whether signing is ready, with a pulse, or expiring), this iPhone (iOS version, amber when unknown) and Notifications (on or
+  version, public host, and whether signing is ready, with a pulse, or expiring; on Android
+  whether Android builds are ready, or a listed warning), this iPhone (iOS version, amber when unknown) and Notifications (on or
   off), the Mac (Signing with its expiry, App Store country),
   Updates (source refresh interval, auto-prepare updates, notify on updates/expiry, remove
-  watch apps) and Kiwi Builds (a switch that asks for confirmation before turning it on). Sub-pages: Signing (ready or why not, the certificates, the profiles named by
-  App ID with expiry and entitlements, Rescan), This iPhone (name, iOS version and where it
-  came from, model, Tailscale name, linked Mac device, Sync Now, devicectl sync, device ID)
-  and Notifications (enable, test, disable).
+  watch apps), Kiwi Builds (a switch that asks for confirmation before turning it on; on a
+  Kiwi that doesn't run on macOS its footer and confirmation say plainly that iPhone apps can
+  only be built on a Mac and that Kiwi Builds makes Android apps there) and
+  Show Setup Again; Android's sections are above. Sub-pages: Signing (ready or why not, the certificates, the profiles named by
+  App ID with expiry and entitlements, Rescan; "Upload Profile…" and Remove for uploaded
+  profiles. On a Kiwi that signs with uploaded files (`Signing.backend: "files"`): "Signing
+  Isn't Set Up" in amber until an identity and a profile are uploaded, then "Signing
+  Identity" (the identity with In Use, team and expiry, "Remove Identity" after a
+  confirmation, "Upload .p12…" with the Keychain Access export hint and a link to
+  signing-on-linux.md while there is none or it expires within a month) and "Provisioning
+  Profiles" (each with Remove, "Upload Profile…"), no Rescan. Upload rows are labels round
+  hidden file inputs; the browser checks the size (64 KB for a `.p12`, 1 MB for a profile),
+  reads the file as base64, asks the `.p12`'s password in a sheet, and shows the server's
+  message (wrong password, AES-encrypted `.p12` with the command to convert it) in place.
+  One upload, removal or rescan runs at a time (the other actions wait, dimmed), because each
+  answers with the whole `Signing`. Every upload, removal and rescan reloads `/api/me` for
+  the warnings), This iPhone (device type, name, iOS version and where it
+  came from, model, Tailscale name, linked Mac device, Sync Now, devicectl sync, device ID;
+  "This Phone" on Android, "This Device" in a desktop browser) and Notifications (enable, test, disable).
 - PWA: `manifest.webmanifest` (`display: standalone`, scope `/`), apple-touch-icon and
   icons (a kiwi fruit), `sw.js` (network-first app shell, never caches `/api` or `/ota`,
   push + notificationclick + app badge; when the server answers 5xx, e.g. `tailscale serve`'s
@@ -547,6 +838,51 @@ their tab (amber, or red when signing is impossible); only warnings that stop ev
 - Requests time out (30 s, 2 min for refreshes, syncs and signing scans) so a stuck request
   cannot leave a screen loading forever.
 - Badge: on load and focus, set `navigator.setAppBadge(updates)` or clear it.
+
+## Android app (android/)
+
+A native client for Android phones, next to the web app. It uses the same JSON API, with no
+login: Kiwi identifies the phone by its Tailscale node exactly as for the browser, so Chrome
+and the app on one phone are one device. It sends the User-Agent
+`Kiwi-Android/<versionName> (<versionCode>; Android <release>; SDK <int>; <manufacturer> <model>)`,
+which marks the device Android and carries the Android release Chrome hides. What the web app
+cannot do, it adds:
+
+- **Packages.** It looks up the packages Kiwi asks about with PackageManager
+  (`QUERY_ALL_PACKAGES`, since they change with the catalogue; the app is not distributed
+  through Google Play): its own, the Android apps of `GET /api/apps?hidden=1` and the
+  installs of `GET /api/library`. It reports those that are installed, with their version,
+  signer certificate digests and installer, to `PUT /api/me/packages` at start, after an
+  install and when a package changes, so Kiwi knows what is really installed and which
+  apps are installed with another signature (`AppState.foreign_install`). The phone's other
+  apps are never sent; without both lists nothing is sent.
+- **Installs.** It downloads the APK from `install_url` (only from Kiwi's own host, without
+  following redirects, resuming with `Range` only a partial file of the same URL, version
+  code and size), checks the package name, the version code Kiwi offered, Kiwi's Android
+  signer (`Me.host.android_signer_sha256`, when known) and the signer of an installed copy,
+  and installs it with a PackageInstaller session. Each app has at most one install job at
+  a time, whether a screen or the background worker started it. Sessions ask for
+  `USER_ACTION_NOT_REQUIRED` (Android 12+), which Android grants for updates of apps whose
+  update owner, or without one installer of record, is the app, and for the app's own
+  updates; other installs show Android's confirmation. On Android 14+ a first install also makes
+  the app the package's update owner (`setRequestUpdateOwnership`). Because the phone reports what is
+  installed, the app trusts the phone over Kiwi's download-based guess ("open" with the
+  package missing offers Install again).
+- **Background.** A WorkManager job checks `GET /api/updates` about every two hours on any
+  network, notifies each update once and installs those Android allows without a tap, on
+  an unmetered network with a battery that isn't low. It also
+  notifies Kiwi Builds jobs that finished or failed (`GET /api/automation`), and looks again
+  a few minutes later while a build runs.
+- **Kiwi Builds.** A Builds tab adds and removes Kiwi Builds' Android apps, changes their
+  patches and schedules, and starts, rebuilds and cancels builds through `/api/automation`;
+  while Kiwi Builds is off (`409 builds_off`) it offers to turn it on (`PATCH /api/settings`).
+- **Itself.** When `Me.android_app` is newer than the running app, it offers that APK.
+
+Connecting checks `/api/health` and `/api/me` before saving the address; a
+`kiwi://connect?url=<https address>` link only fills it in. The app stores the address and
+its own switches in DataStore and nothing else. Builds and tests run with Gradle (JVM unit
+tests, and screenshots of every screen rendered in Robolectric);
+`android/scripts/build-in-docker.sh` builds in a pinned Android SDK container.
 
 ## Not in scope yet
 

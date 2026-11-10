@@ -51,10 +51,34 @@ export function mockApi(): Plugin {
     configureServer(server) {
       // KIWI_MOCK_BUILDS=simulate runs Kiwi Builds through the Mac's stages instead of stopping at setup.
       const builds = process.env.KIWI_MOCK_BUILDS === "simulate" ? "simulated" : "blocked";
-      // KIWI_MOCK_DEVICE=android answers as an Android phone instead of an iPhone.
-      const device = process.env.KIWI_MOCK_DEVICE === "android" ? "android" : "ios";
-      api = createMockApi(Date.now, { builds, device });
-      const notes = [builds === "simulated" && "simulated Kiwi Builds", device === "android" && "Android device"].filter(Boolean);
+      // KIWI_MOCK_DEVICE=android answers as an Android phone, =desktop as a desktop browser
+      // (no platform detected), instead of an iPhone.
+      const device = ({ android: "android", desktop: "desktop" } as const)[process.env.KIWI_MOCK_DEVICE ?? ""] ?? "ios";
+      // KIWI_MOCK_ONBOARDED=0: the device has not been through the first-run setup yet.
+      const onboarded = process.env.KIWI_MOCK_ONBOARDED !== "0";
+      // KIWI_MOCK_HOST=linux: Kiwi runs on Linux (iOS signing with uploaded files, no devicectl,
+      // Kiwi Builds builds Android apps only).
+      const host = process.env.KIWI_MOCK_HOST === "linux" ? "linux" : "macos";
+      // KIWI_MOCK_ANDROID_APP=0: Kiwi serves no Android app; =failed: signing it failed, and
+      // Android devices are warned about it.
+      const androidApp = ({ "0": false, failed: "failed" } as const)[process.env.KIWI_MOCK_ANDROID_APP ?? ""] ?? true;
+      // KIWI_MOCK_SIGNING=files: signing with uploaded files, as on Linux (the default for
+      // KIWI_MOCK_HOST=linux); =keychain: the Mac's keychain.
+      const signing = ({ files: "files", keychain: "keychain" } as const)[process.env.KIWI_MOCK_SIGNING ?? ""];
+      // KIWI_MOCK_FOREIGN=<package>,...: Android packages installed with another signature.
+      const foreign = (process.env.KIWI_MOCK_FOREIGN ?? "").split(",").filter(Boolean);
+      api = createMockApi(Date.now, { builds, device, onboarded, host, androidApp, foreign, signing });
+      const notes = [
+        builds === "simulated" && "simulated Kiwi Builds",
+        device === "android" && "Android device",
+        device === "desktop" && "desktop browser",
+        !onboarded && "not set up",
+        host === "linux" && "Linux host",
+        signing === "files" && host !== "linux" && "signing with uploaded files",
+        !androidApp && "no Android app",
+        androidApp === "failed" && "Android app failed",
+        foreign.length > 0 && `foreign ${foreign.join(", ")}`,
+      ].filter(Boolean);
       server.config.logger.info(`  Kiwi mock API enabled (VITE_MOCK=1${notes.map((n) => `, ${n}`).join("")})`);
       server.middlewares.use((req, res, next) => {
         const url = new URL(req.url ?? "/", "http://localhost");
@@ -75,7 +99,7 @@ export function mockApi(): Plugin {
           const svg = art[1] === "icon" ? iconSvg(info.name, info.tint) : screenshotSvg(info.name, info.tint, Number(art[3] ?? 1));
           return send(res, 200, "image/svg+xml", svg);
         }
-        if (!["/api/", "/ota/"].some((p) => url.pathname.startsWith(p))) return next();
+        if (!["/api/", "/ota/", "/android/"].some((p) => url.pathname.startsWith(p))) return next();
 
         void (async () => {
           const body = await readBody(req);

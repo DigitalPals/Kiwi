@@ -1,31 +1,70 @@
-//! Signing identities, provisioning profiles and IPA re-signing with Apple's `codesign`.
+//! Signing identities, provisioning profiles and IPA re-signing.
 //!
-//! Parsing, matching and preparation are pure Rust and work everywhere; listing
-//! identities and signing need macOS and return [`Error::Unsupported`] elsewhere.
+//! Two backends sign: on macOS the login keychain and Apple's `codesign`
+//! ([`Backend::Keychain`]), elsewhere an uploaded `.p12` identity and rcodesign's
+//! library, `apple-codesign` ([`Backend::Files`]). Parsing, matching, extraction,
+//! preparation and the dropped-entitlements report are pure Rust and shared by both.
 
 mod archive;
 mod bundle;
 mod cert;
+mod codesign;
 mod der;
 mod entitlements;
+mod files;
 mod identity;
 mod macho;
+#[cfg(not(target_os = "macos"))]
+mod p12;
+mod package;
 mod process;
 mod profile;
+#[cfg(not(target_os = "macos"))]
+mod rcodesign;
 mod sign;
-#[cfg(test)]
-mod testutil;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod testutil;
 
 use std::{io, path::Path};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub use files::{MAX_P12_BYTES, MAX_PROFILE_BYTES, SigningDir};
 pub use identity::{Identity, list_identities};
 pub use profile::{
     Profile, ProfileMatch, default_profile_dirs, load_profiles, parse_profile,
     profile_entitlement_keys, select_profile,
 };
-pub use sign::{SignReport, SignRequest, SignStep, sign_ipa};
+pub use sign::{SignReport, SignRequest, SignStep, sign_ipa, sign_ipa_with_files};
+
+/// How this host signs iOS apps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    /// The login keychain and Apple's `codesign` (macOS).
+    Keychain,
+    /// An uploaded `.p12` identity and rcodesign's library (every other system).
+    Files,
+}
+
+impl Backend {
+    /// The backend of the system Kiwi was built for.
+    pub const fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Keychain
+        } else {
+            Self::Files
+        }
+    }
+}
+
+impl Default for Backend {
+    fn default() -> Self {
+        Self::current()
+    }
+}
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -34,12 +73,16 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub enum Error {
     #[error("Signing was cancelled")]
     Cancelled,
-    #[error("Signing is only available on macOS")]
-    Unsupported,
+    /// The operation belongs to the other [`Backend`].
+    #[error("{0}")]
+    Unsupported(&'static str),
     #[error("{0}")]
     InvalidIpa(String),
     #[error("{0}")]
     InvalidProfile(String),
+    /// An uploaded `.p12` identity (or its password) is unusable.
+    #[error("{0}")]
+    InvalidIdentity(String),
     #[error("{0}")]
     NoProfile(String),
     #[error("{0}")]
@@ -112,11 +155,14 @@ pub(crate) fn check_plist(bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Fails unless this host signs with the keychain and `codesign`.
 pub(crate) fn require_macos() -> Result<()> {
-    if cfg!(target_os = "macos") {
+    if Backend::current() == Backend::Keychain {
         Ok(())
     } else {
-        Err(Error::Unsupported)
+        Err(Error::Unsupported(
+            "The keychain and codesign are only available on macOS; Kiwi signs with an uploaded identity here",
+        ))
     }
 }
 
@@ -133,5 +179,19 @@ mod tests {
             url_scheme_for(&id),
             url_scheme_for("com.example.A1B2C3D4E5")
         );
+    }
+
+    #[test]
+    fn backend_follows_the_platform() {
+        let expected = if cfg!(target_os = "macos") {
+            "\"keychain\""
+        } else {
+            "\"files\""
+        };
+        assert_eq!(
+            serde_json::to_string(&Backend::current()).unwrap(),
+            expected
+        );
+        assert_eq!(Backend::default(), Backend::current());
     }
 }

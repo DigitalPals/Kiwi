@@ -8,7 +8,10 @@ use std::{
     io::Read,
     path::PathBuf,
     process::Stdio,
-    sync::{Arc, LazyLock, Mutex, RwLock},
+    sync::{
+        Arc, LazyLock, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -327,6 +330,11 @@ pub struct Automation {
     pub runner: RwLock<PathBuf>,
     /// The runner of Android recipes; injectable like `runner`.
     pub android_runner: RwLock<PathBuf>,
+    /// Whether iOS apps can be built here: their runner needs macOS (Xcode's tools and
+    /// decryption on the Mac). Tests elsewhere turn it on along with a fake runner.
+    pub builds_ios: AtomicBool,
+    /// Signing Kiwi's own Android app, which shares the worker with the builds.
+    pub kiwi_app: Mutex<crate::kiwi_app::Status>,
 }
 impl Automation {
     pub fn load(db: &Db, data: &std::path::Path) -> Result<Self, String> {
@@ -379,6 +387,7 @@ impl Automation {
             ("android.py", ANDROID_RUNNER),
             ("apk.py", APK_READER),
             ("android.json", ANDROID_RECIPES),
+            ("kiwi-app.json", crate::kiwi_app::PIN),
         ] {
             let path = root.join(name);
             if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
@@ -397,10 +406,33 @@ impl Automation {
             running: Mutex::new(None),
             runner: RwLock::new(root.join("runner.py")),
             android_runner: RwLock::new(root.join("android.py")),
+            builds_ios: AtomicBool::new(cfg!(target_os = "macos")),
+            kiwi_app: Mutex::default(),
         })
     }
     pub fn snapshot(&self) -> State {
         self.state.lock().unwrap().clone()
+    }
+    /// Whether this Kiwi can build the recipe's app (iOS apps only on a Mac).
+    pub fn can_build(&self, recipe: &Recipe) -> bool {
+        recipe.android() || self.builds_ios.load(Ordering::Relaxed)
+    }
+    /// `409 needs_mac` for an iOS app on a Kiwi that does not run on macOS.
+    fn require_buildable(&self, recipe: &Recipe) -> ApiResult<()> {
+        if self.can_build(recipe) {
+            Ok(())
+        } else {
+            Err(ApiError::needs_mac())
+        }
+    }
+    /// The shared iOS setup checks: what the last iOS job found, or, where iOS apps cannot
+    /// be built, only the missing Mac.
+    pub fn checks(&self, state: &State) -> Vec<Value> {
+        if self.builds_ios.load(Ordering::Relaxed) {
+            state.checks.clone()
+        } else {
+            vec![json!({"name": NEEDS_MAC_CHECK, "ready": false})]
+        }
     }
     fn change<T>(&self, db: &Db, edit: impl FnOnce(&mut State) -> ApiResult<T>) -> ApiResult<T> {
         let mut current = self.state.lock().unwrap();
@@ -454,9 +486,13 @@ impl Automation {
     }
 }
 
+/// The name of the setup check that is never ready where iOS apps cannot be built.
+pub const NEEDS_MAC_CHECK: &str = "macOS";
+
 /// Adds an app to Kiwi Builds with these preferences and queues its first build.
 pub fn add(kiwi: &Arc<Kiwi>, id: &str, mut preferences: Preferences) -> ApiResult<()> {
     let recipe = recipe(id)?;
+    kiwi.automation.require_buildable(recipe)?;
     preferences.validate(recipe)?;
     kiwi.automation.app(&kiwi.db, id, |a| {
         a.added = true;
@@ -512,6 +548,7 @@ pub fn cancel(kiwi: &Kiwi, id: &str) {
 /// Queues a check (and build, when anything changed) of an added app.
 pub fn queue(kiwi: &Arc<Kiwi>, id: &str, force: bool) -> ApiResult<()> {
     let recipe = recipe(id)?;
+    kiwi.automation.require_buildable(recipe)?;
     let mut bytes = [0u8; 12];
     getrandom::fill(&mut bytes).map_err(ApiError::internal)?;
     let job_id = hex::encode(bytes);
@@ -572,10 +609,19 @@ pub fn queue(kiwi: &Arc<Kiwi>, id: &str, force: bool) -> ApiResult<()> {
     Ok(())
 }
 
-/// Starts the oldest queued job unless one is running.
-fn start_next(kiwi: &Arc<Kiwi>) {
+/// Starts the oldest queued job unless one is running. Signing Kiwi's own Android app,
+/// when it is due, goes first: it takes seconds.
+pub(crate) fn start_next(kiwi: &Arc<Kiwi>) {
     let mut running = kiwi.automation.running.lock().unwrap();
     if running.is_some() {
+        return;
+    }
+    if let Some(key) = crate::kiwi_app::take_pending(kiwi) {
+        let token = kiwi.cancel.child_token();
+        *running = Some((crate::kiwi_app::JOB_ID.into(), token.clone()));
+        kiwi.jobs
+            .tracker
+            .spawn(crate::kiwi_app::work(kiwi.clone(), key, token));
         return;
     }
     let next = kiwi.automation.change(&kiwi.db, |s| {
@@ -616,6 +662,25 @@ pub fn cancel_all(kiwi: &Kiwi) {
     for recipe in recipes() {
         cancel(kiwi, &recipe.id);
     }
+    crate::kiwi_app::cancel(kiwi);
+}
+
+/// Cancels the job the worker runs, if it is `id`.
+pub(crate) fn cancel_running(kiwi: &Kiwi, id: &str) {
+    let running = kiwi.automation.running.lock().unwrap();
+    if let Some((job, token)) = running.as_ref()
+        && job == id
+    {
+        token.cancel();
+    }
+}
+
+/// Frees the worker after the job `id` ended.
+pub(crate) fn finish_running(kiwi: &Kiwi, id: &str) {
+    let mut running = kiwi.automation.running.lock().unwrap();
+    if running.as_ref().is_some_and(|(job, _)| job == id) {
+        *running = None;
+    }
 }
 
 pub fn tick(kiwi: &Arc<Kiwi>) {
@@ -627,11 +692,12 @@ pub fn tick(kiwi: &Arc<Kiwi>) {
         let due = app.last_checked_at.is_none_or(|t| {
             Utc::now() - t >= chrono::Duration::minutes(i64::from(app.preferences.interval_minutes))
         });
+        // An iOS app added on a Mac whose data moved to Linux waits for a Mac quietly.
         if app.added
             && app.preferences.enabled
             && due
             && !state.jobs.iter().any(|j| &j.app == id && j.active())
-            && recipe(id).is_ok()
+            && recipe(id).is_ok_and(|r| kiwi.automation.can_build(r))
             && let Err(e) = queue(kiwi, id, false)
         {
             tracing::warn!(app = %id, "could not queue a build: {e}");
@@ -693,12 +759,7 @@ async fn work(kiwi: Arc<Kiwi>, job: Job, token: CancellationToken) {
             .join(format!("{}.request.json", job.id)),
     )
     .await;
-    {
-        let mut running = kiwi.automation.running.lock().unwrap();
-        if running.as_ref().is_some_and(|(id, _)| id == &job.id) {
-            *running = None;
-        }
-    }
+    finish_running(&kiwi, &job.id);
     kiwi.kick.notify_one();
     start_next(&kiwi);
 }
@@ -739,13 +800,8 @@ async fn runner(
     request: &Value,
     token: &CancellationToken,
 ) -> Result<Vec<Value>, Failure> {
-    let id = &job.id;
-    let root = kiwi.config.data_dir.join("automation");
-    let path = root.join(format!("{id}.request.json"));
-    tokio::fs::write(&path, serde_json::to_vec(request).map_err(failed)?)
-        .await
-        .map_err(failed)?;
-    let program = if recipe(&job.app).is_ok_and(Recipe::android) {
+    let android = recipe(&job.app).is_ok_and(Recipe::android);
+    let program = if android {
         &kiwi.automation.android_runner
     } else {
         &kiwi.automation.runner
@@ -753,24 +809,82 @@ async fn runner(
     .read()
     .unwrap()
     .clone();
-    // Apple's /usr/bin/python3 is 3.9; the builder uses Python 3.13 from setup.
-    let python = if cfg!(target_os = "macos") {
-        "/opt/homebrew/bin/python3.13"
-    } else {
-        "python3"
+    let call = Invocation {
+        program,
+        command,
+        id: &job.id,
+        recipe: Some(&job.app),
+        builder: if android {
+            "The Android builder"
+        } else {
+            "The Mac builder"
+        },
+        timeout: Duration::from_secs(if command == "plan" { 600 } else { 7200 }),
     };
+    invoke(kiwi, call, request, token, |stage| {
+        kiwi.automation
+            .job(&kiwi.db, &job.id, |j| j.stage = stage.into())
+            .map_err(failed)
+    })
+    .await
+}
+
+/// One run of a builder script.
+pub(crate) struct Invocation<'a> {
+    pub program: PathBuf,
+    pub command: &'a str,
+    /// Names the request file and is passed as `--job-id`.
+    pub id: &'a str,
+    pub recipe: Option<&'a str>,
+    /// How messages name the builder: "The Android builder".
+    pub builder: &'static str,
+    pub timeout: Duration,
+}
+
+/// Runs a builder script with `request` and returns its `plan`, `artifact` and `kiwi_app`
+/// events; `on_stage` receives its progress. The request file is removed afterwards.
+pub(crate) async fn invoke(
+    kiwi: &Kiwi,
+    call: Invocation<'_>,
+    request: &Value,
+    token: &CancellationToken,
+    on_stage: impl FnMut(&str) -> Result<(), Failure>,
+) -> Result<Vec<Value>, Failure> {
+    let path = kiwi
+        .config
+        .data_dir
+        .join("automation")
+        .join(format!("{}.request.json", call.id));
+    tokio::fs::write(&path, serde_json::to_vec(request).map_err(failed)?)
+        .await
+        .map_err(failed)?;
+    let result = invoke_with(kiwi, &call, &path, token, on_stage).await;
+    let _ = tokio::fs::remove_file(&path).await;
+    result
+}
+
+async fn invoke_with(
+    kiwi: &Kiwi,
+    call: &Invocation<'_>,
+    request: &std::path::Path,
+    token: &CancellationToken,
+    mut on_stage: impl FnMut(&str) -> Result<(), Failure>,
+) -> Result<Vec<Value>, Failure> {
+    let builder = call.builder;
+    let python = &kiwi.config.python;
     let mut cmd = tokio::process::Command::new(python);
-    cmd.arg(program)
-        .arg(command)
+    cmd.arg(&call.program)
+        .arg(call.command)
         .arg("--data-dir")
         .arg(&kiwi.config.data_dir)
         .arg("--request")
-        .arg(&path)
+        .arg(request)
         .arg("--job-id")
-        .arg(id)
-        .arg("--recipe")
-        .arg(&job.app)
-        .arg("--supervisor-pid")
+        .arg(call.id);
+    if let Some(recipe) = call.recipe {
+        cmd.arg("--recipe").arg(recipe);
+    }
+    cmd.arg("--supervisor-pid")
         .arg(std::process::id().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -781,17 +895,20 @@ async fn runner(
         use std::os::unix::process::CommandExt;
         cmd.as_std_mut().process_group(0);
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| (format!("Could not start the Mac builder: {e}"), true))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        (
+            format!(
+                "{builder} could not start Python ({}): {e}. Install Python 3.12 or newer, \
+                 or name it with --python (KIWI_PYTHON).",
+                python.display()
+            ),
+            true,
+        )
+    })?;
     let mut lines = BufReader::new(child.stdout.take().unwrap().take(2 * 1024 * 1024)).lines();
     let mut events = Vec::new();
     let mut runner_error = None;
-    let deadline = tokio::time::sleep(Duration::from_secs(if command == "plan" {
-        600
-    } else {
-        7200
-    }));
+    let deadline = tokio::time::sleep(call.timeout);
     tokio::pin!(deadline);
     let read = async {
         while let Some(line) = lines.next_line().await.map_err(failed)? {
@@ -804,9 +921,7 @@ async fn runner(
                     if stage.len() > 256 {
                         return Err(failed("Build stage exceeds its limit"));
                     }
-                    kiwi.automation
-                        .job(&kiwi.db, id, |j| j.stage = stage.into())
-                        .map_err(failed)?;
+                    on_stage(stage)?;
                 }
                 Some("health") => {
                     let checks = event["checks"]
@@ -831,7 +946,7 @@ async fn runner(
                         event["blocked"].as_bool().unwrap_or(false),
                     ))
                 }
-                Some("plan" | "artifact") => events.push(event),
+                Some("plan" | "artifact" | "kiwi_app") => events.push(event),
                 _ => return Err(failed("Unknown builder event")),
             }
         }
@@ -840,16 +955,16 @@ async fn runner(
             return Err(error);
         }
         if !status.success() {
-            return Err(failed(
-                "The Mac builder stopped unexpectedly. Check its private log.",
-            ));
+            return Err(failed(format!(
+                "{builder} stopped unexpectedly. Check its private log."
+            )));
         }
         Ok(())
     };
     let result = tokio::select! {
         result = read => result,
         _ = token.cancelled() => Err(failed("Cancelled")),
-        _ = &mut deadline => Err(failed("The Mac builder exceeded its time limit")),
+        _ = &mut deadline => Err(failed(format!("{builder} exceeded its time limit"))),
     };
     if result.is_err() {
         stop(&mut child).await;

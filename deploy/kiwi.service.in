@@ -1,0 +1,57 @@
+# Kiwi systemd unit (template). install.sh fills in the @...@ values and installs the result
+# as /etc/systemd/system/kiwi.service on Linux.
+#
+# A system service with its own user: it starts at boot without anyone logged in, and the
+# signing keys in its data directory (Kiwi Builds' Android key, an uploaded iOS identity)
+# belong to the kiwi user alone. Kiwi talks to tailscaled through its LocalAPI socket,
+# which lets any local user ask who a device is; install.sh sets up `tailscale serve`.
+[Unit]
+Description=Kiwi, a private app store for your own devices
+Documentation=https://github.com/DigitalPals/Kiwi/blob/main/docs/operations.md
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=kiwi
+Group=kiwi
+ExecStart=@APP@/kiwi --listen 127.0.0.1:@PORT@ --data-dir @DATA@ --web-dir @APP@/web --public-url @PUBLIC_URL@ --tailscale-socket @TAILSCALE_SOCKET@ --tailscale-bin @TAILSCALE_BIN@ --python @PYTHON@ @OWNER_ARGS@
+WorkingDirectory=@DATA@
+Environment=RUST_LOG=info NO_COLOR=1
+# Always running: restarted after a crash.
+Restart=always
+RestartSec=15
+# Kiwi waits up to 10 s for open connections, then stops running builds; a build's runner
+# gets the rest of the time before everything left is killed.
+KillMode=mixed
+TimeoutStopSec=30
+# 077: data and keys are private to the kiwi user.
+UMask=0077
+
+# The data directory (/var/lib/kiwi) is the only place Kiwi writes to. Kiwi Builds' Android
+# runner runs a Java runtime it downloads, so writable+executable memory stays allowed.
+StateDirectory=kiwi
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+ProtectProc=invisible
+RemoveIPC=yes
+
+[Install]
+WantedBy=multi-user.target

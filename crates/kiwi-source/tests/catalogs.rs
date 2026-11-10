@@ -418,6 +418,9 @@ fn real_ytlite_feed_parses_releases_and_metadata_in_publisher_order() {
     assert_eq!(app.newest_eligible(Some(&ios("27.0.1"))), Some(0));
     assert_eq!(app.newest_eligible(Some(&ios("16.7"))), Some(3));
     assert_eq!(app.newest_eligible(Some(&ios("13.0"))), None);
+    // An unknown OS version (empty) only checks the platform.
+    assert_eq!(app.newest_eligible(Some(&ios(""))), Some(0));
+    assert_eq!(app.releases[0].incompatibility(&ios("")), None);
     assert!(
         app.releases[0]
             .incompatibility(&ios("16.7"))

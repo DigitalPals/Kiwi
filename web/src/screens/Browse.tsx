@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from "preact/hooks";
 import { api } from "../api/client";
-import type { AppState, AppSummary, Me } from "../api/types";
+import type { AndroidApp, AppState, AppSummary, Me } from "../api/types";
+import { KiwiAppIcon } from "../components/AppIcon";
 import { AppRow } from "../components/AppRow";
 import { FreshShelf } from "../components/FreshShelf";
 import { Icon } from "../components/Icon";
@@ -9,6 +10,7 @@ import { Banner, Empty, ErrorState, MenuPicker, Page, SkeletonRows, Spinner } fr
 import { withAppState } from "../lib/action";
 import { plural } from "../lib/format";
 import { BUILDS_PATH } from "../lib/routes";
+import { hasFeature } from "../lib/features";
 import { useDebounced, useResource, useStoredFlag, useTask } from "../lib/hooks";
 import { useMe } from "../lib/me";
 import { shouldSuggestHomeScreen } from "../lib/pwa";
@@ -64,6 +66,27 @@ function HomeScreenHint() {
   );
 }
 
+/** Android in a browser: Kiwi's own app, which installs updates in the background. */
+function KiwiAppOffer({ app }: { app: AndroidApp }) {
+  const [dismissed, setDismissed] = useStoredFlag("kiwi.androidAppOfferDismissed");
+  if (dismissed) return null;
+  return (
+    <div class="app-offer">
+      <KiwiAppIcon size={40} />
+      <div class="cell-main">
+        <div class="app-offer-name">Get the Kiwi app</div>
+        <div class="app-offer-detail">Installs updates for you</div>
+      </div>
+      <a class="pill" href={app.install_url} aria-label={`Get Kiwi for Android ${app.version_name}`}>
+        Get
+      </a>
+      <button type="button" class="banner-close" onClick={() => setDismissed(true)} aria-label="Dismiss">
+        <Icon name="close" size={16} />
+      </button>
+    </div>
+  );
+}
+
 function byRecentRelease(a: AppSummary, b: AppSummary): number {
   const da = a.state.target?.date ?? "";
   const db = b.state.target?.date ?? "";
@@ -96,17 +119,22 @@ const SORTS = [
 
 export function Browse() {
   const { me } = useMe();
+  // Android apps all come from Kiwi Builds: no source to pick.
+  const android = hasFeature(me, "android_apps");
   const [query, setQuery] = useState(savedQuery);
-  const [source, setSource] = useState(savedSource);
+  const [savedPick, setSource] = useState(savedSource);
+  const source = android ? null : savedPick;
   const [showHidden, setShowHidden] = useState(savedShowHidden);
   const [recent, setRecent] = useStoredFlag("kiwi.browseSortRecent");
   const q = useDebounced(query.trim(), 250);
-  // Searches find hidden apps too, listed after the others.
-  const withHidden = showHidden || !!q;
+  // Searches find hidden apps too, listed after the others. Browse always asks for the hidden
+  // apps and counts them from the list: a source's own count includes other platforms' apps
+  // (Kiwi Builds' source has both), so an iPhone would count hidden Android apps it never lists.
+  const listHidden = showHidden || !!q;
 
   const sources = useResource("sources", api.sources);
-  const apps = useResource(`apps?q=${q}&source=${source ?? ""}&hidden=${withHidden}`, () =>
-    api.apps({ q, ...(source ? { source } : {}), hidden: withHidden }),
+  const apps = useResource(`apps?q=${q}&source=${source ?? ""}&hidden=true`, () =>
+    api.apps({ q, ...(source ? { source } : {}), hidden: true }),
   );
   const { mutate } = apps;
   const onState = useCallback(
@@ -115,9 +143,6 @@ export function Browse() {
   );
 
   const enabledSources = sources.data?.filter((s) => s.enabled) ?? [];
-  const hiddenCount = enabledSources
-    .filter((s) => source === null || s.id === source)
-    .reduce((sum, s) => sum + s.app_count - s.shown_count, 0);
   const chooseSource = (id: string | null) => {
     savedSource = id;
     setSource(id);
@@ -130,31 +155,37 @@ export function Browse() {
     void apps.reload();
     void sources.reload();
   };
-  const hiddenToggle =
-    !q && hiddenCount > 0 ? (
-      <button type="button" class="hidden-toggle" onClick={toggleHidden} aria-expanded={showHidden}>
-        {plural(hiddenCount, "app")} hidden · <b>{showHidden ? "Hide" : "Show"}</b>
-      </button>
-    ) : null;
 
   let content;
+  // With hidden apps the server lists every platform's (a source's page shows them all);
+  // Browse keeps to this device's.
+  const platform = android ? "android" : hasFeature(me, "ios_apps") ? "ios" : null;
   const { shown, hidden } = useMemo(() => {
     const shown: AppSummary[] = [];
     const hidden: AppSummary[] = [];
-    for (const app of apps.data ?? []) (app.hidden ? hidden : shown).push(app);
+    for (const app of apps.data ?? []) {
+      if (platform && app.platform !== platform) continue;
+      (app.hidden ? hidden : shown).push(app);
+    }
     if (recent) {
       shown.sort(byRecentRelease);
       hidden.sort(byRecentRelease);
     }
     return { shown, hidden };
-  }, [apps.data, recent]);
+  }, [apps.data, recent, platform]);
+  const hiddenToggle =
+    !q && hidden.length > 0 ? (
+      <button type="button" class="hidden-toggle" onClick={toggleHidden} aria-expanded={showHidden}>
+        {plural(hidden.length, "app")} hidden · <b>{showHidden ? "Hide" : "Show"}</b>
+      </button>
+    ) : null;
   // Reuse the list while the search input is changing but its debounced results have
   // not. Preact can retain these rows without rendering every action button again.
   const shownRows = useMemo(() => shown.map((app) => (
     <AppRow key={`${app.source_id}/${app.bundle_id}`} app={app} onState={onState} />
   )), [shown, onState]);
   const hiddenList =
-    hidden.length > 0 ? (
+    listHidden && hidden.length > 0 ? (
       <>
         <div class="list-header">
           <h2 class="list-title">
@@ -176,14 +207,18 @@ export function Browse() {
     ) : null;
   if (!apps.data) {
     content = apps.error ? <ErrorState error={apps.error} onRetry={apps.reload} /> : <SkeletonRows />;
-  } else if (shown.length === 0 && (hidden.length > 0 || hiddenCount > 0)) {
+  } else if (shown.length === 0 && hidden.length > 0) {
     content = (
       <>
         {q ? (
           <Empty icon="search" title="No Results" message={`Only hidden apps match “${q}”.`} />
         ) : (
-          <Empty icon="eyeOff" title="No Apps in Browse" message="Every app here is hidden. Pick the ones you want in Sources.">
-            <a class="button" href="/sources">
+          <Empty
+            icon="eyeOff"
+            title="No Apps in Browse"
+            message={`Every app here is hidden. Pick the ones you want in ${android ? "Kiwi Builds" : "Sources"}.`}
+          >
+            <a class="button" href={android ? BUILDS_PATH : "/sources"}>
               Choose Apps
             </a>
           </Empty>
@@ -192,22 +227,22 @@ export function Browse() {
         {hiddenList}
       </>
     );
-  } else if (apps.data.length === 0) {
-    if (me?.device.platform === "android" && !q) {
+  } else if (shown.length + hidden.length === 0) {
+    if (android && !q) {
       // AltStore sources list iPhone apps; an Android device installs what Kiwi Builds makes.
       content = (
         <Empty
           icon="wrench"
           art={<KiwiLogo size={72} />}
           title="No Android Apps Yet"
-          message="Kiwi Builds makes Android apps on your Mac. Add one there and it shows up here."
+          message="Kiwi Builds makes Android apps for you. Add one there and it shows up here."
         >
           <a class="button" href={BUILDS_PATH}>
             Open Kiwi Builds
           </a>
         </Empty>
       );
-    } else if (sources.data && enabledSources.length === 0) {
+    } else if (!android && sources.data && enabledSources.length === 0) {
       content = (
         <Empty
           icon="sources"
@@ -232,6 +267,9 @@ export function Browse() {
         <ul class="app-list">{shownRows}</ul>
         {hiddenToggle}
         {hiddenList}
+        {android && !q && (
+          <p class="fine-print browse-note">Android apps come from Kiwi Builds. Sources list iPhone apps, so they stay hidden here.</p>
+        )}
       </>
     );
   }
@@ -242,8 +280,9 @@ export function Browse() {
   ];
   return (
     <Page title="Browse">
+      {hasFeature(me, "android_app_offer") && me?.android_app && <KiwiAppOffer app={me.android_app} />}
       {me && <BlockingWarnings me={me} />}
-      <HomeScreenHint />
+      {hasFeature(me, "home_screen_app") && <HomeScreenHint />}
       <SearchField
         query={query}
         onInput={(value) => {
@@ -252,14 +291,14 @@ export function Browse() {
         }}
       />
       {!q && <FreshShelf key={source ?? ""} apps={shown} onState={onState} />}
-      {apps.data && (apps.data.length > 0 || source !== null || q) && (
+      {apps.data && (shown.length > 0 || (listHidden && hidden.length > 0) || source !== null || q) && (
         <div class="list-header">
           <h2 class="list-title">
             {q ? "Results" : "All Apps"}
             <span class="count">{shown.length}</span>
           </h2>
           <span class="filter-chips">
-            {enabledSources.length > 1 && (
+            {!android && enabledSources.length > 1 && (
               <MenuPicker
                 label="Show apps from"
                 value={source ?? ""}

@@ -640,17 +640,24 @@ cannot do, it adds:
   with `Range`), checks the package name, version and signer against an installed copy, and
   installs it with a PackageInstaller session. Sessions ask for `USER_ACTION_NOT_REQUIRED`
   (Android 12+), which Android grants for updates of apps whose installer of record is the
-  app; other installs show Android's confirmation. Because the phone reports what is
+  app; other installs show Android's confirmation. On Android 14+ a first install also makes
+  the app the package's update owner (`setRequestUpdateOwnership`). Because the phone reports what is
   installed, the app trusts the phone over Kiwi's download-based guess ("open" with the
   package missing offers Install again).
 - **Background.** A WorkManager job checks `GET /api/updates` about every two hours,
-  notifies each update once and installs those Android allows without a tap.
+  notifies each update once and installs those Android allows without a tap. It also
+  notifies Kiwi Builds jobs that finished or failed (`GET /api/automation`), and looks again
+  a few minutes later while a build runs.
+- **Kiwi Builds.** A Builds tab adds and removes Kiwi Builds' Android apps, changes their
+  patches and schedules, and starts, rebuilds and cancels builds through `/api/automation`;
+  while Kiwi Builds is off (`409 builds_off`) it offers to turn it on (`PATCH /api/settings`).
 - **Itself.** When `Me.android_app` is newer than the running app, it offers that APK.
 
 Connecting checks `/api/health` and `/api/me` before saving the address; a
 `kiwi://connect?url=<https address>` link only fills it in. The app stores the address and
 its own switches in DataStore and nothing else. Builds and tests run with Gradle (JVM unit
-tests only); `android/scripts/build-in-docker.sh` builds in a pinned Android SDK container.
+tests, and screenshots of every screen rendered in Robolectric);
+`android/scripts/build-in-docker.sh` builds in a pinned Android SDK container.
 
 ## Not in scope yet
 

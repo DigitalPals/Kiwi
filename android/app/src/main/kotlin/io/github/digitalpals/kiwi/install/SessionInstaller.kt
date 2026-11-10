@@ -22,7 +22,8 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * On Android 12 and later the session asks for no confirmation (`USER_ACTION_NOT_REQUIRED`);
  * Android honours that for updates of apps whose installer of record is this app (Kiwi holds
- * `UPDATE_PACKAGES_WITHOUT_USER_ACTION`). Otherwise the session reports
+ * `UPDATE_PACKAGES_WITHOUT_USER_ACTION`). On Android 14 and later a first install also makes
+ * Kiwi the app's update owner (`setRequestUpdateOwnership`). Otherwise the session reports
  * `STATUS_PENDING_USER_ACTION` with Android's confirmation screen, which is shown right away
  * while Kiwi is on screen, or offered as a notification while it is in the background.
  */
@@ -62,6 +63,12 @@ class SessionInstaller(context: Context) {
                 // Kiwi is where the owner gets these apps, like a store; Android then doesn't treat
                 // them as sideloaded files (restricted settings).
                 setPackageSource(PackageInstaller.PACKAGE_SOURCE_STORE)
+            }
+            if (Build.VERSION.SDK_INT >= 34) {
+                // Android 14+: Kiwi becomes the app's update owner on its first install (a no-op for
+                // updates), so another store can't replace Kiwi's build without asking, and Kiwi's
+                // own updates of it stay silent.
+                setRequestUpdateOwnership(true)
             }
         }
         val sessionId = installer.createSession(params)

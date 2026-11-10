@@ -39,6 +39,8 @@ android {
     testOptions {
         // JVM unit tests only: Android calls that are not mocked return defaults.
         unitTests.isReturnDefaultValues = true
+        // The screenshot tests (src/testDebug) run the Compose screens in Robolectric.
+        unitTests.isIncludeAndroidResources = true
     }
 
     packaging {
@@ -75,4 +77,9 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(platform(libs.compose.bom))
+    testImplementation(libs.compose.ui.test.junit4)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.roborazzi)
+    testImplementation(libs.roborazzi.compose)
 }

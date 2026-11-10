@@ -22,7 +22,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /** The app's long-lived objects, created once in [KiwiApplication]. */
-class AppContainer(private val application: Application) {
+class AppContainer(val application: Application) {
     /** Work that outlives a screen: installs and package reports. */
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 

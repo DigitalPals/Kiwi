@@ -6,6 +6,7 @@ import io.github.digitalpals.kiwi.api.Build
 import io.github.digitalpals.kiwi.api.Installed
 import io.github.digitalpals.kiwi.api.Release
 import io.github.digitalpals.kiwi.install.InstallJob
+import io.github.digitalpals.kiwi.install.InstallManager
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -109,6 +110,23 @@ class AppButtonTest {
         assertEquals(
             ButtonView.AllowInstalls("Allow Kiwi to install apps, then try again."),
             appButton(base, job(InstallJob.Phase.NeedsPermission), absent),
+        )
+    }
+
+    @Test
+    fun mapsKiwisOwnUpdate() {
+        assertEquals(ButtonView.Install("Update"), selfUpdateButton(null))
+        assertEquals(
+            ButtonView.Progress("Downloading", 0.5f, cancellable = true),
+            selfUpdateButton(InstallJob(InstallManager.SELF, "Kiwi", InstallJob.Phase.Downloading, progress = 0.5f)),
+        )
+        assertEquals(
+            ButtonView.Install("Retry", "Couldn't install Kiwi.", error = true),
+            selfUpdateButton(InstallJob(InstallManager.SELF, "Kiwi", InstallJob.Phase.Failed, message = "Couldn't install Kiwi.")),
+        )
+        assertEquals(
+            ButtonView.AllowInstalls("Allow Kiwi to install apps, then try again."),
+            selfUpdateButton(InstallJob(InstallManager.SELF, "Kiwi", InstallJob.Phase.NeedsPermission)),
         )
     }
 }

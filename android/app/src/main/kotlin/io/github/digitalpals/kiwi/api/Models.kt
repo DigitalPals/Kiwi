@@ -321,3 +321,102 @@ data class ErrorDetail(
 data class ErrorBody(
     val error: ErrorDetail,
 )
+
+/** Kiwi Builds preferences of one app (`PATCH /api/automation/:app` replaces them). */
+@Serializable
+data class AutomationPreferences(
+    val enabled: Boolean = true,
+    @SerialName("interval_minutes") val intervalMinutes: Int = 360,
+    val tweaks: List<String> = emptyList(),
+    /** Home Screen name, only for apps that offer a choice (`names`). */
+    val name: String? = null,
+)
+
+/** One Kiwi Builds job. Poll while [finishedAt] is null. */
+@Serializable
+data class AutomationJob(
+    val id: String,
+    val app: String = "",
+    val sequence: Int = 0,
+    /** "queued", "running", "ready", "unchanged", "failed", "blocked" or "cancelled". */
+    val status: String,
+    /** What the job is doing, or for a queued job what it waits for. */
+    val stage: String = "",
+    val version: String? = null,
+    val error: String? = null,
+    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("finished_at") val finishedAt: String? = null,
+    val preferences: AutomationPreferences? = null,
+) {
+    val isActive: Boolean get() = finishedAt == null
+}
+
+/** A patch: always built (`included`) or optional (`available_tweaks`). */
+@Serializable
+data class BuildFeature(
+    val id: String,
+    val name: String,
+    val description: String = "",
+)
+
+@Serializable
+data class BuildLimitation(
+    val icon: String = "info",
+    val title: String,
+    val detail: String = "",
+)
+
+@Serializable
+data class SetupCheck(
+    val name: String,
+    val ready: Boolean = false,
+)
+
+/** The build Kiwi Builds published last. */
+@Serializable
+data class PublishedBuild(
+    val version: String,
+    val build: String? = null,
+    val revision: Int? = null,
+    val date: String? = null,
+    /** The optional patches it was built with; null for an older release. */
+    val tweaks: List<String>? = null,
+    val name: String? = null,
+)
+
+/** One app Kiwi Builds can patch and sign (`GET /api/automation/:app`). */
+@Serializable
+data class AutomationState(
+    val id: String,
+    val platform: String = Platforms.IOS,
+    val name: String,
+    /** The built app's bundle id; for Android the package the patched app installs as. */
+    @SerialName("bundle_id") val bundleId: String = "",
+    @SerialName("icon_url") val iconUrl: String? = null,
+    /** The patches and their version, e.g. "Morphe Patches 2.1.0". */
+    val tweak: String = "",
+    val summary: String = "",
+    val experimental: Boolean = false,
+    val warning: String? = null,
+    val names: List<String> = emptyList(),
+    @SerialName("app_version") val appVersion: String? = null,
+    val limitations: List<BuildLimitation> = emptyList(),
+    val included: List<BuildFeature> = emptyList(),
+    @SerialName("available_tweaks") val availableTweaks: List<BuildFeature> = emptyList(),
+    val added: Boolean = false,
+    val preferences: AutomationPreferences = AutomationPreferences(),
+    val jobs: List<AutomationJob> = emptyList(),
+    @SerialName("last_checked_at") val lastCheckedAt: String? = null,
+    @SerialName("failed_attempts") val failedAttempts: Int = 0,
+    val published: PublishedBuild? = null,
+    @SerialName("source_enabled") val sourceEnabled: Boolean? = null,
+    @SerialName("configuration_changed") val configurationChanged: Boolean = false,
+    @SerialName("next_check_at") val nextCheckAt: String? = null,
+)
+
+/** Every app Kiwi Builds can build (`GET /api/automation`). */
+@Serializable
+data class AutomationOverview(
+    val apps: List<AutomationState> = emptyList(),
+    val checks: List<SetupCheck> = emptyList(),
+)

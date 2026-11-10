@@ -14,6 +14,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 sealed interface LaunchRequest {
     data class Connect(val url: String) : LaunchRequest
     data object MyApps : LaunchRequest
+    data object Builds : LaunchRequest
+
+    /** An app's page, e.g. a Kiwi Builds app whose build is ready. */
+    data class App(val sourceId: String, val bundleId: String, val name: String) : LaunchRequest
 }
 
 class MainActivity : ComponentActivity() {
@@ -39,6 +43,14 @@ class MainActivity : ComponentActivity() {
     private fun handle(intent: Intent?) {
         when (intent?.action) {
             ACTION_OPEN_MY_APPS -> requests.value = LaunchRequest.MyApps
+            ACTION_OPEN_BUILDS -> requests.value = LaunchRequest.Builds
+            ACTION_OPEN_APP -> {
+                val source = intent.getStringExtra(EXTRA_SOURCE)
+                val bundle = intent.getStringExtra(EXTRA_BUNDLE)
+                if (source != null && bundle != null) {
+                    requests.value = LaunchRequest.App(source, bundle, intent.getStringExtra(EXTRA_NAME).orEmpty())
+                }
+            }
             Intent.ACTION_VIEW -> intent.dataString?.let(ServerUrl::fromConnectLink)?.let {
                 requests.value = LaunchRequest.Connect(it)
             }
@@ -47,5 +59,10 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val ACTION_OPEN_MY_APPS = "io.github.digitalpals.kiwi.OPEN_MY_APPS"
+        const val ACTION_OPEN_BUILDS = "io.github.digitalpals.kiwi.OPEN_BUILDS"
+        const val ACTION_OPEN_APP = "io.github.digitalpals.kiwi.OPEN_APP"
+        const val EXTRA_SOURCE = "source_id"
+        const val EXTRA_BUNDLE = "bundle_id"
+        const val EXTRA_NAME = "name"
     }
 }

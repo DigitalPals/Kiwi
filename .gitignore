@@ -5,6 +5,8 @@
 __pycache__/
 # Your SSH destination for deploy/deploy.sh (KIWI_MAC=you@your-mac)
 /deploy/deploy.env
+# compose.yaml's settings, including the Tailscale auth key (see .env.example)
+/.env
 .pytest_cache/
 /scripts/screenshots/node_modules
 /scripts/screenshots/raw

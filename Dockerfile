@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1
+#
+# Kiwi in a container: the server, its web app and the Python that Kiwi Builds' Android
+# runner needs, on Debian 13. Kiwi listens on 127.0.0.1:8742 inside the container's network
+# namespace; compose.yaml runs it next to a Tailscale container that publishes it on your
+# tailnet. See docs/install.md ("Docker").
+#
+#   docker build -t kiwi .
+
+# --- the server -----------------------------------------------------------------------------
+FROM rust:1.99-slim-trixie AS server
+WORKDIR /src
+# rustup installs the toolchain rust-toolchain.toml names (stable, as in CI).
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install && rustc --version
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+# The server embeds Kiwi Builds' runners and recipes.
+COPY automation automation
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p kiwi-server \
+    && install -D target/release/kiwi /out/kiwi
+
+# --- the web app ----------------------------------------------------------------------------
+FROM node:24-trixie-slim AS web
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+# Vite's config loads the mock API, which reads the recipes.
+COPY automation/recipes.json automation/android.json /src/automation/
+COPY web ./
+RUN npm run build
+
+# --- Kiwi -----------------------------------------------------------------------------------
+FROM debian:trixie-slim
+LABEL org.opencontainers.image.title="Kiwi" \
+      org.opencontainers.image.description="A private, self-hosted app store for your own iPhones and Android phones" \
+      org.opencontainers.image.source="https://github.com/DigitalPals/Kiwi" \
+      org.opencontainers.image.licenses="MIT"
+# python3 (3.13) runs Kiwi Builds' Android runner, which fetches its own pinned Java.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates python3 tini \
+    && rm -rf /var/lib/apt/lists/*
+# A fixed uid, so a bind-mounted data directory can be given to it (chown 10001:10001).
+RUN groupadd --system --gid 10001 kiwi \
+    && useradd --system --uid 10001 --gid kiwi --home-dir /data --no-create-home \
+       --shell /usr/sbin/nologin kiwi \
+    && install -d -o kiwi -g kiwi -m 700 /data
+COPY --from=server /out/kiwi /opt/kiwi/kiwi
+# Kiwi finds its web app next to the program (<exe dir>/web).
+COPY --from=web /src/web/dist /opt/kiwi/web
+ENV KIWI_DATA_DIR=/data \
+    RUST_LOG=info \
+    NO_COLOR=1
+VOLUME /data
+WORKDIR /data
+USER kiwi
+# /api/health on the listen address (requests must name it as their host).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD ["python3", "-c", "import os, urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://%s/api/health' % os.environ.get('KIWI_LISTEN', '127.0.0.1:8742'), timeout=4)"]
+# tini reaps the processes Kiwi Builds starts; Kiwi itself stops gracefully on SIGTERM.
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/kiwi/kiwi"]

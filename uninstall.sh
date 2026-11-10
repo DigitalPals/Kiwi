@@ -1,8 +1,10 @@
 #!/bin/bash
-# Remove Kiwi from this Mac (or, from another machine, from the Mac in KIWI_MAC over SSH):
+# Remove Kiwi from this Mac or Linux computer (or, from another machine, from the Mac in
+# KIWI_MAC over SSH):
 #
 #   ./uninstall.sh           remove Kiwi and keep its data and logs
 #   ./uninstall.sh --purge   also delete the data directory and logs
+#   ./uninstall.sh --local   on Linux: remove Kiwi from this computer even when KIWI_MAC is set
 #
 # Stops and removes the LaunchAgent local.kiwi, the `tailscale serve` mapping of / (only
 # when it points at Kiwi; other paths stay), /etc/newsyslog.d/kiwi.conf, the installed app
@@ -11,12 +13,22 @@
 # Support/Kiwi": kiwi.db and its kiwi.db.bak-* backups, vapid.json, downloads, builds,
 # icons, automation) and logs (~/Library/Logs/Kiwi) are kept unless --purge is given; the Kiwi Builds toolchain (~/.kiwi-builder-tools) is never
 # touched. KIWI_MAC can be set in deploy/deploy.env.
+#
+# On Linux (as root, through sudo) it stops and removes kiwi.service, the `tailscale serve`
+# mapping of / (only when it points at Kiwi) and the program in /opt/kiwi. The data in
+# /var/lib/kiwi and the user "kiwi" that owns it stay unless --purge is given. Back up the
+# data first: it holds Kiwi Builds' Android signing key (docs/operations.md, "Backups").
 set -euo pipefail
 
 LABEL=local.kiwi
 PORT=8742
 BUILD_DIR=kiwi-build # deploy/deploy.sh's copy, relative to the Mac user's home
 NEWSYSLOG_CONF=/etc/newsyslog.d/kiwi.conf
+# Linux (see install.sh)
+UNIT=/etc/systemd/system/kiwi.service
+APPS=/opt/kiwi
+LINUX_DATA=/var/lib/kiwi
+SERVICE_USER=kiwi
 
 say() { printf '==> %s\n' "$*"; }
 die() {
@@ -25,7 +37,9 @@ die() {
 }
 
 as_root() {
-	if [ -t 0 ]; then sudo "$@"; else sudo -n "$@"; fi
+	if [ "$(id -u)" = 0 ]; then
+		"$@"
+	elif [ -t 0 ]; then sudo "$@"; else sudo -n "$@"; fi
 }
 
 # launchctl for the gui/<uid> domain; see install.sh.
@@ -136,16 +150,56 @@ on_mac() {
 	fi
 }
 
-main() {
-	local mode=--keep-data mac
+# Linux, as root: kiwi.service, the serve mapping and /opt/kiwi; with --purge also
+# /var/lib/kiwi and the kiwi user.
+on_linux() {
+	local purge=0 port
 	case "${1:-}" in
-	"") ;;
-	--purge) mode=--purge ;;
-	*)
-		echo "Usage: ./uninstall.sh [--purge]" >&2
-		return 2
-		;;
+	--keep-data) ;;
+	--purge) purge=1 ;;
+	*) die "usage: uninstall.sh --on-linux --keep-data|--purge" ;;
 	esac
+	[ "$(uname -s)" = Linux ] || die "must run on Linux"
+	[ "$(id -u)" = 0 ] || die "must run as root"
+
+	# The port install.sh chose, for recognising Kiwi's serve mapping.
+	port=$(sed -n 's/.*--listen 127\.0\.0\.1:\([0-9][0-9]*\).*/\1/p' "$UNIT" 2>/dev/null | head -n 1)
+	PORT=${port:-$PORT}
+	if [ -f "$UNIT" ]; then
+		say "Stopping and removing kiwi.service"
+		systemctl disable --now kiwi.service || true
+		rm -f "$UNIT"
+		systemctl daemon-reload
+	fi
+
+	remove_serve
+
+	say "Removing the installed app"
+	rm -rf "$APPS/app" "$APPS/app.new" "$APPS/app.prev" "$APPS/app.old" "$APPS/app.bad"
+	rmdir "$APPS" 2>/dev/null || true
+
+	if [ "$purge" = 1 ]; then
+		say "Purging $LINUX_DATA and the user $SERVICE_USER"
+		rm -rf "$LINUX_DATA"
+		if id -u "$SERVICE_USER" >/dev/null 2>&1; then userdel "$SERVICE_USER" || true; fi
+	else
+		say "Kept data in $LINUX_DATA, owned by the user $SERVICE_USER (use --purge to delete both); logs stay in the journal"
+	fi
+}
+
+main() {
+	local mode=--keep-data mac here=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--purge) mode=--purge ;;
+		--local) here=1 ;;
+		*)
+			echo "Usage: ./uninstall.sh [--purge] [--local]" >&2
+			return 2
+			;;
+		esac
+		shift
+	done
 	if [ "$(uname -s)" = Darwin ]; then
 		on_mac "$mode"
 		return
@@ -153,8 +207,15 @@ main() {
 	local env
 	env="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/deploy/deploy.env"
 	# shellcheck source=/dev/null
-	if [ -z "${KIWI_MAC:-}" ] && [ -f "$env" ]; then . "$env"; fi
+	if [ "$here" = 0 ] && [ -z "${KIWI_MAC:-}" ] && [ -f "$env" ]; then . "$env"; fi
 	mac=${KIWI_MAC:-}
+	if [ "$(uname -s)" = Linux ] && { [ "$here" = 1 ] || [ -z "$mac" ]; }; then
+		if [ ! -e "$UNIT" ] && [ ! -d "$APPS" ] && [ ! -d "$LINUX_DATA" ]; then
+			die "Kiwi is not installed on this computer. To remove it from a Mac over SSH, set KIWI_MAC=user@mac (or put it in deploy/deploy.env)"
+		fi
+		as_root "$BASH" "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/uninstall.sh" --on-linux "$mode"
+		return
+	fi
 	[ -n "$mac" ] || die "not on a Mac: set KIWI_MAC=user@mac (or put it in deploy/deploy.env) to uninstall over SSH"
 	# Copy this script to the Mac and run it there (stdin stays free for the commands).
 	# shellcheck disable=SC2016 # expanded by the remote shell
@@ -166,6 +227,9 @@ main() {
 if [ "${1:-}" = --on-mac ]; then
 	shift
 	on_mac "$@"
+elif [ "${1:-}" = --on-linux ]; then
+	shift
+	on_linux "$@"
 else
 	main "$@"
 fi

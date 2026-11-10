@@ -685,7 +685,8 @@ class Android:
 
     def kiwi_app_input(self, job_dir):
         """(file, manifest, source) of the unsigned app to sign: the newest one the owner
-        placed in android-app/unsigned/, else the pinned release, downloaded and checked."""
+        placed in android-app/unsigned/, unless the pinned release is newer (so a test build
+        left there never holds back a release), else the pinned release, downloaded and checked."""
         folder = self.builder.root.parent / "android-app" / "unsigned"
         found, problems = [], []
         if folder.is_dir():
@@ -703,16 +704,19 @@ class Android:
                 found.append((facts["version_code"], path.stat().st_mtime, path, facts))
         for problem in problems:
             self.builder.log.write(f"kiwi: android-app/unsigned/{problem}\n".encode())
-        if found:
-            _, _, path, facts = max(found, key=lambda item: item[:2])
+        local = max(found, key=lambda item: item[:2]) if found else None
+        try:
+            release, pin_error = check_pin(json.loads(KIWI_APP_PATH.read_text())), None
+        except (OSError, ValueError) as error:
+            release, pin_error = None, error
+        if local and (release is None or local[0] >= release["version_code"]):
+            _, _, path, facts = local
             return path, facts, "local"
-        if problems:
+        if problems and not local:
             raise BuildError("No APK in android-app/unsigned can be used (" + "; ".join(problems) + "). Place the "
                              "unsigned release APK of Kiwi's app there, or remove the files to use the released app.", True)
-        try:
-            release = check_pin(json.loads(KIWI_APP_PATH.read_text()))
-        except (OSError, ValueError) as error:
-            raise BuildError(f"Kiwi's Android app pin is not valid: {error}.") from error
+        if pin_error is not None:
+            raise BuildError(f"Kiwi's Android app pin is not valid: {pin_error}.") from pin_error
         if release is None:
             raise BuildError("No release of Kiwi's Android app is pinned yet. To use one you built, place its "
                              "unsigned APK in android-app/unsigned.", True)

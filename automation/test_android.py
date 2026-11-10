@@ -591,6 +591,23 @@ class KiwiAppTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "not the pinned version"):
             self.run_kiwi_app()
 
+    def test_a_newer_release_wins_over_an_older_local_apk(self):
+        unsigned_package(self.unsigned / "kiwi-1.1.0.apk", code=1_001_000, version="1.1.0")
+        released = unsigned_package(self.root / "released.apk")
+        release = {"version_name": "1.2.0", "version_code": 1_002_000, "url": KIWI_RELEASE,
+                   "sha256": android.digest(released), "size": released.stat().st_size}
+        self.pin.write_text(json.dumps({"schema": 1, "package": android.KIWI_APP_PACKAGE, "release": release}))
+
+        def download(url, target, **_):
+            Path(target).write_bytes(released.read_bytes())
+
+        android.download = download
+        # A test build left in the folder does not hold back a newer release ...
+        self.assertEqual(self.run_kiwi_app()[0]["source"], "release")
+        # ... but one at least as new as the release is still preferred.
+        unsigned_package(self.unsigned / "kiwi-1.2.0.apk")
+        self.assertEqual(self.run_kiwi_app()[0]["source"], "local")
+
     def test_an_app_signed_with_another_key_is_not_served(self):
         unsigned_package(self.unsigned / "kiwi.apk")
         self.signing_key = STRANGER

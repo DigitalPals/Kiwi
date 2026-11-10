@@ -137,8 +137,8 @@ Until a release exists, or to try a change, build the app yourself and let Kiwi 
    `docker compose cp app-release-unsigned.apk kiwi:/data/android-app/unsigned/`).
 
 Within a minute Kiwi signs the APK with the highest version code there (the newest file
-on a tie) and offers it. While that folder holds an APK, Kiwi does not use the pinned
-release; remove the files to return to it. The APK must be unsigned: a debug build, or one
+on a tie) and offers it, unless the pinned release has a higher version code: a test build
+left in the folder never holds back a newer release. The APK must be unsigned: a debug build, or one
 signed with another key, is refused and named in the warning.
 
 You can also run the command by hand, for example to see its output; Kiwi then signs once
@@ -155,7 +155,7 @@ Paths are in Kiwi's data directory.
 | Location | Purpose |
 |---|---|
 | `android-app/kiwi.apk`, `android-app/kiwi.json` | The signed app Kiwi offers and its description (`package`, `version_name`, `version_code`, `sha256`, `size`, plus `signer`, `source`, `unsigned_sha256`, `input` and `signed_at`, which the runner writes for itself) |
-| `android-app/unsigned/` | Unsigned APKs you place to use instead of the pinned release |
+| `android-app/unsigned/` | Unsigned APKs you place to use instead of an older (or no) pinned release |
 | `automation/kiwi-app.json` | The pinned release, rewritten from Kiwi at every start |
 | `automation/android/keystore.p12`, `keystore.pass` | Kiwi's Android key, shared with Kiwi Builds. [Back them up](operations.md#backups): with a new key, the phones have to uninstall Kiwi's app and its builds before they can install them again |
 | `automation/tools/android/apksigner/` | `apksigner.jar` from the pinned Android SDK Build-Tools |

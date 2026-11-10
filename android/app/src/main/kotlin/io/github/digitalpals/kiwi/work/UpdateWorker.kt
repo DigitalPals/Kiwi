@@ -25,25 +25,30 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Checks Kiwi for updates in the background, about every two hours while there is a network:
- * reports the installed packages, notifies new updates, and (with "Install updates
- * automatically") installs those Android lets this app install without asking. With "Notify
- * when a build finishes" it also notifies finished Kiwi Builds jobs.
+ * reports Kiwi's packages, notifies new updates, and (with "Install updates automatically")
+ * installs those Android lets this app install without asking, on an unmetered network with a
+ * battery that isn't low ([BackgroundConditions]); otherwise they are notified like the others.
+ * With "Notify when a build finishes" it also notifies finished Kiwi Builds jobs.
  */
 class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    private val container get() = (applicationContext as KiwiApplication).container
 
     override suspend fun doWork(): Result {
-        val container = (applicationContext as KiwiApplication).container
         val kiwi = container.api() ?: return Result.success()
         return try {
             container.packageReporter.report()
-            val updates = kiwi.updates().filter { it.platform == Platforms.ANDROID }
-            container.settings.setLastChecked(System.currentTimeMillis())
             val autoUpdate = container.settings.autoUpdate.first()
-            val installed = if (autoUpdate) installSilently(updates) else emptySet()
-            notify(updates.filter { it.libraryKey !in installed })
-            selfUpdate(autoUpdate)
-            // A finished build of an installed app is already news as an update.
-            checkBuilds(kiwi, updated = updates.map { it.packageName }.toSet())
+            val installed = if (autoUpdate) installSilently(kiwi) else emptyList()
+            val done = installed.map { it.libraryKey }.toSet()
+            // Read after installing: what is left is notified.
+            val updates = kiwi.updates().filter { it.platform == Platforms.ANDROID && it.libraryKey !in done }
+            container.settings.setLastChecked(System.currentTimeMillis())
+            Notifications.cancelUpdates(applicationContext, installed.map(UpdateNotices::tag))
+            notify(updates)
+            // A finished build of an installed app is already news as an update (or installed).
+            checkBuilds(kiwi, updated = (updates + installed).map { it.packageName }.toSet())
+            // Last: a silent self-update stops this process.
+            selfUpdate(kiwi, autoUpdate)
             Result.success()
         } catch (error: CancellationException) {
             throw error
@@ -60,27 +65,37 @@ class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         }
     }
 
-    /** Installs the updates Android allows without a confirmation. Returns their library keys. */
-    private suspend fun installSilently(updates: List<AppSummary>): Set<String> {
-        val container = (applicationContext as KiwiApplication).container
-        val done = mutableSetOf<String>()
-        for (app in updates) {
+    /**
+     * Installs the updates Android allows without a confirmation, while [BackgroundConditions]
+     * hold. One worker installs at a time; another one waits and then reads the updates that
+     * are left. Returns the apps it updated.
+     */
+    private suspend fun installSilently(kiwi: KiwiApi): List<AppSummary> = container.installs.backgroundInstalls {
+        val done = mutableListOf<AppSummary>()
+        for (app in kiwi.updates().filter { it.platform == Platforms.ANDROID }) {
+            if (!BackgroundConditions.met(applicationContext)) break
             if (!container.packageScanner.canUpdateSilently(app.packageName)) continue
-            val outcome = try {
-                container.installs.installInBackground(app)
-            } catch (error: CancellationException) {
-                if (isStopped) throw error
-                // Took too long (a confirmation nobody answered): notify it instead.
-                null
+            when (val outcome = attempt { container.installs.installInBackground(app) }) {
+                InstallOutcome.Success -> done += app
+                null -> {}
+                else -> Log.i(TAG, "Background update of ${app.name}: $outcome")
             }
-            if (outcome == InstallOutcome.Success) done += app.libraryKey
-            else if (outcome != null) Log.i(TAG, "Background update of ${app.name}: $outcome")
         }
-        return done
+        done
+    }
+
+    /**
+     * Runs one background install. Null when it was skipped, cancelled (from the app's button)
+     * or took too long (a confirmation nobody answered): then the update is notified instead.
+     */
+    private suspend fun attempt(install: suspend () -> InstallOutcome?): InstallOutcome? = try {
+        install()
+    } catch (error: CancellationException) {
+        if (isStopped) throw error
+        null
     }
 
     private suspend fun notify(updates: List<AppSummary>) {
-        val container = (applicationContext as KiwiApplication).container
         if (!container.settings.notifyUpdates.first() || !Notifications.allowed(applicationContext)) return
         val (notices, remember) = UpdateNotices.fresh(updates, container.settings.notified())
         Notifications.showUpdates(applicationContext, notices)
@@ -92,7 +107,6 @@ class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker
      * finishes"), and looks again soon while a build is still running.
      */
     private suspend fun checkBuilds(kiwi: KiwiApi, updated: Set<String>) {
-        val container = (applicationContext as KiwiApplication).container
         if (!container.settings.notifyBuilds.first() || !Notifications.allowed(applicationContext)) return
         val apps = try {
             kiwi.automation().apps
@@ -109,16 +123,21 @@ class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         }
     }
 
-    /** Offers (or installs) a newer version of this app when Kiwi has one. */
-    private suspend fun selfUpdate(autoUpdate: Boolean) {
-        val container = (applicationContext as KiwiApplication).container
-        val kiwi = container.api() ?: return
+    /**
+     * Installs a newer version of this app when Kiwi has one and Android allows it without a
+     * confirmation (see PackageScanner.canUpdateSilently), else notifies it once per version.
+     */
+    private suspend fun selfUpdate(kiwi: KiwiApi, autoUpdate: Boolean) {
+        val own = applicationContext.packageName
         val offer = kiwi.me().androidApp ?: return
-        if (offer.packageName != applicationContext.packageName || offer.versionCode <= BuildConfig.VERSION_CODE) return
-        if (autoUpdate && container.packageScanner.canUpdateSilently(applicationContext.packageName)) {
-            // Android stops this process to replace the app; nothing runs after a success.
-            runCatching { container.installs.selfUpdateInBackground(offer) }
-            return
+        if (offer.packageName != own || offer.versionCode <= BuildConfig.VERSION_CODE) return
+        if (autoUpdate && container.packageScanner.canUpdateSilently(own)) {
+            val outcome = container.installs.backgroundInstalls {
+                if (BackgroundConditions.met(applicationContext)) attempt { container.installs.selfUpdateInBackground(offer) } else null
+            }
+            // Android stops this process to replace the app: a success never gets here.
+            if (outcome == InstallOutcome.Success) return
+            if (outcome != null) Log.i(TAG, "Background self-update: $outcome")
         }
         if (container.settings.notifyUpdates.first() && Notifications.allowed(applicationContext)) {
             val key = UpdateNotices.selfKey(offer.versionCode)
@@ -133,11 +152,11 @@ class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker
     companion object {
         private const val TAG = "KiwiUpdates"
         private const val PERIODIC = "kiwi-update-check"
-        private const val NOW = "kiwi-update-check-now"
         private const val BUILD_WATCH = "kiwi-build-watch"
         private const val WATCH = "watch_builds"
         private const val BUILD_WATCH_MINUTES = 5L
 
+        /** Any network: checking and notifying work on mobile data too (installs check more). */
         private val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
@@ -149,12 +168,6 @@ class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                 .build()
             WorkManager.getInstance(context)
                 .enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.UPDATE, request)
-        }
-
-        /** Runs a check as soon as there is a network. */
-        fun checkNow(context: Context) {
-            val request = OneTimeWorkRequestBuilder<UpdateWorker>().setConstraints(constraints).build()
-            WorkManager.getInstance(context).enqueueUniqueWork(NOW, ExistingWorkPolicy.REPLACE, request)
         }
 
         /**
@@ -174,7 +187,6 @@ class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker
 
         fun cancel(context: Context) {
             WorkManager.getInstance(context).cancelUniqueWork(PERIODIC)
-            WorkManager.getInstance(context).cancelUniqueWork(NOW)
             WorkManager.getInstance(context).cancelUniqueWork(BUILD_WATCH)
         }
     }

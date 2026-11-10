@@ -19,7 +19,7 @@ class KiwiApplication : Application(), SingletonImageLoader.Factory {
         container = AppContainer(this)
         ForegroundTracker.register(this)
         Notifications.createChannels(this)
-        container.packageReporter.watch()
+        container.packageReporter.watch(this)
         container.scope.launch {
             if (container.api() != null) UpdateWorker.schedule(this@KiwiApplication)
         }

@@ -42,7 +42,10 @@ APKs, see below) and signed with its current key. When it isn't, the Android run
 - writes `android-app/kiwi.apk` and `android-app/kiwi.json`, each replaced in one step.
 
 The phones see it as `Me.android_app`. The web app offers it to Android devices, and the
-Android app offers its own update in My Apps when Kiwi serves a newer version.
+Android app offers its own update in My Apps when Kiwi serves a newer version. On Android 12
+and later its background check installs that update without asking (on Wi-Fi, with a battery
+that isn't low), also when the app was first installed from the browser; it checks that the
+APK is the offered version and signed with Kiwi's key before installing it.
 
 When signing fails, Kiwi logs it, keeps offering the app it signed before, and shows a
 warning on Android devices (in Settings) until an attempt succeeds. It tries again after

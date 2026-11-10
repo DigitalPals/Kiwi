@@ -41,8 +41,9 @@ class AppContainer(val application: Application) {
     private val kiwiHosts: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /**
-     * One HTTP client for the API, downloads and icons. Requests to Kiwi carry the full
-     * User-Agent (Kiwi reads the Android release from it); icon hosts only learn the app name.
+     * One HTTP client (and connection pool) for the API, downloads and icons. Requests to Kiwi
+     * carry the full User-Agent (Kiwi reads the Android release from it); icon hosts only learn
+     * the app name. The API and the downloader don't follow redirects (see KiwiApi); icons may.
      */
     val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -57,16 +58,17 @@ class AppContainer(val application: Application) {
     val packageScanner = PackageScanner(application)
     val sessionInstaller = SessionInstaller(application)
 
-    val packageReporter = PackageReporter(application, packageScanner, scope) { api() }
+    val packageReporter = PackageReporter(packageScanner, scope, api = { api() }, ownPackage = application.packageName)
 
     val installs = InstallManager(
-        context = application,
         scope = scope,
         api = { api() },
         downloader = ApkDownloader(httpClient),
         installer = sessionInstaller,
-        scanner = packageScanner,
-        reporter = packageReporter,
+        packages = packageScanner,
+        report = { packageReporter.report() },
+        cacheDir = application.cacheDir,
+        ownPackage = application.packageName,
     )
 
     @Volatile

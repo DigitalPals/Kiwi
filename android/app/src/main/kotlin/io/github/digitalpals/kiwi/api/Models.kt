@@ -78,6 +78,11 @@ data class HostInfo(
     val os: String = "other",
     @SerialName("ios_signing") val iosSigning: String? = null,
     val devicectl: Boolean = false,
+    /**
+     * SHA-256 (hex) of the certificate Kiwi signs Android apps with (Kiwi Builds' apps and this
+     * app); null until Kiwi Builds has loaded its key, and on older servers.
+     */
+    @SerialName("android_signer_sha256") val androidSignerSha256: String? = null,
 )
 
 /** The Kiwi Android app (this app) as the server can serve it. */

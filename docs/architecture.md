@@ -759,21 +759,29 @@ and the app on one phone are one device. It sends the User-Agent
 which marks the device Android and carries the Android release Chrome hides. What the web app
 cannot do, it adds:
 
-- **Packages.** It reads the installed packages with PackageManager (`QUERY_ALL_PACKAGES`;
-  the app is not distributed through Google Play) and reports them with their version,
-  signer certificate digests and installer to `PUT /api/me/packages` at start, after an
+- **Packages.** It looks up the packages Kiwi asks about with PackageManager
+  (`QUERY_ALL_PACKAGES`, since they change with the catalogue; the app is not distributed
+  through Google Play): its own, the Android apps of `GET /api/apps?hidden=1` and the
+  installs of `GET /api/library`. It reports those that are installed, with their version,
+  signer certificate digests and installer, to `PUT /api/me/packages` at start, after an
   install and when a package changes, so Kiwi knows what is really installed and which
-  apps are installed with another signature (`AppState.foreign_install`).
-- **Installs.** It downloads the APK from `install_url` (only from Kiwi's own host, resuming
-  with `Range`), checks the package name, version and signer against an installed copy, and
-  installs it with a PackageInstaller session. Sessions ask for `USER_ACTION_NOT_REQUIRED`
-  (Android 12+), which Android grants for updates of apps whose installer of record is the
-  app; other installs show Android's confirmation. On Android 14+ a first install also makes
+  apps are installed with another signature (`AppState.foreign_install`). The phone's other
+  apps are never sent; without both lists nothing is sent.
+- **Installs.** It downloads the APK from `install_url` (only from Kiwi's own host, without
+  following redirects, resuming with `Range` only a partial file of the same URL, version
+  code and size), checks the package name, the version code Kiwi offered, Kiwi's Android
+  signer (`Me.host.android_signer_sha256`, when known) and the signer of an installed copy,
+  and installs it with a PackageInstaller session. Each app has at most one install job at
+  a time, whether a screen or the background worker started it. Sessions ask for
+  `USER_ACTION_NOT_REQUIRED` (Android 12+), which Android grants for updates of apps whose
+  update owner, or without one installer of record, is the app, and for the app's own
+  updates; other installs show Android's confirmation. On Android 14+ a first install also makes
   the app the package's update owner (`setRequestUpdateOwnership`). Because the phone reports what is
   installed, the app trusts the phone over Kiwi's download-based guess ("open" with the
   package missing offers Install again).
-- **Background.** A WorkManager job checks `GET /api/updates` about every two hours,
-  notifies each update once and installs those Android allows without a tap. It also
+- **Background.** A WorkManager job checks `GET /api/updates` about every two hours on any
+  network, notifies each update once and installs those Android allows without a tap, on
+  an unmetered network with a battery that isn't low. It also
   notifies Kiwi Builds jobs that finished or failed (`GET /api/automation`), and looks again
   a few minutes later while a build runs.
 - **Kiwi Builds.** A Builds tab adds and removes Kiwi Builds' Android apps, changes their

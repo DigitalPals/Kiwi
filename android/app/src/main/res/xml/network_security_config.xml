@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Kiwi is reached over HTTPS only (tailscale serve); no plain HTTP, also on Android 8.x,
+     where it would otherwise be allowed. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

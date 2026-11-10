@@ -33,7 +33,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -193,15 +192,12 @@ class MyAppsViewModel(container: AppContainer, private val local: LocalPackages)
         content
     }
 
-    /** Starts every update; Kiwi's own update last, since installing it restarts the app. */
+    /**
+     * Starts every update that isn't being installed already; Kiwi's own update once they have
+     * all finished, since installing it restarts the app.
+     */
     fun updateAll(content: Content) {
-        content.updates.forEach { container.installs.start(it.app) }
-        val offer = content.selfUpdate ?: return
-        container.scope.launch {
-            val keys = content.updates.map { it.app.key }.toSet()
-            container.installs.jobs.first { jobs -> keys.none { jobs[it]?.isActive == true } }
-            container.installs.startSelfUpdate(offer)
-        }
+        container.installs.startAll(content.updates.map { it.app }, content.selfUpdate)
     }
 }
 
@@ -385,11 +381,21 @@ class BuildsViewModel(container: AppContainer, private val local: LocalPackages)
     }
 }
 
-/** Connecting to a Kiwi: checks `/api/health`, then `/api/me`, then saves the address. */
+/**
+ * Connecting to a Kiwi: checks `/api/health`, then `/api/me`, then saves the address. The result
+ * is part of [state] ([State.connected]), not a callback, so a connect that finishes while the
+ * screen is recreated (a rotation) still reaches the screen that is shown then.
+ */
 class ConnectViewModel(private val container: AppContainer, initial: String) : ViewModel() {
     data class Problem(val title: String, val message: String, val network: Boolean = false)
 
-    data class State(val input: String, val busy: Boolean = false, val problem: Problem? = null)
+    data class State(
+        val input: String,
+        val busy: Boolean = false,
+        val problem: Problem? = null,
+        /** The saved address once connecting worked, until the screen has handled it. */
+        val connected: String? = null,
+    )
 
     private val _state = MutableStateFlow(State(initial))
     val state: StateFlow<State> = _state
@@ -398,7 +404,12 @@ class ConnectViewModel(private val container: AppContainer, initial: String) : V
         _state.update { it.copy(input = value, problem = null) }
     }
 
-    fun connect(onConnected: (String) -> Unit) {
+    /** The screen has left for the connected app (see [State.connected]). */
+    fun connectedHandled() {
+        _state.update { it.copy(connected = null) }
+    }
+
+    fun connect() {
         val parsed = ServerUrl.parse(_state.value.input)
         if (parsed is ServerUrl.Parsed.Invalid) {
             _state.update { it.copy(problem = Problem("Check the address", parsed.message)) }
@@ -412,8 +423,7 @@ class ConnectViewModel(private val container: AppContainer, initial: String) : V
                 kiwi.health()
                 kiwi.me()
                 container.settings.setServerUrl(url.toString())
-                _state.update { it.copy(busy = false) }
-                onConnected(url.toString())
+                _state.update { it.copy(busy = false, connected = url.toString()) }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: KiwiException) {

@@ -108,9 +108,12 @@ fun KiwiRoot(container: AppContainer, requests: StateFlow<LaunchRequest?>, onReq
             is ServerState.Known -> {
                 val saved = current.url
                 if (saved == null || linkUrl != null || showingSetup) {
+                    // Fixed while the screen is up (its ViewModel is keyed by it): saving the new
+                    // address must not replace the ViewModel that reports the connect.
+                    val initialUrl = rememberSaveable(linkUrl, showingSetup) { linkUrl ?: saved?.removeSuffix("/").orEmpty() }
                     ConnectScreen(
                         container = container,
-                        initialUrl = linkUrl ?: saved?.removeSuffix("/").orEmpty(),
+                        initialUrl = initialUrl,
                         fromLink = linkUrl != null,
                         onConnected = {
                             linkUrl = null

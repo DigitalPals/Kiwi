@@ -1,5 +1,6 @@
 //! Who is on the other end of a loopback connection (architecture.md "Security"). On a
-//! Mac, Kiwi trusts anything on loopback: the Mac is its owner's alone. Elsewhere other
+//! Mac (or with `--trust-local`), Kiwi trusts anything on loopback: the computer is its
+//! owner's alone. Elsewhere other
 //! users and services may share the computer, so only tailscaled (`tailscale serve`, which
 //! runs as root) may forward a tailnet address with `X-Forwarded-For`, and nothing else on
 //! the computer counts as the owner. The kernel's socket tables (`/proc/net/tcp` and
@@ -194,10 +195,10 @@ pub fn socket_uids(text: &str, client: SocketAddr, server: SocketAddr) -> Vec<u3
 pub enum Origin {
     /// Proxied by `tailscale serve` for this tailnet address.
     Tailnet(IpAddr),
-    /// Made on the Mac itself, which is its owner's alone (macOS only).
-    Mac,
+    /// Made on the computer itself, which is its owner's alone ([`LocalTrust::Anyone`]).
+    Local,
     /// Nothing tells who made it, so it is not the owner: a request on the computer that
-    /// doesn't come through tailscaled (not on macOS).
+    /// doesn't come through tailscaled ([`LocalTrust::ProxyUid`]).
     Unknown,
 }
 
@@ -206,7 +207,7 @@ pub enum Origin {
 pub async fn origin(kiwi: &Kiwi, conn: Option<&Connection>, forwarded_for: Option<&str>) -> Origin {
     let forwarded = forwarded_client(conn.map(|c| c.remote), forwarded_for);
     match kiwi.config.local {
-        LocalTrust::Mac => forwarded.map_or(Origin::Mac, Origin::Tailnet),
+        LocalTrust::Anyone => forwarded.map_or(Origin::Local, Origin::Tailnet),
         LocalTrust::ProxyUid(proxy) => {
             let (Some(conn), Some(ip)) = (conn, forwarded) else {
                 return Origin::Unknown;

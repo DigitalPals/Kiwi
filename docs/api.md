@@ -30,8 +30,9 @@ RFC 3339 strings in UTC. All `/api` responses are `application/json` with
   user (`--proxy-uid`, root by default; architecture.md "Security"). When a request proxied
   from the tailnet cannot be identified because the Tailscale whois fails (retried once),
   the response is `503 device_unidentified` ("Couldn't identify this device through
-  Tailscale. Try again."). On a Mac the cookie is used without a forwarded address or when
-  whois reports that the address is not a peer: a browser on the Mac. On other computers
+  Tailscale. Try again."). On a Mac (or with `--trust-local`) the cookie is used without a
+  forwarded address or when whois reports that the address is not a peer: a browser on the
+  Mac. On other computers
   such a request, and one from the computer's own Tailscale address, could come from
   anyone who can log in there; it gets `403 not_owner` ("Kiwi is used through Tailscale,
   not on the computer it runs on. Open https://kiwi.example.ts.net on a phone or computer

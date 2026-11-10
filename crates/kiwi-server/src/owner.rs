@@ -80,12 +80,13 @@ pub async fn tick(kiwi: &Kiwi) {
     }
 }
 
-/// Browser devices on a Mac and devices from before Kiwi recorded Tailscale users count as
-/// the owner's; every other device must belong to the owner's Tailscale user. Off macOS a
-/// browser device is nobody's: anyone on the computer could have made it.
+/// Browser devices on a Mac (or with `--trust-local`) and devices from before Kiwi recorded
+/// Tailscale users count as the owner's; every other device must belong to the owner's
+/// Tailscale user. Otherwise a browser device is nobody's: anyone on the computer could have
+/// made it.
 pub fn is_owner(kiwi: &Kiwi, device: &DeviceRow) -> bool {
     match &device.person_id {
-        None => device.kind == "tailscale" || kiwi.config.local == LocalTrust::Mac,
+        None => device.kind == "tailscale" || kiwi.config.local == LocalTrust::Anyone,
         Some(user) => kiwi.owner.login().as_ref() == Some(user),
     }
 }

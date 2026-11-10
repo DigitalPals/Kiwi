@@ -53,15 +53,18 @@ pub struct Args {
     /// The user tailscaled runs as (as /proc/net/tcp shows it to Kiwi): only its loopback connections may forward tailnet addresses (not on macOS)
     #[arg(long, env = "KIWI_PROXY_UID", default_value_t = 0)]
     pub proxy_uid: u32,
+    /// Take every user and program on this computer for the owner, as on a Mac: for development, or a computer only you use (always so on macOS)
+    #[arg(long, env = "KIWI_TRUST_LOCAL")]
+    pub trust_local: bool,
 }
 
 /// Which loopback requests speak for whom (architecture.md "Security").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalTrust {
-    /// macOS: the Mac is its owner's alone. Any loopback connection may forward a tailnet
-    /// address (`X-Forwarded-For`), and a request without one is the owner's browser on
-    /// the Mac.
-    Mac,
+    /// The computer is its owner's alone (macOS, or `--trust-local`): any loopback
+    /// connection may forward a tailnet address (`X-Forwarded-For`), and a request without
+    /// one is the owner's browser on the computer.
+    Anyone,
     /// Elsewhere, where other users and services may share the computer: only loopback
     /// connections of this uid (tailscaled's, `--proxy-uid`) may forward a tailnet address,
     /// and nothing else on the computer is the owner.
@@ -69,10 +72,11 @@ pub enum LocalTrust {
 }
 
 impl LocalTrust {
-    /// [`LocalTrust::Mac`] on macOS, else [`LocalTrust::ProxyUid`] with `proxy_uid`.
-    pub fn of_host(proxy_uid: u32) -> Self {
-        if cfg!(target_os = "macos") {
-            Self::Mac
+    /// [`LocalTrust::Anyone`] on macOS or with `trust_local`, else
+    /// [`LocalTrust::ProxyUid`] with `proxy_uid`.
+    pub fn of_host(proxy_uid: u32, trust_local: bool) -> Self {
+        if cfg!(target_os = "macos") || trust_local {
+            Self::Anyone
         } else {
             Self::ProxyUid(proxy_uid)
         }
@@ -232,7 +236,7 @@ impl Args {
                 posix_region(|key| std::env::var(key).ok())
             },
             python: self.python.clone(),
-            local: LocalTrust::of_host(self.proxy_uid),
+            local: LocalTrust::of_host(self.proxy_uid, self.trust_local),
         })
     }
 }
@@ -349,7 +353,7 @@ mod tests {
         assert!(config.public_url.is_none());
         let trust = |args: &[&str]| Args::try_parse_from(args).unwrap().config().unwrap().local;
         let (default, remapped) = if cfg!(target_os = "macos") {
-            (LocalTrust::Mac, LocalTrust::Mac)
+            (LocalTrust::Anyone, LocalTrust::Anyone)
         } else {
             (LocalTrust::ProxyUid(0), LocalTrust::ProxyUid(65534))
         };
@@ -359,6 +363,10 @@ mod tests {
             remapped
         );
         assert!(Args::try_parse_from(["kiwi", "--proxy-uid", "-1"]).is_err());
+        assert_eq!(
+            trust(&["kiwi", "--data-dir", "/tmp/k", "--trust-local"]),
+            LocalTrust::Anyone
+        );
     }
 
     #[test]

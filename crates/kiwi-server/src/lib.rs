@@ -548,6 +548,11 @@ pub async fn run(args: Args) -> Result<(), String> {
         );
     }
     let mut options = Options::from_args(&args)?;
+    if args.trust_local && !cfg!(target_os = "macos") {
+        tracing::warn!(
+            "--trust-local: every user and program on this computer counts as Kiwi's owner"
+        );
+    }
     // Without --public-url, Tailscale names the address; until it does, Kiwi keeps asking.
     let mut learn = None;
     if options.config.public_url.is_none() {

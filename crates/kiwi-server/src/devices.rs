@@ -452,24 +452,25 @@ pub struct Requester {
 }
 
 /// The device of a request, and a `kiwi_device` cookie value to set when it is new.
-/// Off macOS, a request that doesn't come through Tailscale, or comes from this computer's
-/// own node, belongs to no device: anyone on the computer could have made it
-/// (`403 not_owner`, see [`owner::not_on_this_computer`]).
+/// Off macOS (unless `--trust-local`), a request that doesn't come through Tailscale, or
+/// comes from this computer's own node, belongs to no device: anyone on the computer could
+/// have made it (`403 not_owner`, see [`owner::not_on_this_computer`]).
 pub async fn resolve(kiwi: &Kiwi, req: &Requester) -> ApiResult<(DeviceRow, Option<String>)> {
     let now = Utc::now();
-    let mac = kiwi.config.local == LocalTrust::Mac;
+    let anyone = kiwi.config.local == LocalTrust::Anyone;
     let peer = match req.origin {
         Origin::Tailnet(ip) => match whois(kiwi, ip).await? {
             Some(peer)
-                if !mac && peer.stable_id == kiwi.caches.node_id(kiwi.devices.as_ref()).await? =>
+                if !anyone
+                    && peer.stable_id == kiwi.caches.node_id(kiwi.devices.as_ref()).await? =>
             {
                 return Err(owner::not_on_this_computer(kiwi));
             }
             Some(peer) => Some(peer),
-            None if mac => None,
+            None if anyone => None,
             None => return Err(owner::not_on_this_computer(kiwi)),
         },
-        Origin::Mac => None,
+        Origin::Local => None,
         Origin::Unknown => return Err(owner::not_on_this_computer(kiwi)),
     };
     let mut set_cookie = None;

@@ -81,6 +81,7 @@ Change them by running `./install.sh` again with other options (see
 | `--python` | `KIWI_PYTHON` | The Python for Kiwi Builds' runners: `/opt/homebrew/bin/python3.13` on a Mac, `python3` on Linux (Android builds need 3.12 or newer) |
 | `--owner` | `KIWI_OWNER` | The Tailscale user who owns this computer |
 | `--proxy-uid` | `KIWI_PROXY_UID` | Not on a Mac: `0`, the user tailscaled runs as; only its connections may forward tailnet addresses (see [Install](install.md)) |
+| `--trust-local` | `KIWI_TRUST_LOCAL` | Off; takes every user and program on the computer for the owner, as on a Mac (development, or a computer only you use) |
 | `--allow-simulators` | `KIWI_ALLOW_SIMULATORS` | Off; treats simulators as linkable devices, for testing |
 
 Without `--public-url`, Kiwi asks Tailscale for this computer's name at start, and keeps

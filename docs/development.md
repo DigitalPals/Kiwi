@@ -128,10 +128,12 @@ about it as the server does (`no_identity`, `no_profile`).
 cd web && npm ci && npm run build && cd ..
 cargo run -p kiwi-server -- \
   --listen 127.0.0.1:18742 --data-dir /tmp/kiwi-dev --web-dir web/dist \
-  --public-url http://localhost:5173
+  --public-url http://localhost:5173 --trust-local
 ```
 
-On Linux, Kiwi signs with an uploaded identity and profile ([signing-on-linux.md](signing-on-linux.md);
+`--trust-local` makes a browser on your computer the owner, as on a Mac; without it, Kiwi
+on Linux answers requests that don't come through Tailscale with `403 not_owner`. On
+Linux, Kiwi signs with an uploaded identity and profile ([signing-on-linux.md](signing-on-linux.md);
 until then signing reports that none was uploaded) and Tailscale lookups fail, but sources,
 the catalogue, settings and the API work. Every flag is also an environment variable
 (`KIWI_LISTEN`, `KIWI_DATA_DIR`, `KIWI_PUBLIC_URL`, ...; see `kiwi --help`).

@@ -227,7 +227,9 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
   owner's Tailscale login, see "The owner"), `--python` (runs Kiwi Builds' runners; default
   `/opt/homebrew/bin/python3.13` on macOS, `python3` elsewhere), `--proxy-uid` (not on
   macOS: the user tailscaled runs as, as `/proc/net/tcp` shows it to Kiwi; default 0, root;
-  see "Security"), `--allow-simulators` (treat simulators as linkable devices, for testing
+  see "Security"), `--trust-local` (take every user and program on the computer for the
+  owner, as on a Mac: for development without Tailscale, or a computer only the owner uses;
+  off by default), `--allow-simulators` (treat simulators as linkable devices, for testing
   only).
   `install.sh` passes the address and the Tailscale CLI it found explicitly.
 - The App Store country, until the owner picks one, is the region of the Mac's locale
@@ -302,26 +304,26 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
 ### Device identification
 
 Requests come from `tailscale serve` on loopback. `peers::origin` decides where a request
-comes from (`peers::LocalTrust`, see "Security"): when the peer is loopback, carries
-`X-Forwarded-For` (the rightmost entry of the last header, the one the proxy added) and,
-off macOS, its connection belongs to tailscaled's user (`--proxy-uid`), take that client
-IP, resolve it with tailscaled's whois (cache 10 min) and use device `ts:<StableID>`;
-Safari and the Home Screen app on the same phone therefore share one device. When whois
-fails (error or timeout, as opposed to "not a peer"), it is retried once, then the request
-fails with `503 device_unidentified` rather than splitting the phone into a cookie device;
-requests from that address fail the same way for 15 s without running whois again.
-Otherwise, on a Mac, use (and set) a `kiwi_device` cookie (`local:<random>`): a browser on
-the Mac; the web app sends `/api/me` first so concurrent first requests do not each create
-one, and cleanup deletes `local:` devices without installs, attempts or push subscriptions
-that were not seen for 24 h. On other computers there is no cookie device: a request
-without a trusted forwarded address, one whose address whois doesn't know, and one from
-the computer's own Tailscale node (whois `StableID` = `Self.ID` of tailscaled's status,
-cached 10 min; reachable by any local user through the computer's tailnet address) get
-`403 not_owner` before any device is made (`owner::not_on_this_computer`). Update
-`last_seen`, the Tailscale name and, from the User-Agent, the OS version (never
-downgrading the source priority). Kiwi's
-Android app is identified the same way, so it and the phone's browser are one device;
-`Ctx.client` tells them apart by the User-Agent.
+comes from (`config::LocalTrust`, see "Security"): when the peer is loopback, carries
+`X-Forwarded-For` (the rightmost entry of the last header, the one the proxy added) and, off
+macOS (without `--trust-local`), its connection belongs to tailscaled's user
+(`--proxy-uid`), take that client IP, resolve it with tailscaled's whois (cache 10 min) and
+use device `ts:<StableID>`; Safari and the Home Screen app on the same phone therefore share
+one device. When whois fails (error or timeout, as opposed to "not a peer"), it is retried
+once, then the request fails with `503 device_unidentified` rather than splitting the phone
+into a cookie device; requests from that address fail the same way for 15 s without running
+whois again. Otherwise, on a Mac (or with `--trust-local`), use (and set) a `kiwi_device`
+cookie (`local:<random>`): a browser on the Mac; the web app sends `/api/me` first so
+concurrent first requests do not each create one, and cleanup deletes `local:` devices
+without installs, attempts or push subscriptions that were not seen for 24 h. On other
+computers there is no cookie device: a request without a trusted forwarded address, one
+whose address whois doesn't know, and one from the computer's own Tailscale node (whois
+`StableID` = `Self.ID` of tailscaled's status, cached 10 min; reachable by any local user
+through the computer's tailnet address) get `403 not_owner` before any device is made
+(`owner::not_on_this_computer`). Update `last_seen`, the Tailscale name and, from the
+User-Agent, the OS version (never downgrading the source priority). Kiwi's Android app is
+identified the same way, so it and the phone's browser are one device; `Ctx.client` tells
+them apart by the User-Agent.
 
 ### Device platforms
 
@@ -610,25 +612,25 @@ subscriptions made with the old key are deleted (each device subscribes again).
   with HTTPS to the tailnet only. `install.sh` refuses to install while Funnel is on for the
   Mac's name and never replaces another `/` mapping. Within the tailnet, only the owner's
   devices may use the API (see "The owner").
-- Who is on the other end of a loopback connection (`peers`, `config::LocalTrust`): a Mac
-  is its owner's alone, so Kiwi trusts `X-Forwarded-For` from any loopback connection and
-  a request without it is the owner's browser. Other computers may have other users and
-  services, which can all reach the loopback port. There Kiwi trusts `X-Forwarded-For` only
-  from connections whose client socket belongs to tailscaled's user (`--proxy-uid`,
-  `KIWI_PROXY_UID`, default 0: tailscaled runs as root). It finds that user in the
-  kernel's socket tables of its network namespace (`/proc/net/tcp` and `/proc/net/tcp6`,
-  read through `/proc/self/net`): the open socket (inode not 0, so not a time-wait or
-  orphaned one, which the kernel reports as root's) whose local address is the client's
-  and whose remote address is Kiwi's end of the connection, comparing IPv4-mapped IPv6
-  addresses as IPv4. The answer is kept for the connection, which `tailscale serve` reuses.
-  When the connection can't be found or the tables can't be read, Kiwi logs it and trusts
-  nothing. A request that isn't trusted this way, or that comes from the computer's own
-  Tailscale node (any local user can reach `tailscale serve` through the computer's tailnet
-  address), is nobody's: `403 not_owner` on every endpoint but `/api/health`, and no
-  device. In Docker, the Tailscale container's tailscaled runs as root and shares Kiwi's
-  network namespace, so the default fits; with user namespaces that map the containers
-  differently, Kiwi logs the uid it saw ("ignored X-Forwarded-For … uid N") and
-  `KIWI_PROXY_UID=N` names it.
+- Who is on the other end of a loopback connection (`peers`, `config::LocalTrust`): a Mac is
+  its owner's alone, so Kiwi trusts `X-Forwarded-For` from any loopback connection and a
+  request without it is the owner's browser (`LocalTrust::Anyone`; elsewhere only with
+  `--trust-local`, which Kiwi warns about at start). Other computers may have other users
+  and services, which can all reach the loopback port. There Kiwi trusts `X-Forwarded-For`
+  only from connections whose client socket belongs to tailscaled's user (`--proxy-uid`,
+  `KIWI_PROXY_UID`, default 0: tailscaled runs as root). It finds that user in the kernel's
+  socket tables of its network namespace (`/proc/net/tcp` and `/proc/net/tcp6`, read through
+  `/proc/self/net`): the open socket (inode not 0, so not a time-wait or orphaned one, which
+  the kernel reports as root's) whose local address is the client's and whose remote address
+  is Kiwi's end of the connection, comparing IPv4-mapped IPv6 addresses as IPv4. The answer
+  is kept for the connection, which `tailscale serve` reuses. When the connection can't be
+  found or the tables can't be read, Kiwi logs it and trusts nothing. A request that isn't
+  trusted this way, or that comes from the computer's own Tailscale node (any local user can
+  reach `tailscale serve` through the computer's tailnet address), is nobody's:
+  `403 not_owner` on every endpoint but `/api/health`, and no device. In Docker, the Tailscale
+  container's tailscaled runs as root and shares Kiwi's network namespace, so the default
+  fits; with user namespaces that map the containers differently, Kiwi logs the uid it saw
+  ("ignored X-Forwarded-For … uid N") and `KIWI_PROXY_UID=N` names it.
 - Requests must name the public URL's host or the listen address
   (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`) in `Host`, and an
   `X-Forwarded-Host` must be the public host; otherwise `421 bad_host`. A DNS-rebinding

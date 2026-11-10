@@ -861,11 +861,12 @@ impl TestKiwi {
         Self::start_setup(dir, setup).await
     }
 
-    /// Kiwi as on a Mac, which is its owner's alone: a browser on it is the owner's.
+    /// Kiwi as on a Mac (or with `--trust-local`), which is its owner's alone: a browser on
+    /// it is the owner's.
     pub async fn start_on_mac(dir: tempfile::TempDir, devices: FakeDevices) -> Self {
         let setup = Setup {
             devices,
-            local: LocalTrust::Mac,
+            local: LocalTrust::Anyone,
             ..Setup::default()
         };
         Self::start_setup(dir, setup).await

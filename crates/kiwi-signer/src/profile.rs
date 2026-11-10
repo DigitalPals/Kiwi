@@ -7,7 +7,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Identity, Result, cert::sha1_hex, der::cms_content};
+use crate::{Error, Identity, Result, cert::sha1_hex, check_plist, der::cms_content};
 
 /// A parsed `.mobileprovision`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -168,12 +168,14 @@ struct RawProfile {
     platform: Vec<String>,
 }
 
-/// Parses a `.mobileprovision` (the plist inside its CMS envelope; the signature is
-/// not verified). `path` is left empty.
+/// Parses a `.mobileprovision` (the plist inside its CMS envelope, nested at most 64
+/// levels deep; the signature is not verified). `path` is left empty.
 pub fn parse_profile(bytes: &[u8]) -> Result<Profile> {
     let invalid =
         |reason: &str| Error::InvalidProfile(format!("Invalid provisioning profile: {reason}"));
     let content = cms_content(bytes).ok_or_else(|| invalid("not a signed profile"))?;
+    // Deserializing recurses per nesting level: check the depth first.
+    check_plist(&content).map_err(|e| invalid(&e))?;
     let raw: RawProfile = plist::from_bytes(&content).map_err(|e| invalid(&e.to_string()))?;
     let team_id = raw
         .team_identifier
@@ -310,6 +312,32 @@ mod tests {
                 "keychain-access-groups"
             ]
         );
+    }
+
+    #[test]
+    fn rejects_deeply_nested_profiles() {
+        let bytes = crate::testutil::nested_profile(60_000);
+        assert!(bytes.len() <= crate::MAX_PROFILE_BYTES);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deep.mobileprovision");
+        fs::write(&path, &bytes).unwrap();
+        // With the stack of tokio's threads, where uploads and scans run.
+        let (parsed, loaded) = std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || {
+                let parsed = parse_profile(&bytes).map(|_| ()).map_err(|e| e.to_string());
+                let loaded: Vec<_> = load_profiles(&[dir.path().to_path_buf()])
+                    .into_iter()
+                    .map(|(path, r)| (path, r.map(|_| ()).map_err(|e| e.to_string())))
+                    .collect();
+                (parsed, loaded)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        let message = "Invalid provisioning profile: nested more than 64 levels deep";
+        assert_eq!(parsed, Err(message.into()));
+        assert_eq!(loaded, [(path, Err(message.into()))]);
     }
 
     #[test]

@@ -89,8 +89,17 @@ pub fn sign_ipa(
     sign_with(&tools, req, cancel, progress, Utc::now())
 }
 
+/// Stack of the thread [`sign_ipa_with_files`] signs on. Untrusted plists are checked
+/// before they are parsed and old signatures are never parsed, so this is a further
+/// safeguard: parsers in the signing library recurse, and a stack overflow aborts the
+/// whole server instead of failing one build.
+#[cfg(not(target_os = "macos"))]
+const SIGNING_STACK_BYTES: usize = 64 << 20;
+
 /// Re-signs like [`sign_ipa`] with the identity uploaded to `dir` and rcodesign's library
 /// ([`crate::Backend::Files`], every system but macOS). `req.identity` must be that identity.
+/// Signs on a thread of its own with a large stack; `progress` is called on the caller's
+/// thread.
 pub fn sign_ipa_with_files(
     req: &SignRequest,
     dir: &SigningDir,
@@ -106,16 +115,36 @@ pub fn sign_ipa_with_files(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let key = dir
-            .signing_key()?
-            .ok_or_else(|| Error::InvalidIdentity("No signing identity was uploaded".into()))?;
-        if !key.identity.sha1.eq_ignore_ascii_case(&req.identity.sha1) {
-            return Err(Error::InvalidIdentity(
-                "The uploaded signing identity changed while the build waited; try again".into(),
-            ));
-        }
-        let tools = crate::rcodesign::Rcodesign::new(&key);
-        sign_with(&tools, req, cancel, progress, Utc::now())
+        let (steps, received) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("kiwi-sign".into())
+                .stack_size(SIGNING_STACK_BYTES)
+                .spawn_scoped(scope, move || {
+                    let key = dir.signing_key()?.ok_or_else(|| {
+                        Error::InvalidIdentity("No signing identity was uploaded".into())
+                    })?;
+                    if !key.identity.sha1.eq_ignore_ascii_case(&req.identity.sha1) {
+                        return Err(Error::InvalidIdentity(
+                            "The uploaded signing identity changed while the build waited; try again"
+                                .into(),
+                        ));
+                    }
+                    let tools = crate::rcodesign::Rcodesign::new(&key);
+                    let report = |step| {
+                        let _ = steps.send(step);
+                    };
+                    sign_with(&tools, req, cancel, &report, Utc::now())
+                })
+                .map_err(|e| Error::io("Could not start signing", e))?;
+            // Ends when the worker returns (or panics) and drops its sender.
+            for step in received {
+                progress(step);
+            }
+            worker
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
     }
 }
 

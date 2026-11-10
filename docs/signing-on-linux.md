@@ -66,7 +66,8 @@ uploaded it says **Signing Isn't Set Up**.
 1. Under **Signing Identity**, tap **Upload .p12…**, choose the `.p12` file and enter the
    password you set when you exported it. Kiwi checks the file before it keeps it: a wrong
    password, a certificate without its private key, an expired certificate or a `.p12`
-   encrypted with AES (see above) is refused with a message that says what to do.
+   encrypted with AES (see above) is refused with a message that says what to do. Other
+   certificates in the file, such as Apple's intermediate certificate, don't matter.
 2. Under **Provisioning Profiles**, tap **Upload Profile…** and choose the
    `.mobileprovision` file.
 

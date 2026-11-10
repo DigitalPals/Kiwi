@@ -1018,8 +1018,8 @@ async fn rescan_signing(State(kiwi): K, _: Ctx) -> Response {
 const IDENTITY_BODY_LIMIT: usize = kiwi_signer::MAX_P12_BYTES / 3 * 4 + 8 * 1024;
 const PROFILE_BODY_LIMIT: usize = kiwi_signer::MAX_PROFILE_BYTES / 3 * 4 + 8 * 1024;
 
-/// An uploaded `.p12` and its password. Both are secrets: they are zeroed after use and
-/// never logged or returned.
+/// An uploaded `.p12` and its password. Both are secrets: they are never logged or
+/// returned, and the request body and the strings parsed from it are zeroed after use.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct IdentityUpload {
@@ -1047,6 +1047,36 @@ fn upload_error(e: kiwi_signer::Error) -> ApiError {
     }
 }
 
+/// Runs a change to the signing files on a blocking thread: parsing an upload and writing
+/// files must not hold up (or overflow the smaller stack of) an async worker.
+async fn signing_files<T: Send + 'static>(
+    kiwi: &Kiwi,
+    change: impl FnOnce(&kiwi_signer::SigningDir) -> Result<T, kiwi_signer::Error> + Send + 'static,
+) -> ApiResult<T> {
+    let dir = kiwi.paths.signing.clone();
+    tokio::task::spawn_blocking(move || change(&dir))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(upload_error)
+}
+
+/// A JSON body holding secrets (like [`JsonBody`]), read into a buffer that is zeroed when
+/// it is dropped. Copies the HTTP server made while receiving it are out of Kiwi's reach.
+async fn secret_json<T: DeserializeOwned>(body: Body, limit: usize) -> ApiResult<T> {
+    let bytes = axum::body::to_bytes(body, limit)
+        .await
+        .map_err(|_| ApiError::bad_request("Request body is too large."))?;
+    // Takes over the buffer when nothing else shares it, else copies it.
+    let bytes = zeroize::Zeroizing::new(Vec::from(bytes));
+    let json: &[u8] = if bytes.iter().all(u8::is_ascii_whitespace) {
+        b"{}"
+    } else {
+        &bytes
+    };
+    serde_json::from_slice(json)
+        .map_err(|e| ApiError::bad_request(format!("Invalid request body: {e}")))
+}
+
 fn decode_upload(field: &str, base64: &str) -> ApiResult<zeroize::Zeroizing<Vec<u8>>> {
     use base64::{Engine, engine::general_purpose::STANDARD};
     let compact: String = base64.split_ascii_whitespace().collect();
@@ -1058,30 +1088,25 @@ fn decode_upload(field: &str, base64: &str) -> ApiResult<zeroize::Zeroizing<Vec<
 }
 
 /// Files backend only: stores a `.p12` identity with its password, then rescans.
-async fn upload_identity(
-    State(kiwi): K,
-    _: Ctx,
-    JsonBody(body): JsonBody<IdentityUpload, IDENTITY_BODY_LIMIT>,
-) -> ApiResult<Response> {
-    let IdentityUpload { p12, password } = body;
+async fn upload_identity(State(kiwi): K, _: Ctx, body: Body) -> ApiResult<Response> {
+    let IdentityUpload { p12, password } = secret_json(body, IDENTITY_BODY_LIMIT).await?;
     let (p12, password) = (
         zeroize::Zeroizing::new(p12),
         zeroize::Zeroizing::new(password),
     );
     require_files_backend(&kiwi)?;
     let p12 = decode_upload("p12", &p12)?;
-    let identity = kiwi
-        .paths
-        .signing
-        .set_identity(&p12, &password, Utc::now())
-        .map_err(upload_error)?;
+    let identity = signing_files(&kiwi, move |dir| {
+        dir.set_identity(&p12, &password, Utc::now())
+    })
+    .await?;
     tracing::info!("signing identity uploaded: {}", identity.name);
     Ok(Json(kiwi.rescan_signing().await.json(Utc::now())).into_response())
 }
 
 async fn delete_identity(State(kiwi): K, _: Ctx) -> ApiResult<Response> {
     require_files_backend(&kiwi)?;
-    if !kiwi.paths.signing.remove_identity().map_err(upload_error)? {
+    if !signing_files(&kiwi, |dir| dir.remove_identity()).await? {
         return Err(ApiError::not_found("No signing identity was uploaded."));
     }
     tracing::info!("signing identity removed");
@@ -1104,23 +1129,18 @@ async fn upload_profile(
     JsonBody(body): JsonBody<ProfileUpload, PROFILE_BODY_LIMIT>,
 ) -> ApiResult<Response> {
     let bytes = decode_upload("profile", &body.profile)?;
-    let profile = kiwi
-        .paths
-        .signing
-        .add_profile(&bytes, Utc::now())
-        .map_err(upload_error)?;
+    let profile = signing_files(&kiwi, move |dir| dir.add_profile(&bytes, Utc::now())).await?;
     tracing::info!("provisioning profile uploaded: {}", profile.uuid);
     Ok(Json(kiwi.rescan_signing().await.json(Utc::now())).into_response())
 }
 
 /// Deletes an uploaded profile; Xcode's profiles are not Kiwi's to delete.
 async fn delete_profile(State(kiwi): K, _: Ctx, P(uuid): P<String>) -> ApiResult<Response> {
-    if !kiwi
-        .paths
-        .signing
-        .remove_profile(&uuid)
-        .map_err(upload_error)?
-    {
+    let removed = {
+        let uuid = uuid.clone();
+        signing_files(&kiwi, move |dir| dir.remove_profile(&uuid)).await?
+    };
+    if !removed {
         return Err(ApiError::not_found(
             "No uploaded provisioning profile has this UUID. Profiles from Xcode can't be removed here.",
         ));

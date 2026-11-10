@@ -3,11 +3,15 @@
 //!
 //! Bundles are sealed the way `codesign` seals iOS bundles: every file except the main
 //! executable is listed in `_CodeSignature/CodeResources` with Apple's rules for bundles
-//! without a `Resources` directory (nested code included, as plain files), then the main
-//! executable is signed with digests of `Info.plist` and that file.
+//! without a `Resources` directory (nested code and any other Mach-O file included, as
+//! plain files), then the main executable is signed with digests of `Info.plist` and that
+//! file.
+//!
+//! Like `codesign --force`, every Mach-O is signed with Kiwi's settings only: its existing
+//! signature (identifier, flags, entitlements, launch constraints) is never read, so a
+//! hostile one can neither leak into the new signature nor crash the parser.
 
 use std::{
-    cell::RefCell,
     collections::BTreeSet,
     fs, io,
     path::{Path, PathBuf},
@@ -17,7 +21,7 @@ use std::{
 use apple_codesign::{
     AppleCodesignError, BundleSigningContext, CodeResourcesBuilder, CodeResourcesRule,
     CodeSigningSlot, MachFile, MachOSigner, SettingsScope, SigningSettings,
-    cryptography::DigestType, verify_macho, write_macho_file,
+    cryptography::DigestType, path_identifier, verify_macho, write_macho_file,
 };
 use plist::{Dictionary, Value};
 use sha2::{Digest, Sha256};
@@ -33,66 +37,51 @@ use crate::{
 
 pub(crate) struct Rcodesign<'a> {
     key: &'a SigningKey,
-    /// Code signed so far, relative to the extracted root.
-    signed: RefCell<Vec<PathBuf>>,
 }
 
 impl<'a> Rcodesign<'a> {
     pub(crate) fn new(key: &'a SigningKey) -> Self {
-        Self {
-            key,
-            signed: RefCell::default(),
-        }
+        Self { key }
     }
 
-    /// The identity, its Apple certificate chain (when Apple issued it) and the team; no
-    /// timestamp (`--timestamp=none`).
-    fn settings(&self) -> SigningSettings<'a> {
+    /// The identity, its Apple certificate chain (when Apple issued it), the team and the
+    /// `digests`; no timestamp (`--timestamp=none`).
+    fn settings(&self, digests: &[DigestType]) -> SigningSettings<'a> {
         let mut settings = SigningSettings::default();
         settings.set_signing_key(&self.key.key, self.key.cert.clone());
         settings.chain_apple_certificates();
         settings.set_team_id(&self.key.team_id);
+        if let Some((primary, extra)) = digests.split_first() {
+            settings.set_digest_type(SettingsScope::Main, *primary);
+            for digest in extra {
+                settings.add_extra_digest(SettingsScope::Main, *digest);
+            }
+        }
         settings
     }
 
-    /// Files below `bundle` (relative to it) that earlier steps signed: the bundle seals them
-    /// as they are instead of signing them again.
-    fn signed_below(&self, root: &Path, bundle: &Path) -> io::Result<BTreeSet<PathBuf>> {
-        let mut paths = BTreeSet::new();
-        for done in self.signed.borrow().iter() {
-            let Ok(rel) = done.strip_prefix(bundle) else {
-                continue;
-            };
-            if rel.as_os_str().is_empty() {
-                continue;
-            }
-            files_below(&root.join(done), rel, &mut paths)?;
-        }
-        Ok(paths)
-    }
-
+    /// Signs a dylib as its file name (`Lib.dylib` as `Lib`), without entitlements.
     fn sign_dylib(&self, path: &Path) -> Result<(), BundleError> {
-        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
-            return Err(BundleError::Invalid("invalid path".into()));
-        };
-        let settings = self.settings();
-        let mut context = BundleSigningContext {
-            settings: &settings,
-            dest_dir: dir.to_path_buf(),
-            previously_installed_paths: BTreeSet::new(),
-            installed_paths: BTreeSet::new(),
-        };
-        context.sign_and_install_macho(path, Path::new(name))?;
-        Ok(())
+        let name = path
+            .file_name()
+            .ok_or_else(|| BundleError::Invalid("invalid path".into()))?;
+        let data = fs::read(path)?;
+        let mach = MachFile::parse(&data)?;
+        let mut settings = self.settings(&digests(&mach)?);
+        settings.set_binary_identifier(SettingsScope::Main, path_identifier(name)?);
+        // codesign binds an Info.plist linked into the binary (`__TEXT,__info_plist`).
+        for macho in mach.iter_macho() {
+            if let Some(info) = macho.embedded_info_plist()? {
+                let scope = SettingsScope::MultiArchIndex(macho.index.unwrap_or(0));
+                settings.set_info_plist_data(scope, info);
+            }
+        }
+        write_signed(path, &data, &settings)
     }
 
-    /// Seals and signs the bundle `dir` in place.
-    fn sign_bundle(
-        &self,
-        dir: &Path,
-        entitlements: Option<String>,
-        signed_below: BTreeSet<PathBuf>,
-    ) -> Result<(), BundleError> {
+    /// Seals and signs the bundle `dir` in place; only apps and extensions get
+    /// `entitlements`.
+    fn sign_bundle(&self, dir: &Path, entitlements: Option<String>) -> Result<(), BundleError> {
         let info_data = fs::read(dir.join("Info.plist"))
             .map_err(|e| BundleError::Invalid(format!("Info.plist: {e}")))?;
         let info =
@@ -105,36 +94,25 @@ impl<'a> Rcodesign<'a> {
         let exe_path = dir.join(executable);
         let exe_data =
             fs::read(&exe_path).map_err(|e| BundleError::Invalid(format!("{executable}: {e}")))?;
+        let digests = digests(&MachFile::parse(&exe_data)?)?;
 
-        // Like codesign: SHA-1 digests too when the executable targets an OS without SHA-256.
-        let mut digests = vec![DigestType::Sha256];
-        for macho in MachFile::parse(&exe_data)?.iter_macho() {
-            let legacy = match macho.find_targeting()? {
-                Some(target) => !target
-                    .platform
-                    .sha256_digest_support()?
-                    .matches(&target.minimum_os_version),
-                None => true,
-            };
-            if legacy {
-                digests = vec![DigestType::Sha1, DigestType::Sha256];
-                break;
-            }
-        }
-
-        let mut settings = self.settings();
         let mut resources = CodeResourcesBuilder::default_no_resources_rules()?;
-        resources.set_digests(digests.into_iter());
+        resources.set_digests(digests.iter().copied());
         for excluded in ["^_CodeSignature/", "^CodeResources$", "^_MASReceipt$"] {
             resources.add_exclusion_rule(CodeResourcesRule::new(excluded)?.exclude());
         }
         resources.add_exclusion_rule(
             CodeResourcesRule::new(format!("^{}$", regex::escape(executable)))?.exclude(),
         );
+        // Shallow: the walk seals every file by its hash as it is and signs nothing, so
+        // nested code signed in an earlier step keeps its signature and other Mach-O files
+        // (object files, dSYM contents) are data, as codesign treats them.
+        let mut walk = SigningSettings::default();
+        walk.set_shallow(true);
         let mut context = BundleSigningContext {
-            settings: &settings,
+            settings: &walk,
             dest_dir: dir.to_path_buf(),
-            previously_installed_paths: signed_below,
+            previously_installed_paths: BTreeSet::new(),
             installed_paths: BTreeSet::new(),
         };
         resources.walk_and_seal_directory(dir, dir, &mut context)?;
@@ -144,17 +122,14 @@ impl<'a> Rcodesign<'a> {
         fs::create_dir_all(&seal_dir)?;
         fs::write(seal_dir.join("CodeResources"), &resources_data)?;
 
+        let mut settings = self.settings(&digests);
         settings.set_binary_identifier(SettingsScope::Main, identifier);
         if let Some(xml) = entitlements {
             settings.set_entitlements_xml(SettingsScope::Main, xml)?;
         }
         settings.set_code_resources_data(SettingsScope::Main, resources_data);
         settings.set_info_plist_data(SettingsScope::Main, info_data);
-        settings.import_settings_from_macho(&exe_data)?;
-        let mut signed = Vec::with_capacity(exe_data.len() + (1 << 17));
-        MachOSigner::new(&exe_data)?.write_signed_binary(&settings, &mut signed)?;
-        write_macho_file(&exe_path, &exe_path, &signed)?;
-        Ok(())
+        write_signed(&exe_path, &exe_data, &settings)
     }
 
     /// What `codesign --verify --strict` checks for one dylib, framework or app: valid
@@ -262,15 +237,11 @@ impl Toolchain for Rcodesign<'_> {
                     fs::read_to_string(file).map_err(Error::io_path("Could not read", file))
                 })
                 .transpose()?;
-            let below = self
-                .signed_below(root, path)
-                .map_err(Error::io_path("Could not read", &full))?;
-            self.sign_bundle(&full, entitlements, below)
+            self.sign_bundle(&full, entitlements)
                 .map_err(|e| failed(&e))?;
         } else {
             self.sign_dylib(&full).map_err(|e| failed(&e))?;
         }
-        self.signed.borrow_mut().push(path.to_path_buf());
         Ok(())
     }
 
@@ -322,6 +293,32 @@ struct Seal<'a> {
     identifier: &'a str,
     info: &'a [u8],
     resources: &'a [u8],
+}
+
+/// Digests to sign code for `mach` with: SHA-256, after SHA-1 (like codesign) when an
+/// architecture targets an OS without SHA-256 support or names no OS.
+fn digests(mach: &MachFile<'_>) -> Result<Vec<DigestType>, BundleError> {
+    for macho in mach.iter_macho() {
+        let legacy = match macho.find_targeting()? {
+            Some(target) => !target
+                .platform
+                .sha256_digest_support()?
+                .matches(&target.minimum_os_version),
+            None => true,
+        };
+        if legacy {
+            return Ok(vec![DigestType::Sha1, DigestType::Sha256]);
+        }
+    }
+    Ok(vec![DigestType::Sha256])
+}
+
+/// Signs the Mach-O `data` with `settings` and replaces `path` with the result.
+fn write_signed(path: &Path, data: &[u8], settings: &SigningSettings) -> Result<(), BundleError> {
+    let mut signed = Vec::with_capacity(data.len() + (1 << 17));
+    MachOSigner::new(data)?.write_signed_binary(settings, &mut signed)?;
+    write_macho_file(path, path, &signed)?;
+    Ok(())
 }
 
 fn read_plist(data: &[u8]) -> Result<Dictionary, String> {
@@ -462,8 +459,9 @@ mod tests {
         Value::Array(items.iter().map(|s| (*s).into()).collect())
     }
 
-    /// An executable as a store or a previous signer left it: signed (ad hoc) with entitlements.
-    fn presigned(entitlements: &[u8]) -> Vec<u8> {
+    /// An executable (or a dylib) as a store or a previous signer left it: signed (ad hoc)
+    /// with entitlements.
+    fn presigned(dylib: bool, entitlements: &[u8]) -> Vec<u8> {
         let mut settings = SigningSettings::default();
         settings.set_binary_identifier(SettingsScope::Main, "com.example.original");
         settings
@@ -472,7 +470,7 @@ mod tests {
                 std::str::from_utf8(entitlements).unwrap(),
             )
             .unwrap();
-        let macho = ios_macho(false);
+        let macho = ios_macho(dylib);
         let mut out = Vec::new();
         MachOSigner::new(&macho)
             .unwrap()
@@ -481,20 +479,64 @@ mod tests {
         out
     }
 
+    /// Entitlements nested `levels` deep: parsing them recursively overflows the stack.
+    fn deep_entitlements(levels: usize) -> Vec<u8> {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>x</key>{}{}</dict></plist>\n",
+            "<array>".repeat(levels),
+            "</array>".repeat(levels)
+        )
+        .into_bytes()
+    }
+
+    /// A signed binary whose existing XML entitlements are `xml`, written over a placeholder
+    /// as large (creating it with apple-codesign would parse `xml`). Its signature no longer
+    /// matches: nothing may read it.
+    fn hostile(dylib: bool, xml: &[u8]) -> Vec<u8> {
+        let placeholder = entitlements_xml(&[("x", "A".repeat(xml.len()).into())]);
+        let mut binary = presigned(dylib, &placeholder);
+        let magic = 0xfade_7171u32.to_be_bytes();
+        let at = binary.windows(4).position(|w| w == magic).unwrap();
+        let len = u32::from_be_bytes(binary[at + 4..at + 8].try_into().unwrap()) as usize;
+        let blob = &mut binary[at + 8..at + len];
+        assert!(blob.len() >= xml.len());
+        blob.fill(b' ');
+        blob[..xml.len()].copy_from_slice(xml);
+        binary
+    }
+
     fn demo_ipa() -> Vec<u8> {
-        let main = presigned(&entitlements_xml(&[
+        demo_zip().finish()
+    }
+
+    /// The other team's entitlements a library may carry from the original app.
+    fn foreign_entitlements() -> Vec<u8> {
+        entitlements_xml(&[
             ("application-identifier", "OLDTEAM.com.example.demo".into()),
-            (
+            ("com.apple.developer.team-identifier", "OLDTEAM".into()),
+        ])
+    }
+
+    fn demo_zip() -> Zip {
+        let main = presigned(
+            false,
+            &entitlements_xml(&[
+                ("application-identifier", "OLDTEAM.com.example.demo".into()),
+                (
+                    "com.apple.security.application-groups",
+                    strings(&["group.com.example.demo"]),
+                ),
+                ("aps-environment", "production".into()),
+                ("com.apple.private.foo", true.into()),
+            ]),
+        );
+        let share = presigned(
+            false,
+            &entitlements_xml(&[(
                 "com.apple.security.application-groups",
                 strings(&["group.com.example.demo"]),
-            ),
-            ("aps-environment", "production".into()),
-            ("com.apple.private.foo", true.into()),
-        ]));
-        let share = presigned(&entitlements_xml(&[(
-            "com.apple.security.application-groups",
-            strings(&["group.com.example.demo"]),
-        )]));
+            )]),
+        );
         Zip::new()
             .file(
                 "Payload/Demo.app/Info.plist",
@@ -513,7 +555,7 @@ mod tests {
             .file("Payload/Demo.app/SC_Info/Demo.sinf", b"drm", 0o644)
             .file(
                 "Payload/Demo.app/Frameworks/Lib.dylib",
-                &ios_macho(true),
+                &presigned(true, &foreign_entitlements()),
                 0o755,
             )
             .file(
@@ -527,7 +569,7 @@ mod tests {
             )
             .file(
                 "Payload/Demo.app/Frameworks/Kit.framework/Kit",
-                &ios_macho(true),
+                &presigned(true, &foreign_entitlements()),
                 0o755,
             )
             .symlink("Payload/Demo.app/Current", "Frameworks/Kit.framework")
@@ -541,7 +583,6 @@ mod tests {
             )
             .file("Payload/Demo.app/PlugIns/Share.appex/Share", &share, 0o755)
             .file("iTunesMetadata.plist", b"meta", 0o644)
-            .finish()
     }
 
     struct Setup {
@@ -555,6 +596,10 @@ mod tests {
     }
 
     fn setup(expires: &'static str) -> Setup {
+        setup_with(expires, &demo_ipa())
+    }
+
+    fn setup_with(expires: &'static str, ipa: &[u8]) -> Setup {
         let dir = tempfile::tempdir().unwrap();
         let files = SigningDir::new(dir.path().join("signing"));
         let test = signing_identity(TEAM, "correct horse");
@@ -585,7 +630,7 @@ mod tests {
             .map(|(_, p)| p.unwrap())
             .collect();
         let input = dir.path().join("in.ipa");
-        fs::write(&input, demo_ipa()).unwrap();
+        fs::write(&input, ipa).unwrap();
         let req = SignRequest {
             input_ipa: input,
             output_ipa: dir.path().join("out/Demo.ipa"),
@@ -625,8 +670,9 @@ mod tests {
         crate::archive::extract(ipa, dest, &AtomicBool::new(false)).unwrap()
     }
 
-    /// The code directory of a signed binary: identifier, team and the entitlements slots.
-    fn directory(path: &Path) -> (String, Option<String>, bool) {
+    /// The code directory of a signed binary: identifier, team and whether the XML and the
+    /// DER entitlements are sealed.
+    fn directory(path: &Path) -> (String, Option<String>, bool, bool) {
         let data = fs::read(path).unwrap();
         let mach = MachFile::parse(&data).unwrap();
         let macho = mach.iter_macho().next().unwrap();
@@ -634,13 +680,14 @@ mod tests {
         assert!(problems.is_empty(), "{}: {problems:?}", path.display());
         let signature = macho.code_signature().unwrap().unwrap();
         let cd = signature.code_directory().unwrap().unwrap();
-        let der = cd
-            .slot_digests()
-            .contains_key(&CodeSigningSlot::EntitlementsDer);
+        let slots = cd.slot_digests();
+        let xml = slots.contains_key(&CodeSigningSlot::Entitlements);
+        assert_eq!(xml, signature.entitlements().unwrap().is_some());
         (
             cd.ident.to_string(),
             cd.team_name.as_ref().map(|t| t.to_string()),
-            der,
+            xml,
+            slots.contains_key(&CodeSigningSlot::EntitlementsDer),
         )
     }
 
@@ -704,20 +751,24 @@ mod tests {
             .verify(&out, Path::new("Payload/Demo.app"), &AtomicBool::new(false))
             .unwrap();
 
-        let (ident, team, der) = directory(&app.join("Demo"));
+        let (ident, team, xml, der) = directory(&app.join("Demo"));
         assert_eq!(
-            (ident.as_str(), team.as_deref(), der),
-            (id.as_str(), Some(TEAM), true)
+            (ident.as_str(), team.as_deref(), xml, der),
+            (id.as_str(), Some(TEAM), true, true)
         );
-        let (ident, _, _) = directory(&app.join("PlugIns/Share.appex/Share"));
+        let (ident, _, _, _) = directory(&app.join("PlugIns/Share.appex/Share"));
         assert_eq!(ident, format!("{id}.Share"));
-        let (ident, team, _) = directory(&app.join("Frameworks/Kit.framework/Kit"));
+        // Libraries lose the original app's entitlements, as with codesign --force.
+        let (ident, team, xml, der) = directory(&app.join("Frameworks/Kit.framework/Kit"));
         assert_eq!(
-            (ident.as_str(), team.as_deref()),
-            ("com.example.Kit", Some(TEAM))
+            (ident.as_str(), team.as_deref(), xml, der),
+            ("com.example.Kit", Some(TEAM), false, false)
         );
-        let (ident, _, _) = directory(&app.join("Frameworks/Lib.dylib"));
-        assert_eq!(ident, "Lib");
+        let (ident, team, xml, der) = directory(&app.join("Frameworks/Lib.dylib"));
+        assert_eq!(
+            (ident.as_str(), team.as_deref(), xml, der),
+            ("Lib", Some(TEAM), false, false)
+        );
 
         // The signature carries Kiwi's certificate.
         let main = fs::read(app.join("Demo")).unwrap();
@@ -867,11 +918,28 @@ mod tests {
     fn signs_through_the_public_entry_point() {
         // Uses the real clock, so the profiles must outlive it.
         let setup = setup("2099-01-01T00:00:00Z");
-        let report =
-            crate::sign_ipa_with_files(&setup.req, &setup.files, &AtomicBool::new(false), &|_| {})
-                .unwrap();
+        // Signing runs on a thread of its own; progress is reported on this one.
+        let caller = std::thread::current().id();
+        let steps = Mutex::new(Vec::new());
+        let progress = |step| {
+            assert_eq!(std::thread::current().id(), caller);
+            steps.lock().unwrap().push(step);
+        };
+        let report = crate::sign_ipa_with_files(
+            &setup.req,
+            &setup.files,
+            &AtomicBool::new(false),
+            &progress,
+        )
+        .unwrap();
         assert_eq!(report.profile_uuids.len(), 2);
         assert!(setup.req.output_ipa.is_file());
+        let steps = steps.into_inner().unwrap();
+        assert_eq!(steps.len(), 8);
+        assert_eq!(
+            (steps[0], steps[7]),
+            (SignStep::Extracting, SignStep::Packaging)
+        );
 
         // A request planned for another identity is refused.
         let mut other = setup.req.clone();
@@ -904,6 +972,118 @@ mod tests {
         assert!(matches!(err, Error::Cancelled));
         assert!(!setup.req.output_ipa.exists());
         assert_eq!(fs::read_dir(&setup.req.work_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn never_parses_existing_signatures() {
+        // Nested far deeper than any stack holds when parsed recursively.
+        let deep = deep_entitlements(100_000);
+        let info_kit = info(&[
+            ("CFBundleIdentifier", "com.example.Kit".into()),
+            ("CFBundleExecutable", "Kit".into()),
+        ]);
+        let ipa = Zip::new()
+            .file(
+                "Payload/Demo.app/Info.plist",
+                &info(&[
+                    ("CFBundleIdentifier", "com.example.demo".into()),
+                    ("CFBundleExecutable", "Demo".into()),
+                ]),
+                0o644,
+            )
+            .file("Payload/Demo.app/Demo", &hostile(false, &deep), 0o755)
+            .file(
+                "Payload/Demo.app/Frameworks/Deep.dylib",
+                &hostile(true, &deep),
+                0o755,
+            )
+            .file(
+                "Payload/Demo.app/Frameworks/Kit.framework/Info.plist",
+                &info_kit,
+                0o644,
+            )
+            .file(
+                "Payload/Demo.app/Frameworks/Kit.framework/Kit",
+                &hostile(true, &deep),
+                0o755,
+            )
+            .finish();
+        let setup = setup_with("2027-10-26T18:52:06Z", &ipa);
+        // On a thread as small as tokio's blocking threads (2 MiB): signing must not read
+        // the old entitlements, not merely survive them on a large stack.
+        let report = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(2 << 20)
+                .spawn_scoped(scope, || sign(&setup).0)
+                .unwrap()
+                .join()
+                .unwrap()
+        });
+        assert!(report.original_entitlements.is_empty());
+
+        let app = extract(&setup.req.output_ipa, &setup.dir.path().join("check"));
+        for library in ["Frameworks/Deep.dylib", "Frameworks/Kit.framework/Kit"] {
+            let (_, team, xml, der) = directory(&app.join(library));
+            assert_eq!((team.as_deref(), xml, der), (Some(TEAM), false, false));
+        }
+        let main = crate::macho::entitlements(&app.join("Demo"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            main.get("application-identifier"),
+            Some(&format!("{TEAM}.com.example.demo.{TEAM}").into())
+        );
+        assert!(!main.contains_key("x"));
+    }
+
+    #[test]
+    fn seals_other_mach_o_files_as_data() {
+        // An arm64 object file's header (no load commands, so no __LINKEDIT to sign into),
+        // the same as a dSYM's, the start of a universal binary (or a Java class) and a
+        // complete executable outside the places code goes.
+        let object: [u8; 32] = [
+            0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 0x01, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let mut dsym = object;
+        dsym[12] = 0x0a;
+        let universal = [&[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 1][..], &[0; 40]].concat();
+        let helper = ios_macho(false);
+        let strays: [(&str, &[u8]); 4] = [
+            ("Data/stray.o", &object),
+            ("Demo.dSYM/Contents/Resources/DWARF/Demo", &dsym),
+            ("Data/universal.bin", &universal),
+            ("PlugIns/Share.appex/helper", &helper),
+        ];
+        let mut zip = demo_zip();
+        for (path, data) in strays {
+            zip = zip.file(&format!("Payload/Demo.app/{path}"), data, 0o755);
+        }
+        let setup = setup_with("2027-10-26T18:52:06Z", &zip.finish());
+        sign(&setup);
+
+        let app = extract(&setup.req.output_ipa, &setup.dir.path().join("check"));
+        let seal: Dictionary = plist::from_file(app.join("_CodeSignature/CodeResources")).unwrap();
+        let files2 = seal.get("files2").and_then(Value::as_dictionary).unwrap();
+        let share: Dictionary =
+            plist::from_file(app.join("PlugIns/Share.appex/_CodeSignature/CodeResources")).unwrap();
+        let share_files2 = share.get("files2").and_then(Value::as_dictionary).unwrap();
+        for (path, data) in strays {
+            assert_eq!(
+                fs::read(app.join(path)).unwrap(),
+                data,
+                "{path} is unchanged"
+            );
+            let sealed = match path.strip_prefix("PlugIns/Share.appex/") {
+                Some(name) => share_files2.get(name),
+                None => files2.get(path),
+            };
+            let hash = sealed
+                .and_then(Value::as_dictionary)
+                .and_then(|entry| entry.get("hash2"))
+                .and_then(Value::as_data);
+            assert_eq!(hash, Some(&Sha256::digest(data)[..]), "{path}");
+        }
     }
 
     #[test]

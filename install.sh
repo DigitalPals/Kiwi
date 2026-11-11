@@ -15,6 +15,9 @@
 #   --python PATH      Linux: Python 3.12 or newer for Kiwi Builds' Android apps, installed
 #                      outside /home [default: python3 in /usr/local/bin, /usr/bin or /bin]
 #
+#   ./install.sh --builder --server URL --pair CODE   instead: a Mac builder, which builds
+#                      iOS apps for a Kiwi elsewhere (./install.sh --builder --help)
+#
 # What it does on a Mac:
 #  1. checks macOS, your login session, Xcode's command line tools, Rust, Node.js, Tailscale
 #     (connected, with HTTPS certificates) and the signing certificate;
@@ -101,7 +104,7 @@ die() {
 	exit 1
 }
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # sudo that may ask for a password in Terminal, but never blocks a script without one. As
 # root (Linux only) it runs the command itself.
@@ -803,6 +806,13 @@ EOF
 }
 
 main() {
+	local arg
+	for arg in "$@"; do
+		if [ "$arg" = --builder ]; then
+			builder_main "$@"
+			return
+		fi
+	done
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--check) CHECK=1 ;;
@@ -900,6 +910,290 @@ main() {
 	if [ "$BUILD" = 1 ]; then build; fi
 	install_kiwi
 	next_steps
+}
+
+# ---------------------------------------------------------------------------------------
+# The Mac builder (./install.sh --builder): this Mac builds iOS apps for a Kiwi that runs
+# elsewhere (docs/kiwi-builds.md, "Mac builder"). It never touches Kiwi's own LaunchAgent
+# (local.kiwi) or data directory; --import-enrollment only reads the latter.
+
+B_DATA="$HOME/Library/Application Support/Kiwi Builder"
+B_LOG="$HOME/Library/Logs/kiwi-builder.log"
+B_PYTHON=/opt/homebrew/bin/python3.13
+SERVER=
+PAIR_CODE=
+B_NAME=
+IMPORT= # a Kiwi data directory to copy the decryption enrollment from
+
+builder_usage() {
+	cat <<'EOF'
+Install or update Kiwi's Mac builder on this Mac: it builds iOS apps (Kiwi Builds) for a
+Kiwi that runs on Linux or in Docker, which signs, publishes and installs them.
+
+  ./install.sh --builder --server URL --pair CODE   pair with Kiwi, build and install
+  ./install.sh --builder                            update an installed builder
+  ./install.sh --builder --check                    only check this Mac
+
+Options:
+  --server URL        Kiwi's address, as in Kiwi's Settings › Mac builder
+                      (https://kiwi.example.ts.net); http:// only to this Mac (a tunnel)
+  --pair CODE         the one-time code from Settings › Mac builder (10 minutes)
+  --name NAME         how Kiwi names this Mac [default: its computer name]
+  --import-enrollment [DIR]
+                      copy the decryption enrollment (automation/models) from a Kiwi data
+                      directory on this Mac [default: ~/Library/Application Support/Kiwi]
+  --no-build          install the last build instead of compiling
+
+It installs the program in "~/Library/Application Support/Kiwi Builder/app" and the
+LaunchAgent local.kiwi-builder (log: ~/Library/Logs/kiwi-builder.log, rotated by
+/etc/newsyslog.d/kiwi-builder.conf). Kiwi's own LaunchAgent and data stay untouched.
+./uninstall.sh --builder removes it.
+EOF
+}
+
+check_builder() {
+	say "Checking this Mac (Mac builder)"
+	[ "$(uname -s)" = Darwin ] || die "the Mac builder runs on macOS; on this computer, install Kiwi itself (./install.sh)"
+	[ "$(id -u)" != 0 ] || die "run this as yourself, not as root (the builder works in your login session)"
+	good "macOS $(sw_vers -productVersion) on $(uname -m), user $(id -un)"
+	if launchctl print "gui/$(id -u)" >/dev/null 2>&1; then
+		good "Logged in to the desktop (the builder runs in this login session)"
+	else
+		problem "No desktop session for $(id -un): log in to this Mac's desktop first. The builder runs in your login session, where the App Store sign-in and decryption work."
+	fi
+	if xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
+		good "Xcode with the iOS SDK"
+	else
+		problem "Kiwi Builds needs Xcode with the iOS SDK: install Xcode from the App Store, open it once, then: sudo xcode-select -s /Applications/Xcode.app"
+	fi
+	if [ -x "$B_PYTHON" ]; then
+		good "Homebrew's Python 3.13"
+	else
+		problem "Homebrew's Python 3.13 is missing: brew install python@3.13"
+	fi
+	if [ "$BUILD" = 1 ] && ! command -v cargo >/dev/null; then
+		problem "Rust is missing: install it from https://rustup.rs (or use --no-build with an earlier build)"
+	fi
+	if ! command -v curl >/dev/null; then
+		problem "curl is missing"
+	elif [ -n "$SERVER" ]; then
+		if curl -fsS --max-time 10 -o /dev/null "$SERVER/api/health"; then
+			good "Kiwi answers at $SERVER"
+		else
+			problem "Kiwi doesn't answer at $SERVER/api/health: check the address, and that this Mac is in Kiwi's tailnet"
+		fi
+	fi
+	if [ -f "$B_DATA/builder.json" ]; then
+		good "Paired with Kiwi (builder.json)"
+	elif [ -z "$PAIR_CODE" ]; then
+		problem "Not paired yet: in Kiwi, open Settings › Mac builder › Pair a Mac and pass its --server and --pair"
+	fi
+	if [ -f "$B_DATA/automation/runner.py" ] && [ -x "$B_PYTHON" ]; then
+		builder_doctor
+	else
+		note "The build tools are checked once the builder is installed"
+	fi
+}
+
+# What runner.py doctor says about the build tools. Not problems: the steps after
+# installing fix them.
+builder_doctor() {
+	local line
+	"$B_PYTHON" "$B_DATA/automation/runner.py" doctor --data-dir "$B_DATA" 2>/dev/null |
+		"$B_PYTHON" -c 'import json, sys
+for line in sys.stdin:
+    try:
+        event = json.loads(line)
+    except ValueError:
+        continue
+    if event.get("event") == "health":
+        for check in event.get("checks", []):
+            print(("ready " if check.get("ready") else "missing ") + str(check.get("name")))' |
+		while IFS= read -r line; do
+			case "$line" in
+			"ready "*) good "${line#ready }" ;;
+			*) note "Not ready yet: ${line#missing } (see the steps after installing, or docs/kiwi-builds.md)" ;;
+			esac
+		done
+}
+
+# Copies automation/models/*.bin (0600) from the Kiwi data directory $IMPORT.
+import_enrollment() {
+	local source="$IMPORT/automation/models" count=0 model
+	[ -d "$source" ] || die "no decryption enrollment in $source; enroll this Mac instead (docs/kiwi-builds.md)"
+	mkdir -p "$B_DATA/automation/models"
+	chmod 700 "$B_DATA/automation" "$B_DATA/automation/models"
+	for model in "$source"/*.bin; do
+		[ -f "$model" ] || continue
+		install -m 600 "$model" "$B_DATA/automation/models/"
+		count=$((count + 1))
+	done
+	[ "$count" -gt 0 ] || die "no decryption models (*.bin) in $source"
+	say "Copied $count decryption model(s) from $source"
+}
+
+install_builder() {
+	local mode=kickstart version pid='' args
+	[ -x "$REPO/target/release/kiwi" ] || die "$REPO/target/release/kiwi is missing; run without --no-build"
+	say "Installing into $B_DATA/app"
+	mkdir -p "$B_DATA" "$HOME/Library/Logs" "$HOME/Library/LaunchAgents"
+	chmod 700 "$B_DATA"
+	rm -rf "$B_DATA/app.new"
+	mkdir "$B_DATA/app.new"
+	cp "$REPO/target/release/kiwi" "$B_DATA/app.new/kiwi"
+	version=$("$B_DATA/app.new/kiwi" --version) || die "the new binary does not run"
+	version=${version##* } # "kiwi 0.2.0" -> "0.2.0"
+	if [ -n "$PAIR_CODE" ]; then
+		say "Pairing with Kiwi at $SERVER"
+		args=(builder pair --data-dir "$B_DATA" --server "$SERVER" --code "$PAIR_CODE")
+		if [ -n "$B_NAME" ]; then args+=(--name "$B_NAME"); fi
+		if ! "$B_DATA/app.new/kiwi" "${args[@]}"; then
+			rm -rf "$B_DATA/app.new"
+			die "pairing failed (above). Make a new code in Kiwi's Settings › Mac builder and run this again."
+		fi
+	fi
+	[ -f "$B_DATA/builder.json" ] || die "this Mac isn't paired: pass --server and --pair (Kiwi's Settings › Mac builder)"
+	if [ -n "$IMPORT" ]; then import_enrollment; fi
+	rm -rf "$B_DATA/app.prev"
+	if [ -d "$B_DATA/app" ]; then mv "$B_DATA/app" "$B_DATA/app.prev"; fi
+	mv "$B_DATA/app.new" "$B_DATA/app"
+
+	render "$REPO/deploy/local.kiwi-builder.plist.in" >"$TMP_DIR/plist"
+	plutil -lint -s "$TMP_DIR/plist" || die "the rendered LaunchAgent is invalid"
+	if ! cmp -s "$TMP_DIR/plist" "$PLIST"; then
+		install -m 644 "$TMP_DIR/plist" "$PLIST"
+		mode=reload
+		say "Installed $PLIST"
+	fi
+	render "$REPO/deploy/kiwi-builder.newsyslog.conf.in" >"$TMP_DIR/newsyslog"
+	if ! cmp -s "$TMP_DIR/newsyslog" "$NEWSYSLOG_CONF"; then
+		as_root install -m 644 -o root -g wheel "$TMP_DIR/newsyslog" "$NEWSYSLOG_CONF"
+		say "Installed $NEWSYSLOG_CONF (log rotation)"
+	fi
+	restart_agent "$mode" || die "launchctl could not (re)start $LABEL"
+	for _ in $(seq 1 15); do
+		pid=$(service_pid)
+		[ -z "$pid" ] || break
+		sleep 1
+	done
+	sleep 5
+	if [ -z "$pid" ] || [ "$(service_pid)" != "$pid" ]; then
+		launchctl print "$SERVICE" 2>&1 | sed -n '1,30p' >&2 || true
+		tail -n 30 "$B_LOG" >&2 || true
+		die "the Mac builder did not stay up (agent state and log above)"
+	fi
+	say "Kiwi Builder $version is running (pid $pid) for $SERVER"
+}
+
+builder_next_steps() {
+	cat <<EOF
+
+Next, once, in Terminal on this Mac (docs/kiwi-builds.md, "Mac builder"):
+
+  KIWI_DATA="$B_DATA"
+  # 1. The build tools
+  $B_PYTHON "\$KIWI_DATA/automation/runner.py" setup --data-dir "\$KIWI_DATA"
+  # 2. The App Store sign-in
+  "\$HOME/.kiwi-builder-tools/bin/ipatool" auth login
+  # 3. Decryption (not needed after --import-enrollment)
+  $B_PYTHON "\$KIWI_DATA/automation/runner.py" enroll --data-dir "\$KIWI_DATA" --app "/Applications/<App>.app"
+  # 4. Check, then use Check Again in Kiwi's Settings › Mac builder
+  $B_PYTHON "\$KIWI_DATA/automation/runner.py" doctor --data-dir "\$KIWI_DATA"
+
+Log: $B_LOG
+Update: git pull && ./install.sh --builder · Remove: ./uninstall.sh --builder
+EOF
+}
+
+builder_main() {
+	LABEL=local.kiwi-builder
+	PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+	SERVICE="gui/$(id -u)/$LABEL"
+	NEWSYSLOG_CONF=/etc/newsyslog.d/kiwi-builder.conf
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--builder) ;;
+		--check) CHECK=1 ;;
+		--no-build) BUILD=0 ;;
+		--server)
+			[ $# -ge 2 ] || die "--server needs Kiwi's address"
+			SERVER=${2%/}
+			shift
+			;;
+		--pair)
+			[ $# -ge 2 ] || die "--pair needs the code from Kiwi's Settings › Mac builder"
+			PAIR_CODE=$2
+			shift
+			;;
+		--name)
+			[ $# -ge 2 ] || die "--name needs a name"
+			B_NAME=$2
+			shift
+			;;
+		--import-enrollment)
+			if [ $# -ge 2 ] && [ "${2#--}" = "$2" ]; then
+				IMPORT=${2%/}
+				shift
+			else
+				IMPORT="$HOME/Library/Application Support/Kiwi"
+			fi
+			;;
+		-h | --help)
+			builder_usage
+			return 0
+			;;
+		*)
+			builder_usage >&2
+			return 2
+			;;
+		esac
+		shift
+	done
+	if [ -z "$SERVER" ] && [ -f "$B_DATA/builder.json" ]; then
+		SERVER=$(sed -n 's/^ *"server": *"\([^"]*\)".*/\1/p' "$B_DATA/builder.json" | head -n 1)
+	fi
+	if [ -n "$PAIR_CODE" ] && [ -z "$SERVER" ]; then die "--pair needs --server (Kiwi's address)"; fi
+	case "$SERVER" in
+	"" | https://* | http://127.0.0.1:* | http://localhost:* | "http://[::1]:"*) ;;
+	*) die "--server must be Kiwi's https:// address (http:// only to this Mac), got $SERVER" ;;
+	esac
+	[ -f "$REPO/crates/kiwi-server/Cargo.toml" ] || die "$REPO is not the Kiwi repository"
+	check_builder
+	TMP_DIR=$(mktemp -d -t kiwi-builder-install)
+	trap 'rm -rf "$TMP_DIR"' EXIT
+
+	if [ "$CHECK" = 1 ]; then
+		say "Plan"
+		note "Program: $B_DATA/app · LaunchAgent: $PLIST · Log: $B_LOG"
+		note "Kiwi: ${SERVER:-unknown}"
+		if [ -n "$IMPORT" ]; then note "Decryption enrollment copied from $IMPORT"; fi
+		render "$REPO/deploy/local.kiwi-builder.plist.in" >"$TMP_DIR/plist"
+		if [ ! -f "$PLIST" ]; then
+			note "The LaunchAgent will be created"
+		elif cmp -s "$TMP_DIR/plist" "$PLIST"; then
+			note "The installed LaunchAgent stays as it is"
+		else
+			note "The installed LaunchAgent will change:"
+			diff -u "$PLIST" "$TMP_DIR/plist" | sed 's/^/      /' || true
+		fi
+		if [ "$PROBLEMS" -gt 0 ]; then
+			say "$PROBLEMS problem(s) to fix before installing"
+			return 1
+		fi
+		say "Ready to install: run it again without --check"
+		return 0
+	fi
+	[ "$PROBLEMS" = 0 ] || die "fix the $PROBLEMS problem(s) above, then run ./install.sh --builder again"
+	if [ -t 0 ]; then
+		say "Log rotation needs administrator rights"
+		sudo -v || die "sudo is needed"
+	fi
+	if [ "$BUILD" = 1 ]; then
+		say "Building the program (cargo build --release)"
+		(cd "$REPO" && cargo build --release --locked -p kiwi-server)
+	fi
+	install_builder
+	builder_next_steps
 }
 
 # Linux, after the checks: show the plan, or build as you and install as root.

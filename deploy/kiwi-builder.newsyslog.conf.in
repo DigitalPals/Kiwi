@@ -1,0 +1,10 @@
+# Log rotation of Kiwi's Mac builder. Installed by `./install.sh --builder` as
+# /etc/newsyslog.d/kiwi-builder.conf (root:wheel 0644); removed by `./uninstall.sh --builder`.
+#
+# newsyslog runs hourly. When kiwi-builder.log exceeds 5 MB it is rotated (3 gzipped copies
+# kept) and SIGTERM (15) is sent to the PID in kiwi-builder.pid, written by the LaunchAgent's
+# sh wrapper. The builder stops (a running build is reported to Kiwi as stopped, which
+# retries it) and launchd (KeepAlive) starts it again, which reopens kiwi-builder.log.
+#
+# logfilename                               [owner:group]   mode count size(KB) when flags [/pid_file]                               [sig_num]
+@HOME@/Library/Logs/kiwi-builder.log        @USER@:@GROUP@  600  3     5120     *    Z     @HOME@/Library/Logs/kiwi-builder.pid      15

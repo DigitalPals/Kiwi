@@ -190,7 +190,11 @@ async fn log_requests(req: Request, next: Next) -> Response {
     let response = next.run(req).await;
     let status = response.status();
     let ms = started.elapsed().as_millis();
-    if method != Method::GET || status.is_client_error() || status.is_server_error() {
+    // A Mac builder polls and sends heartbeats all day: only problems are worth a line.
+    let routine = path == "/api/builder/poll"
+        || (path.starts_with("/api/builder/tasks/") && path.ends_with("/events"));
+    let problem = status.is_client_error() || status.is_server_error();
+    if problem || (method != Method::GET && !routine) {
         tracing::info!("{method} {path} {} {ms}ms", status.as_u16());
     } else {
         tracing::debug!("{method} {path} {} {ms}ms", status.as_u16());

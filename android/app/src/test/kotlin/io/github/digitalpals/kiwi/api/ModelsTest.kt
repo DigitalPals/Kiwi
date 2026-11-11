@@ -11,6 +11,48 @@ class ModelsTest {
     private val json = KiwiJson
 
     @Test
+    fun parsesACommunityAppStateWithItsBundleAndAFailureKind() {
+        val state = json.decodeFromString(
+            AutomationState.serializer(),
+            """{"id":"community-com.discord","platform":"android","name":"Discord","bundle_id":"com.discord",""" +
+                """"tweak":"Venus Patches v1.21.1","added":true,"something_new":{"a":1},""" +
+                """"jobs":[{"id":"j1","status":"failed","error":"Patches failed.","error_kind":"other_bundle","finished_at":"2026-11-10T10:00:00Z"}],""" +
+                """"community":{"package":"com.discord","repo":"VenusIsJaded/Venus-Patches","author":"VenusIsJaded","tag":"v1.21.1",""" +
+                """"chosen":"manual","update":{"tag":"v1.22.0","published_at":"2026-11-05T00:00:00Z"},"resolving":false}}""",
+        )
+        val info = state.community!!
+        assertEquals("VenusIsJaded/Venus-Patches", info.repo)
+        assertTrue(info.isManual)
+        assertEquals("v1.22.0", info.update?.tag)
+        assertEquals(ErrorKinds.OTHER_BUNDLE, state.jobs.single().errorKind)
+        // Kiwi Builds' own apps have none, and jobs without a kind say nothing.
+        val own = json.decodeFromString(AutomationState.serializer(), """{"id":"android-youtube","name":"YouTube","jobs":[{"id":"j","status":"failed"}]}""")
+        assertNull(own.community)
+        assertNull(own.jobs.single().errorKind)
+        // Nulls fall back to the defaults.
+        val resolving = json.decodeFromString(CommunityInfo.serializer(), """{"package":"com.discord","repo":null,"tag":null,"update":null,"resolving":true}""")
+        assertEquals("", resolving.repo)
+        assertFalse(resolving.isManual)
+        assertTrue(resolving.resolving)
+    }
+
+    @Test
+    fun parsesTheCommunityOverview() {
+        val overview = json.decodeFromString(
+            CommunityOverview.serializer(),
+            """{"available":true,"reason":null,"index":{"updated_at":"2026-11-11T08:00:00Z","apps":1713,"bundles":496,"stale":false},""" +
+                """"popular":[{"id":"community-com.discord","package":"com.discord","name":"Discord","icon_url":"/api/art/abc",""" +
+                """"category":"Communication","installs":500000000,"description":"…","bundles":3,"patches":79,"featured":true,"added":false}],""" +
+                """"added":[{"id":"community-tv.twitch.android.app","platform":"android","name":"Twitch","added":true}]}""",
+        )
+        assertTrue(overview.available)
+        assertEquals(1713, overview.index?.apps)
+        assertEquals("/api/art/abc", overview.popular.single().iconUrl)
+        assertEquals(500_000_000L, overview.popular.single().installs)
+        assertEquals("Twitch", overview.added.single().name)
+    }
+
+    @Test
     fun parsesMeFromAKiwiWithoutTheNewFields() {
         val me = json.decodeFromString(Me.serializer(), ME_BEFORE_PLATFORMS)
         assertEquals("ts:nTEST1CNTRL", me.device.id)

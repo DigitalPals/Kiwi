@@ -9,6 +9,12 @@ import io.github.digitalpals.kiwi.api.AutomationPreferences
 import io.github.digitalpals.kiwi.api.AutomationState
 import io.github.digitalpals.kiwi.api.BuildFeature
 import io.github.digitalpals.kiwi.api.BuildLimitation
+import io.github.digitalpals.kiwi.api.CommunityApp
+import io.github.digitalpals.kiwi.api.CommunityCandidate
+import io.github.digitalpals.kiwi.api.CommunityIndex
+import io.github.digitalpals.kiwi.api.CommunityInfo
+import io.github.digitalpals.kiwi.api.CommunityOverview
+import io.github.digitalpals.kiwi.api.CommunityUpdate
 import io.github.digitalpals.kiwi.api.Counts
 import io.github.digitalpals.kiwi.api.Device
 import io.github.digitalpals.kiwi.api.HostInfo
@@ -21,6 +27,8 @@ import io.github.digitalpals.kiwi.install.InstallJob
 import io.github.digitalpals.kiwi.ui.AppItem
 import io.github.digitalpals.kiwi.ui.AppPage
 import io.github.digitalpals.kiwi.ui.BuildsViewModel
+import io.github.digitalpals.kiwi.ui.Community
+import io.github.digitalpals.kiwi.ui.CommunitySearch
 import io.github.digitalpals.kiwi.ui.KiwiBuilds
 import io.github.digitalpals.kiwi.ui.LocalPackage
 import io.github.digitalpals.kiwi.ui.MyAppsViewModel
@@ -290,4 +298,222 @@ object PreviewData {
     /** YouTube installing from its page. */
     val youTubeInstalling: InstallJob =
         InstallJob(youTube.key, "YouTube", InstallJob.Phase.Downloading, progress = 0.62f)
+
+    // The Morphe community catalogue (step 4): apps by independent authors, built in a sandbox.
+
+    private fun communityApp(pkg: String, name: String, category: String, installs: Long, patches: Int, bundles: Int = 2) =
+        CommunityApp(
+            id = Community.ID_PREFIX + pkg,
+            packageName = pkg,
+            name = name,
+            category = category,
+            installs = installs,
+            bundles = bundles,
+            patches = patches,
+            featured = true,
+        )
+
+    val discord = communityApp("com.discord", "Discord", "Communication", 500_000_000, 79, bundles = 3)
+    val popularCommunity: List<CommunityApp> = listOf(
+        discord,
+        communityApp("com.instagram.android", "Instagram", "Social", 5_000_000_000, 65),
+        communityApp("com.twitter.android", "X", "News & Magazines", 1_000_000_000, 46, bundles = 4),
+        communityApp("com.zhiliaoapp.musically", "TikTok", "Social", 1_000_000_000, 27),
+        communityApp("tv.twitch.android.app", "Twitch", "Entertainment", 100_000_000, 42, bundles = 5),
+        communityApp("com.pinterest", "Pinterest", "Lifestyle", 1_000_000_000, 35),
+        communityApp("com.truecaller", "Truecaller", "Communication", 1_000_000_000, 12),
+        communityApp("com.tumblr", "Tumblr", "Social", 100_000_000, 8, bundles = 1),
+    )
+
+    /** The bundle Twitch is built with: picked by Kiwi, with newer patches on offer. */
+    val twitchInfo = CommunityInfo(
+        packageName = "tv.twitch.android.app",
+        repo = "jordanwoodson/lurk-morphe-patches",
+        author = "jordanwoodson",
+        tag = "v1.16.1",
+        chosen = CommunityInfo.CHOSEN_AUTO,
+        update = CommunityUpdate("v1.17.0", publishedAt = daysAgo(4)),
+    )
+
+    private val communityNotices = listOf(
+        BuildLimitation("shield", "Third-party code, not reviewed by Kiwi", "These patches come from an independent author. Kiwi hasn't reviewed their code."),
+        BuildLimitation("key", "Replaces the Play Store app", "Uninstall the Play Store app first; its data on this phone is lost."),
+        BuildLimitation("bell", "Google sign-in and notifications may not work", "They are bound to the original app's signature."),
+    )
+
+    /** Twitch, built and installed, with an update of its patches offered. */
+    val twitchCommunity = AutomationState(
+        id = Community.ID_PREFIX + "tv.twitch.android.app",
+        platform = "android",
+        name = "Twitch",
+        bundleId = "tv.twitch.android.app",
+        tweak = "lurk-morphe-patches v1.16.1",
+        summary = "No ads, chat tweaks",
+        limitations = communityNotices,
+        included = listOf(
+            BuildFeature("ads", "Block video ads", "Removes pre-roll and mid-roll ads."),
+            BuildFeature("chat", "Show deleted messages", "Keeps moderated messages visible, crossed out."),
+            BuildFeature("autoclaim", "Auto-claim channel points"),
+            BuildFeature("emotes", "Third-party emotes", "BTTV, FFZ and 7TV emotes in chat."),
+            BuildFeature("pip", "Picture in picture"),
+            BuildFeature("quality", "Remember video quality"),
+            BuildFeature("debug", "Debug mode"),
+            BuildFeature("timestamps", "Chat timestamps"),
+        ),
+        added = true,
+        jobs = listOf(AutomationJob("c1", "community-tv.twitch.android.app", 1, "ready", "Available in Kiwi", "31.8.0", finishedAt = daysAgo(6))),
+        published = PublishedBuild("31.8.0", date = daysAgo(6)),
+        community = twitchInfo,
+    )
+
+    val twitchSummary = AppSummary(
+        sourceId = KiwiBuilds.SOURCE_ID,
+        sourceName = "Kiwi Builds",
+        bundleId = "tv.twitch.android.app",
+        platform = "android",
+        name = "Twitch",
+        tintColor = "#9146FF",
+        state = AppState(
+            actionName = "open",
+            installed = Installed("31.8.0", signedBundleId = "tv.twitch.android.app", verified = true),
+            target = Release("31.8.0", date = daysAgo(6)),
+        ),
+    )
+
+    /** Discord's first build running, to install when ready. */
+    val discordBuilding = AutomationState(
+        id = discord.id,
+        platform = "android",
+        name = "Discord",
+        bundleId = "com.discord",
+        tweak = "Venus Patches v1.21.1",
+        summary = "Patches by VenusIsJaded",
+        limitations = communityNotices,
+        added = true,
+        jobs = listOf(AutomationJob("c2", discord.id, 1, "running", "Patching Discord", "351.11", interactive = true)),
+        community = CommunityInfo("com.discord", "VenusIsJaded/Venus-Patches", "VenusIsJaded", "v1.21.1"),
+    )
+
+    /** TikTok waiting while Kiwi chooses its patches. */
+    val tikTokQueued = AutomationState(
+        id = Community.ID_PREFIX + "com.zhiliaoapp.musically",
+        platform = "android",
+        name = "TikTok",
+        bundleId = "com.zhiliaoapp.musically",
+        added = true,
+        jobs = listOf(AutomationJob("c3", "community-com.zhiliaoapp.musically", 1, "queued", "Waiting for Discord", interactive = true, ahead = 1)),
+        community = CommunityInfo("com.zhiliaoapp.musically", resolving = true),
+    )
+
+    /** X failed with its patches: choose other patches. */
+    val xFailed = AutomationState(
+        id = Community.ID_PREFIX + "com.twitter.android",
+        platform = "android",
+        name = "X",
+        bundleId = "com.twitter.android",
+        tweak = "x-twitter-patches v1.80.0",
+        added = true,
+        jobs = listOf(
+            AutomationJob(
+                "c4", "community-com.twitter.android", 1, "failed", "Needs attention", "12.40.1",
+                error = "These patches turned nothing on for X.",
+                finishedAt = daysAgo(0),
+                errorKind = "other_bundle",
+            ),
+        ),
+        community = CommunityInfo("com.twitter.android", "serajr/x-twitter-patches", "serajr", "v1.80.0"),
+    )
+
+    /** Chess can't be built from what Google Play offers: remove it. */
+    val chessUnavailable = AutomationState(
+        id = Community.ID_PREFIX + "com.chess",
+        platform = "android",
+        name = "Chess",
+        bundleId = "com.chess",
+        added = true,
+        jobs = listOf(
+            AutomationJob(
+                "c5", "community-com.chess", 1, "failed", "Needs attention",
+                error = "No community patches work with a version Google Play offers.",
+                finishedAt = daysAgo(1),
+                errorKind = "unavailable",
+            ),
+        ),
+        community = CommunityInfo("com.chess"),
+    )
+
+    val communityAdded: List<AutomationState> = listOf(twitchCommunity, discordBuilding, tikTokQueued, xFailed, chessUnavailable)
+
+    /** The apps of [buildsCommunity] waiting to be installed. */
+    val communityPending: Set<String> = setOf(discordBuilding.id, tikTokQueued.id)
+
+    val communityIndex = CommunityIndex(updatedAt = daysAgo(0), apps = 1713, bundles = 496)
+
+    /** Builds with the community section on a Linux Kiwi: added apps in every state, then Popular. */
+    val buildsCommunity = buildsContent.copy(
+        tints = tints + ("tv.twitch.android.app" to "#9146FF"),
+        published = buildsContent.published + ("tv.twitch.android.app" to twitchSummary),
+        local = buildsContent.local + ("tv.twitch.android.app" to installedSilently),
+        community = CommunityOverview(
+            available = true,
+            index = communityIndex,
+            popular = popularCommunity,
+            added = communityAdded,
+        ),
+    )
+
+    const val MAC_REASON = "Community builds need Kiwi on Linux or in Docker, where Kiwi can lock the patcher in a sandbox."
+
+    /** John's Kiwi on a Mac: browse only. */
+    val buildsCommunityMac = buildsContent.copy(
+        community = CommunityOverview(available = false, reason = MAC_REASON, index = communityIndex, popular = popularCommunity),
+    )
+
+    /** Before Kiwi's first fetch of the index. */
+    val buildsCommunityLoading = buildsContent.copy(
+        community = CommunityOverview(available = true, reason = "Kiwi is loading the community list…", index = null),
+    )
+
+    /** The community list couldn't be loaded. */
+    val buildsCommunityError = buildsContent.copy(communityError = "Can't reach Kiwi at kiwi.example.ts.net. Is Tailscale on?")
+
+    /** What blocks Discord: the Play Store app is installed. */
+    val discordBlocker: String =
+        "Discord is already installed on this phone from somewhere else (with another signature). Android can't " +
+            "replace it with Kiwi's build: uninstall it first. Its data on this phone is lost."
+
+    val twitchCandidates: List<CommunityCandidate> = listOf(
+        CommunityCandidate(
+            "jordanwoodson/lurk-morphe-patches", "jordanwoodson", stars = 214, updatedAt = daysAgo(3), patches = 42,
+            versions = listOf("31.8.0"), recommended = true, chosen = true,
+        ),
+        CommunityCandidate("Overhypedcat/overhypedcat-twitch-patches", "Overhypedcat", stars = 57, updatedAt = daysAgo(12), patches = 4, versions = listOf("31.8.0")),
+        CommunityCandidate(
+            "arandomhooman/hoomans-morphe-patches", "arandomhooman", stars = 388, updatedAt = daysAgo(40), patches = 9,
+            versions = listOf("30.9.0", "31.0.1", "31.2.0", "31.4.1"),
+        ),
+        CommunityCandidate(
+            "kveld9/kveld-morphe-patches", "kveld9", stars = 1207, updatedAt = daysAgo(1), patches = 6, versions = emptyList(),
+            failed = "A patch needs the internet while patching.",
+        ),
+    )
+
+    /** The search with "chat" typed: a first page of matches, more to load. */
+    val communitySearch = CommunitySearch.State(
+        query = "chat",
+        results = listOf(
+            discord,
+            communityApp("org.telegram.messenger", "Telegram", "Communication", 1_000_000_000, 31),
+            communityApp("com.whatsapp", "WhatsApp Messenger", "Communication", 10_000_000_000, 18, bundles = 3),
+            communityApp("com.snapchat.android", "Snapchat", "Communication", 1_000_000_000, 14),
+            communityApp("tv.twitch.android.app", "Twitch", "Entertainment", 100_000_000, 42, bundles = 5).copy(added = true),
+            communityApp("com.kick.mobile", "Kick", "Entertainment", 10_000_000, 7, bundles = 1),
+        ),
+        total = 23,
+        loaded = true,
+    )
+
+    val communitySearchEmpty = CommunitySearch.State(query = "zzzz", loaded = true)
+
+    val communitySearchFailed = CommunitySearch.State(query = "chat", error = "Can't reach Kiwi at kiwi.example.ts.net. Is Tailscale on?")
 }

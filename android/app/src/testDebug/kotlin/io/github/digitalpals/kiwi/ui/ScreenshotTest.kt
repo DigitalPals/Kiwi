@@ -39,6 +39,10 @@ import io.github.digitalpals.kiwi.ui.screens.AppPageContent
 import io.github.digitalpals.kiwi.ui.screens.BrowseContent
 import io.github.digitalpals.kiwi.ui.screens.BuildsActions
 import io.github.digitalpals.kiwi.ui.screens.BuildsContent
+import io.github.digitalpals.kiwi.ui.screens.CommunityAppSheetContent
+import io.github.digitalpals.kiwi.ui.screens.CommunityCandidatesSheetContent
+import io.github.digitalpals.kiwi.ui.screens.CommunityInstallSheetContent
+import io.github.digitalpals.kiwi.ui.screens.CommunitySearchContent
 import io.github.digitalpals.kiwi.ui.screens.ConnectContent
 import io.github.digitalpals.kiwi.ui.screens.EditBuildSheetContent
 import io.github.digitalpals.kiwi.ui.screens.InstallBuildSheetContent
@@ -92,9 +96,9 @@ class ScreenshotTest {
         }
     }
 
-    private fun both(name: String, content: @Composable (dark: Boolean) -> Unit) {
-        shot(name, dark = false) { content(false) }
-        shot(name, dark = true) { content(true) }
+    private fun both(name: String, height: Int = 780, content: @Composable (dark: Boolean) -> Unit) {
+        shot(name, dark = false, height) { content(false) }
+        shot(name, dark = true, height) { content(true) }
     }
 
     @Test
@@ -210,6 +214,89 @@ class ScreenshotTest {
         }
         both("c6-app-sheet") {
             SheetPreviewFrame { EditBuildSheetContent(PreviewData.youTubeRecipe, "#FF0000", false, {}, {}, {}, {}) }
+        }
+    }
+
+    /** The community section (step 4), tall enough to show all of it below Kiwi Builds. */
+    @Test
+    fun c6Community() {
+        both("c6-community", height = 2300) {
+            Phone(KiwiTab.Builds) {
+                BuildsContent(
+                    Load.Ready(PreviewData.buildsCommunity),
+                    emptySet(),
+                    true,
+                    PreviewData.NOW,
+                    BuildsActions(),
+                    pending = PreviewData.communityPending,
+                )
+            }
+        }
+        both("c6-community-mac", height = 1900) {
+            Phone(KiwiTab.Builds) { BuildsContent(Load.Ready(PreviewData.buildsCommunityMac), emptySet(), true, PreviewData.NOW, BuildsActions()) }
+        }
+        both("c6-community-loading", height = 1100) {
+            Phone(KiwiTab.Builds) { BuildsContent(Load.Ready(PreviewData.buildsCommunityLoading), emptySet(), true, PreviewData.NOW, BuildsActions()) }
+        }
+        both("c6-community-error", height = 1100) {
+            Phone(KiwiTab.Builds) { BuildsContent(Load.Ready(PreviewData.buildsCommunityError), emptySet(), true, PreviewData.NOW, BuildsActions()) }
+        }
+    }
+
+    @Test
+    fun c6CommunitySheets() {
+        both("c6-community-install-sheet", height = 1250) {
+            SheetPreviewFrame {
+                CommunityInstallSheetContent(
+                    Community.target(PreviewData.discord), null, emptyList(), PreviewData.discordBlocker,
+                    available = true, reason = null, notificationsAllowed = false, busy = false, onBuild = {}, onUninstall = {}, onNotificationSettings = {},
+                )
+            }
+        }
+        both("c6-community-install-sheet-mac", height = 1000) {
+            SheetPreviewFrame {
+                CommunityInstallSheetContent(
+                    Community.target(PreviewData.discord), null, emptyList(), null,
+                    available = false, reason = PreviewData.MAC_REASON, notificationsAllowed = true, busy = false, onBuild = {}, onUninstall = {}, onNotificationSettings = {},
+                )
+            }
+        }
+        both("c6-community-app-sheet", height = 1500) {
+            SheetPreviewFrame { CommunityAppSheetContent(PreviewData.twitchCommunity, "#9146FF", true, false, {}, {}, {}, {}, {}) }
+        }
+        both("c6-community-app-sheet-failed", height = 900) {
+            SheetPreviewFrame { CommunityAppSheetContent(PreviewData.xFailed, null, true, false, {}, {}, {}, {}, {}) }
+        }
+        both("c6-community-app-sheet-unavailable", height = 900) {
+            SheetPreviewFrame { CommunityAppSheetContent(PreviewData.chessUnavailable, null, true, false, {}, {}, {}, {}, {}) }
+        }
+        both("c6-community-candidates", height = 1000) {
+            SheetPreviewFrame {
+                CommunityCandidatesSheetContent(
+                    PreviewData.twitchCommunity, "#9146FF", Load.Ready(PreviewData.twitchCandidates), PreviewData.NOW, true, false, {}, {},
+                )
+            }
+        }
+    }
+
+    @Test
+    fun c6CommunitySearch() {
+        both("c6-community-search") {
+            SearchFrame { CommunitySearchContent(PreviewData.communitySearch, true, emptySet(), emptySet(), {}, {}, {}, {}, {}) }
+        }
+        both("c6-community-search-empty") {
+            SearchFrame { CommunitySearchContent(PreviewData.communitySearchEmpty, true, emptySet(), emptySet(), {}, {}, {}, {}, {}) }
+        }
+        both("c6-community-search-failed") {
+            SearchFrame { CommunitySearchContent(PreviewData.communitySearchFailed, false, emptySet(), emptySet(), {}, {}, {}, {}, {}) }
+        }
+    }
+
+    /** The search sheet's background, with room at the top as the sheet leaves. */
+    @Composable
+    private fun SearchFrame(content: @Composable () -> Unit) {
+        Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, modifier = Modifier.fillMaxSize()) {
+            Box(Modifier.padding(top = 24.dp)) { content() }
         }
     }
 

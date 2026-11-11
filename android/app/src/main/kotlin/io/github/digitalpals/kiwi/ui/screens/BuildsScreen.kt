@@ -43,6 +43,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -62,11 +63,13 @@ import androidx.lifecycle.repeatOnLifecycle
 import io.github.digitalpals.kiwi.api.AppSummary
 import io.github.digitalpals.kiwi.api.AutomationPreferences
 import io.github.digitalpals.kiwi.api.AutomationState
+import io.github.digitalpals.kiwi.api.CommunityApp
 import io.github.digitalpals.kiwi.install.InstallJob
 import io.github.digitalpals.kiwi.ui.AppActions
 import io.github.digitalpals.kiwi.ui.BuildRowAction
 import io.github.digitalpals.kiwi.ui.BuildRowView
 import io.github.digitalpals.kiwi.ui.BuildsViewModel
+import io.github.digitalpals.kiwi.ui.Community
 import io.github.digitalpals.kiwi.ui.Format
 import io.github.digitalpals.kiwi.ui.KiwiBuilds
 import io.github.digitalpals.kiwi.ui.Load
@@ -111,6 +114,12 @@ class BuildsActions(
     val checkAll: () -> Unit = {},
     val notifyBuilds: (Boolean) -> Unit = {},
     val turnOn: () -> Unit = {},
+    /** "Install" on a community app not added yet: its sheet. */
+    val installCommunity: (CommunityApp) -> Unit = {},
+    /** "Choose other patches" of a community app. */
+    val choosePatches: (AutomationState) -> Unit = {},
+    /** Opens the community search. */
+    val search: () -> Unit = {},
 )
 
 /**
@@ -133,6 +142,12 @@ fun BuildsScreen(model: BuildsViewModel, appActions: AppActions, editRequest: St
     var installing by rememberSaveable { mutableStateOf<String?>(null) }
     var editing by rememberSaveable { mutableStateOf<String?>(null) }
     var removing by rememberSaveable { mutableStateOf<String?>(null) }
+    var searching by rememberSaveable { mutableStateOf(false) }
+
+    /** The community app whose "Choose other patches" sheet is open. */
+    var choosing by rememberSaveable { mutableStateOf<String?>(null) }
+    val search by model.search.state.collectAsStateWithLifecycle()
+    val candidates by model.candidates.collectAsStateWithLifecycle()
 
     /** Turning Kiwi Builds on: the app whose Install asked for it, or [BuildsViewModel.ALL]. */
     var turningOn by rememberSaveable { mutableStateOf<String?>(null) }
@@ -165,7 +180,7 @@ fun BuildsScreen(model: BuildsViewModel, appActions: AppActions, editRequest: St
         actions = BuildsActions(
             refresh = { model.reload() },
             install = { app -> if (content?.off == true) turningOn = app.id else installing = app.id },
-            retry = model::retry,
+            retry = { app -> if (Community.isId(app.id)) model.retryCommunity(app) else model.retry(app) },
             buttons = { appActions.buttons(it) },
             edit = { editing = it.id },
             check = { app, force -> model.check(app, force) },
@@ -174,11 +189,18 @@ fun BuildsScreen(model: BuildsViewModel, appActions: AppActions, editRequest: St
             checkAll = { content?.let { model.checkAll(it.added) } },
             notifyBuilds = model::setNotifyBuilds,
             turnOn = { turningOn = BuildsViewModel.ALL },
+            installCommunity = { installing = it.id },
+            choosePatches = { choosing = it.id },
+            search = { searching = true },
         ),
     )
+    LaunchedEffect(choosing) {
+        val id = choosing
+        if (id != null) model.loadCandidates(id) else model.closeCandidates()
+    }
 
     // The sheet waits for Kiwi's own state of the app (after turning Kiwi Builds on).
-    val toInstall = content?.takeIf { !it.off }?.apps?.firstOrNull { it.id == installing }
+    val toInstall = content?.takeIf { !it.off }?.apps?.firstOrNull { it.id == installing && !Community.isId(it.id) }
     if (toInstall != null) {
         BuildSheet(onDismiss = { installing = null }) {
             InstallBuildSheetContent(
@@ -190,6 +212,93 @@ fun BuildsScreen(model: BuildsViewModel, appActions: AppActions, editRequest: St
                 onBuild = { preferences -> model.buildAndInstall(toInstall, preferences) { installing = null } },
                 onUninstall = { SystemActions.uninstall(context, toInstall.bundleId) },
                 onNotificationSettings = { SystemActions.notificationSettings(context) },
+            )
+        }
+    }
+    val community = content?.community?.takeIf { !content.off }
+    val communityTarget = installing?.takeIf(Community::isId)?.let { id ->
+        content?.communityApps?.firstOrNull { it.id == id }?.let(Community::target)
+            ?: (community?.popular.orEmpty() + search.results).firstOrNull { it.id == id }?.let(Community::target)
+    }
+    if (content != null && community != null && communityTarget != null) {
+        val added = content.communityApps.firstOrNull { it.id == communityTarget.id }
+        val lookedUp by produceState<String?>(null, communityTarget.id) {
+            if (added == null) value = model.blockerFor(communityTarget.name, communityTarget.packageName)
+        }
+        val blocker = if (added != null) content.blockers[added.id] else lookedUp
+        BuildSheet(onDismiss = { installing = null }) {
+            CommunityInstallSheetContent(
+                target = communityTarget,
+                tint = content.tints[communityTarget.packageName],
+                limitations = added?.limitations.orEmpty(),
+                blocker = blocker,
+                available = community.available,
+                reason = community.reason,
+                notificationsAllowed = remember(communityTarget.id) { Notifications.allowed(context) },
+                busy = communityTarget.id in busy,
+                onBuild = {
+                    model.installCommunity(communityTarget.id, communityTarget.name, added?.let(Community::retryRepo)) {
+                        installing = null
+                        searching = false
+                    }
+                },
+                onUninstall = { SystemActions.uninstall(context, communityTarget.packageName) },
+                onNotificationSettings = { SystemActions.notificationSettings(context) },
+            )
+        }
+    }
+    val managed = editing?.takeIf(Community::isId)?.let { id -> content?.communityApps?.firstOrNull { it.id == id } }
+    if (content != null && managed != null && community != null) {
+        BuildSheet(onDismiss = { editing = null }) {
+            CommunityAppSheetContent(
+                app = managed,
+                tint = content.tints[managed.bundleId],
+                available = community.available,
+                busy = managed.id in busy,
+                onRetry = { model.retryCommunity(managed) },
+                onChoose = { choosing = managed.id },
+                onUpdate = { model.updateCommunity(managed) },
+                onCancel = { model.cancel(managed) },
+                onRemove = { removing = managed.id },
+            )
+        }
+    }
+    val choosingApp = choosing?.let { id -> content?.communityApps?.firstOrNull { it.id == id } }
+    if (content != null && choosingApp != null && community != null) {
+        BuildSheet(onDismiss = { choosing = null }) {
+            CommunityCandidatesSheetContent(
+                app = choosingApp,
+                tint = content.tints[choosingApp.bundleId],
+                load = candidates?.takeIf { it.id == choosingApp.id }?.load ?: Load.Loading,
+                now = Instant.now(),
+                available = community.available,
+                busy = choosingApp.id in busy,
+                onRetry = { model.loadCandidates(choosingApp.id) },
+                onPick = { repo ->
+                    model.installCommunity(choosingApp.id, choosingApp.name, repo) {
+                        choosing = null
+                        editing = null
+                    }
+                },
+            )
+        }
+    }
+    if (content != null && searching && community != null) {
+        LaunchedEffect(Unit) { model.search.open() }
+        SearchSheet(onDismiss = { searching = false }) {
+            CommunitySearchContent(
+                state = search,
+                available = community.available,
+                added = content.communityApps.map { it.id }.toSet(),
+                busy = busy,
+                onQuery = model.search::setQuery,
+                onLoadMore = model.search::loadMore,
+                onRetry = model.search::retry,
+                onInstall = { installing = it.id },
+                onOpen = { id ->
+                    searching = false
+                    editing = id
+                },
             )
         }
     }
@@ -207,10 +316,10 @@ fun BuildsScreen(model: BuildsViewModel, appActions: AppActions, editRequest: St
             )
         }
     }
-    content?.apps?.firstOrNull { it.id == removing }?.let { app ->
+    content?.app(removing)?.let { app ->
         AlertDialog(
             onDismissRequest = { removing = null },
-            title = { Text("Remove ${app.name} from Kiwi Builds?") },
+            title = { Text(if (Community.isId(app.id)) "Remove ${app.name}?" else "Remove ${app.name} from Kiwi Builds?") },
             text = { Text("Installed copies keep working, but won't get updates. You can install it again later.") },
             confirmButton = {
                 TextButton(onClick = {
@@ -291,6 +400,7 @@ fun BuildsContent(
                         }
                     }
                     kiwiBuildsSection(value, busy, pending, installs, actions)
+                    communitySection(value, busy, pending, installs, actions)
                     val added = if (value.off) emptyList() else value.added
                     if (added.isNotEmpty()) {
                         item(key = "schedule-label") { SectionLabel("Schedule") }
@@ -333,7 +443,12 @@ private fun LazyListScope.kiwiBuildsSection(
                     pending = app.id in pending,
                     off = value.off,
                 )
-                row { BuildRow(app, view, value.tints[app.bundleId], app.id in busy, menu = app.added && !value.off, actions) }
+                val menu = app.added && !value.off
+                row {
+                    BuildRow(app, view, value.tints[app.bundleId], app.id in busy, menu, actions) {
+                        if (menu) BuildMenu(app, app.id in busy, actions)
+                    }
+                }
             }
         }
     }
@@ -376,7 +491,15 @@ private fun ScheduleGroup(added: List<AutomationState>, busy: Set<String>, notif
  * or the published build's Update or Open); ⋮ for more once it is added.
  */
 @Composable
-private fun BuildRow(app: AutomationState, view: BuildRowView, tint: String?, busy: Boolean, menu: Boolean, actions: BuildsActions) {
+internal fun BuildRow(
+    app: AutomationState,
+    view: BuildRowView,
+    tint: String?,
+    busy: Boolean,
+    menu: Boolean,
+    actions: BuildsActions,
+    menuContent: @Composable () -> Unit = {},
+) {
     val action = view.action
     val caption = (action as? BuildRowAction.App)?.view?.caption()
     GroupRow(
@@ -389,10 +512,13 @@ private fun BuildRow(app: AutomationState, view: BuildRowView, tint: String?, bu
                 when (action) {
                     BuildRowAction.Install -> FilledAction(if (busy) "Starting…" else "Install", { actions.install(app) }, enabled = !busy)
                     BuildRowAction.Retry -> FilledAction(if (busy) "Starting…" else "Retry", { actions.retry(app) }, enabled = !busy)
+                    // Below the text: its label is too long for the row's end.
+                    BuildRowAction.ChoosePatches -> {}
+                    BuildRowAction.Remove -> TonalAction("Remove", { actions.remove(app) }, enabled = !busy)
                     is BuildRowAction.App -> ActionButton(action.view, actions.buttons(action.summary))
                     BuildRowAction.None -> {}
                 }
-                if (menu) BuildMenu(app, busy, actions)
+                menuContent()
             }
         },
         onClick = { if (menu) actions.edit(app) else if (action == BuildRowAction.Install) actions.install(app) },
@@ -413,6 +539,9 @@ private fun BuildRow(app: AutomationState, view: BuildRowView, tint: String?, bu
                     maxLines = 3,
                     modifier = Modifier.padding(top = 2.dp),
                 )
+            }
+            if (action == BuildRowAction.ChoosePatches) {
+                TonalAction("Choose other patches", { actions.choosePatches(app) }, Modifier.padding(top = 8.dp), enabled = !busy)
             }
         },
     )
@@ -452,7 +581,7 @@ private fun BuildMenu(app: AutomationState, busy: Boolean, actions: BuildsAction
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun BuildSheet(onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+internal fun BuildSheet(onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -614,16 +743,23 @@ fun EditBuildSheetContent(
 
 @Composable
 private fun SheetHeader(app: AutomationState, tint: String?, detail: String) {
+    SheetHeader(app.name, app.iconUrl, tint, detail) { if (app.experimental) Tag("Experimental") }
+}
+
+/** A sheet's header: the app's icon and name, a badge, and a line about it. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+internal fun SheetHeader(name: String, iconUrl: String?, tint: String?, detail: String, badge: @Composable () -> Unit = {}) {
     Row(
         Modifier.padding(start = 24.dp, end = 24.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        AppIcon(app.name, app.iconUrl, tint, size = 56.dp)
+        AppIcon(name, iconUrl, tint, size = 56.dp)
         Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(app.name, style = MaterialTheme.typography.titleLarge)
-                if (app.experimental) Tag("Experimental")
+            FlowRow(verticalArrangement = Arrangement.Center, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(name, style = MaterialTheme.typography.titleLarge, modifier = Modifier.align(Alignment.CenterVertically))
+                Box(Modifier.align(Alignment.CenterVertically)) { badge() }
             }
             Text(detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -631,7 +767,7 @@ private fun SheetHeader(app: AutomationState, tint: String?, detail: String) {
 }
 
 @Composable
-private fun Tag(text: String) {
+internal fun Tag(text: String) {
     Surface(shape = RoundedCornerShape(6.dp), color = MaterialTheme.kiwi.warningContainer, contentColor = MaterialTheme.kiwi.warningIcon) {
         Text(text, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
     }

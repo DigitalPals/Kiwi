@@ -368,8 +368,8 @@ marks it failed at that release and tries the next eligible one, three in all; a
 that failed is skipped until it publishes a new release. Failures say what you can do:
 **try again** (GitHub's limit of 60 lookups an hour without an account, or a download),
 **choose another bundle** (its patches failed), or nothing (no bundle supports a version
-Google Play offers you, or the app is paid). **Choose bundle** in Kiwi's Android app shows
-the candidates with what Kiwi learned about them, and builds the one you pick.
+Google Play offers you, or the app is paid). Kiwi's Android app can show the candidates
+with what Kiwi learned about them, and builds the one you pick instead.
 
 ### Updates
 

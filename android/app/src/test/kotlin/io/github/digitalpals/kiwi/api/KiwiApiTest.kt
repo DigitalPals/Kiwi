@@ -218,4 +218,75 @@ class KiwiApiTest {
         assertEquals("/api/settings", request.url.encodedPath)
         assertEquals("""{"kiwi_builds":true}""", request.body!!.utf8())
     }
+
+    @Test
+    fun talksToTheCommunityRoutesOfTheContract() = runTest {
+        server.enqueue(
+            json(
+                200,
+                """{"available":false,"reason":"Community builds need Kiwi on Linux or in Docker.","index":null,"popular":[],"added":[],"new_field":1}""",
+            ),
+        )
+        val overview = api.community()
+        assertEquals(false, overview.available)
+        assertNull(overview.index)
+        assertEquals("/api/community", server.takeRequest().url.encodedPath)
+
+        server.enqueue(json(200, """{"results":[{"id":"community-com.discord","package":"com.discord","name":"Discord","patches":79}],"total":41}"""))
+        val page = api.communitySearch(" chat ", offset = 30, limit = 30)
+        assertEquals(41, page.total)
+        assertEquals("com.discord", page.results.single().packageName)
+        val search = server.takeRequest()
+        assertEquals("/api/community/search", search.url.encodedPath)
+        assertEquals("chat", search.url.queryParameter("q"))
+        assertEquals("30", search.url.queryParameter("offset"))
+        assertEquals("30", search.url.queryParameter("limit"))
+
+        val state = """{"id":"community-com.discord","platform":"android","name":"Discord","added":true,"jobs":[]}"""
+        server.enqueue(json(202, state))
+        server.enqueue(json(202, state))
+        api.installCommunity("community-com.discord")
+        api.installCommunity("community-com.discord", repo = "VenusIsJaded/Venus-Patches")
+        val auto = server.takeRequest()
+        assertEquals("POST", auto.method)
+        assertEquals("1", auto.headers["X-Kiwi"])
+        assertEquals("/api/community/community-com.discord/install", auto.url.encodedPath)
+        assertEquals("{}", auto.body!!.utf8())
+        assertEquals("""{"repo":"VenusIsJaded/Venus-Patches"}""", server.takeRequest().body!!.utf8())
+
+        server.enqueue(
+            json(
+                200,
+                """[{"repo":"VenusIsJaded/Venus-Patches","author":"VenusIsJaded","stars":120,"updated_at":"2026-11-01T00:00:00Z",""" +
+                    """"patches":78,"versions":["351.11 - Stable"],"recommended":true,"chosen":false,"failed":null},""" +
+                    """{"repo":"lildanlid1/Cordly","failed":"Patches failed."}]""",
+            ),
+        )
+        val candidates = api.communityCandidates("community-com.discord")
+        assertEquals(listOf("VenusIsJaded/Venus-Patches", "lildanlid1/Cordly"), candidates.map { it.repo })
+        assertTrue(candidates[0].recommended)
+        assertEquals("Patches failed.", candidates[1].failed)
+        assertEquals("/api/community/community-com.discord/candidates", server.takeRequest().url.encodedPath)
+
+        server.enqueue(json(202, state))
+        api.updateCommunity("community-com.discord")
+        val update = server.takeRequest()
+        assertEquals("POST", update.method)
+        assertEquals("/api/community/community-com.discord/update", update.url.encodedPath)
+
+        server.enqueue(json(200, state))
+        assertEquals("Discord", api.automationApp("community-com.discord").name)
+        assertEquals("/api/automation/community-com.discord", server.takeRequest().url.encodedPath)
+    }
+
+    @Test
+    fun aDifferentBundleWhileABuildIsPendingIsAConflict() = runTest {
+        server.enqueue(json(409, """{"error":{"code":"conflict","message":"A build of Discord with other patches is on its way."}}"""))
+        try {
+            api.installCommunity("community-com.discord", repo = "lildanlid1/Cordly")
+            fail()
+        } catch (error: KiwiException.Http) {
+            assertTrue(error.isConflict)
+        }
+    }
 }

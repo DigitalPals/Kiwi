@@ -356,6 +356,11 @@ data class AutomationJob(
     val interactive: Boolean = false,
     /** A queued job: how many builds run before it starts, the running one included (newer Kiwis). */
     val ahead: Int? = null,
+    /**
+     * A failed community build: what would help, [ErrorKinds] ("retry", "other_bundle",
+     * "unavailable"); null when Kiwi doesn't say.
+     */
+    @SerialName("error_kind") val errorKind: String? = null,
 ) {
     val isActive: Boolean get() = finishedAt == null
 }
@@ -421,6 +426,8 @@ data class AutomationState(
     @SerialName("source_enabled") val sourceEnabled: Boolean? = null,
     @SerialName("configuration_changed") val configurationChanged: Boolean = false,
     @SerialName("next_check_at") val nextCheckAt: String? = null,
+    /** A Morphe community app: the patches it is built with. Null for Kiwi Builds' own apps. */
+    val community: CommunityInfo? = null,
 )
 
 /** Every app Kiwi Builds can build (`GET /api/automation`). */
@@ -428,4 +435,116 @@ data class AutomationState(
 data class AutomationOverview(
     val apps: List<AutomationState> = emptyList(),
     val checks: List<SetupCheck> = emptyList(),
+)
+
+/** `AutomationJob.error_kind`: the one thing that helps after a failed community build. */
+object ErrorKinds {
+    /** Something passing went wrong (a download, a rate limit): try again. */
+    const val RETRY = "retry"
+
+    /** These patches failed or don't fit: choose another bundle. */
+    const val OTHER_BUNDLE = "other_bundle"
+
+    /** No bundle works with a version Google Play offers (or the app is paid, or not in this region). */
+    const val UNAVAILABLE = "unavailable"
+}
+
+/** A newer stable release of the pinned bundle, offered once it is 72 hours old. */
+@Serializable
+data class CommunityUpdate(
+    val tag: String,
+    @SerialName("published_at") val publishedAt: String? = null,
+)
+
+/** The bundle a community app is built with (`AutomationState.community`). */
+@Serializable
+data class CommunityInfo(
+    /** The original app's package. */
+    @SerialName("package") val packageName: String = "",
+    /** "owner/name" on GitHub; empty while Kiwi is still choosing. */
+    val repo: String = "",
+    val author: String = "",
+    /** The release the build is pinned to; empty while Kiwi is still choosing. */
+    val tag: String = "",
+    /** "auto" (Kiwi picked it) or "manual" (the owner chose it). */
+    val chosen: String = CHOSEN_AUTO,
+    val update: CommunityUpdate? = null,
+    /** Kiwi is picking a bundle (no tag yet). */
+    val resolving: Boolean = false,
+) {
+    val isManual: Boolean get() = chosen == CHOSEN_MANUAL
+
+    companion object {
+        const val CHOSEN_AUTO = "auto"
+        const val CHOSEN_MANUAL = "manual"
+    }
+}
+
+/** One app of the Morphe community index (`GET /api/community`, search). */
+@Serializable
+data class CommunityApp(
+    /** "community-<package>". */
+    val id: String,
+    @SerialName("package") val packageName: String = "",
+    val name: String,
+    @SerialName("icon_url") val iconUrl: String? = null,
+    val category: String? = null,
+    val installs: Long = 0,
+    val description: String? = null,
+    /** How many community bundles patch this app. */
+    val bundles: Int = 0,
+    /** The largest patch count any bundle has for it (informational). */
+    val patches: Int = 0,
+    val featured: Boolean = false,
+    /** The owner added it (it is in `CommunityOverview.added`). */
+    val added: Boolean = false,
+)
+
+/** The community index Kiwi has (null before its first successful fetch). */
+@Serializable
+data class CommunityIndex(
+    @SerialName("updated_at") val updatedAt: String? = null,
+    val apps: Int = 0,
+    val bundles: Int = 0,
+    /** Kiwi couldn't refresh it lately and uses its last good copy. */
+    val stale: Boolean = false,
+)
+
+/** `GET /api/community`: the community section of Builds. */
+@Serializable
+data class CommunityOverview(
+    /** Community builds work on this Kiwi (Linux or Docker with a working sandbox). */
+    val available: Boolean = false,
+    /** Why not, or that the list is still loading: one sentence to show as is. */
+    val reason: String? = null,
+    val index: CommunityIndex? = null,
+    /** Up to 30 popular apps. */
+    val popular: List<CommunityApp> = emptyList(),
+    /** The community apps the owner installed or added, as Kiwi Builds states. */
+    val added: List<AutomationState> = emptyList(),
+)
+
+/** `GET /api/community/search`: one page of matches and how many there are in all. */
+@Serializable
+data class CommunitySearchPage(
+    val results: List<CommunityApp> = emptyList(),
+    val total: Int = 0,
+)
+
+/** One bundle that can build a community app (`GET /api/community/:id/candidates`). */
+@Serializable
+data class CommunityCandidate(
+    /** "owner/name". */
+    val repo: String,
+    val author: String = "",
+    val stars: Int = 0,
+    @SerialName("updated_at") val updatedAt: String? = null,
+    val patches: Int = 0,
+    /** The app versions it targets (empty: any version). */
+    val versions: List<String> = emptyList(),
+    val recommended: Boolean = false,
+    /** The app is built with it now. */
+    val chosen: Boolean = false,
+    /** Why a build with it failed, or null. */
+    val failed: String? = null,
 )

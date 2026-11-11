@@ -49,10 +49,11 @@ Outputs:
   them (Kiwi or a release process), with `apksigner` and a key kept outside the repository.
   Every release of the app must be signed with the same key, or Android refuses the update.
 
-The unit tests (`./gradlew test`) run on the JVM: API models and the Kiwi Builds endpoints,
+The unit tests (`./gradlew test`) run on the JVM: API models and the Kiwi Builds and community endpoints,
 the User-Agent, server addresses and `kiwi://connect` links, the app button's states, the app
 colours and the "Fresh this week" shelf (ported from the web app, with its test cases), Kiwi
-Builds' wording, the package report (against a fake Kiwi), the install flow (one job per app,
+Builds' and the community section's wording (failure actions, notices, candidates), community
+search paging, waiting for Kiwi Builds and community builds to install them, the package report (against a fake Kiwi), the install flow (one job per app,
 "Update all", cancelling, the APK checks; with fakes for PackageInstaller and PackageManager),
 downloads (resuming, stale partial files, redirects, cancelling), install outcomes, the
 background install conditions, and update and build notifications. Nothing needs an
@@ -60,8 +61,9 @@ emulator.
 
 `testDebugUnitTest` also renders every screen with made-up data (`ui/preview/PreviewData.kt`)
 in light and dark, in Robolectric with native graphics and Roborazzi, to
-`app/build/outputs/roborazzi/*.png` (C1–C6 of the design, the Builds sheets, the launcher
-icon). They are records to look at, not golden images: the test fails only when a screen can't
+`app/build/outputs/roborazzi/*.png` (C1–C6 of the design, the Builds sheets, the community
+section in its states (`c6-community*`: Linux, Mac, loading, error, the install and app
+sheets, candidates, search), the launcher icon). They are records to look at, not golden images: the test fails only when a screen can't
 be composed. Every screen also has Compose previews for Android Studio.
 
 The launcher, notification and in-app logo icons are vector drawables generated from the web
@@ -211,10 +213,36 @@ app/src/main/kotlin/io/github/digitalpals/kiwi/
   against `automation/android.json` by a server test); Install, or the card above them, asks
   to turn it on (`PATCH /api/settings {"kiwi_builds": true}`) after a confirmation of what it
   does, as the web app's Settings does, and then continues with the app's sheet. An app's page
-  shows its patches when it comes from Kiwi Builds. More sections (such as community patches)
-  can follow the Kiwi Builds section as further list items.
+  shows its patches when it comes from Kiwi Builds (or a community app).
+- **Community apps.** Below Kiwi Builds, a "Community" section shows apps patched by
+  independent authors of the Morphe community (`/api/community`, docs/api.md), each marked
+  "Community · not reviewed": first the owner's community apps, with the same rows as Kiwi
+  Builds' (queue position, stage and progress, install when ready, Open or Update, a failed
+  build and its one action), then "Popular" (up to 30), then a search sheet
+  (`/api/community/search`, 300 ms after the last keystroke, 30 results a page, loading the
+  next page as the end comes into view; `ui/CommunitySearch.kt`). The phone never talks to
+  the Morphe index, GitHub or Google Play itself; icons come through Kiwi's art proxy. Install
+  opens a sheet: the first build's time, a copy of the app on the phone that Kiwi's build
+  can't replace (step 1's signature check: community builds keep the original package, so the
+  Play Store app must be uninstalled first, before minutes are spent building), and what to
+  know (third-party code Kiwi hasn't reviewed, naming the bundle once Kiwi picked one; it
+  replaces the Play Store app; Google sign-in and notifications may not work). **Build and
+  install** posts `/api/community/:id/install` and waits like Kiwi Builds' apps
+  (`BuildInstalls` reads the owner's community apps from `/api/community` when one is waiting,
+  and keeps waiting when that list can't be read). An added app's sheet (tap or ⋮) shows the
+  bundle (repo, author, tag, picked automatically or chosen by you), its applied patches, an
+  offered update ("New patches: vX → vY": Update approves it and rebuilds, `POST .../update`),
+  Cancel build and Remove. "Choose other patches" lists `/api/community/:id/candidates`
+  (recommended first; author, stars, last update, patches, versions, and why one failed);
+  picking one installs with `{"repo": ...}`. A failed build maps the job's `error_kind` to one
+  action: `retry` → Retry, `other_bundle` → Choose other patches, `unavailable` → an
+  explanation and Remove. Community apps have no schedule or patch switches, and "Build now"
+  leaves them out. When Kiwi can't build them (`available: false`, e.g. on a Mac) the rows
+  and search still show, with Kiwi's `reason` in a calm card and no Install buttons; before
+  the index's first fetch (`index: null`) the card says it is loading. With Kiwi Builds off
+  the section asks to turn it on. On a Kiwi without the catalogue (404) it is hidden.
 - **Build notifications.** With "Notify when a build finishes" (on by default) each update
-  check also reads `/api/automation` and notifies builds that finished or failed since the
+  check also reads `/api/automation` (and the owner's community apps) and notifies builds that finished or failed since the
   last look (the first look only remembers what it saw); a ready build opens the app's page,
   a failed one the Builds tab. Builds of apps waiting to be installed are notified even with
   the switch off, as "<App> is ready — tap to install". A ready build of an app that is installed is left to the
@@ -257,5 +285,7 @@ builds), background installs waiting for Wi-Fi under Tailscale's VPN, Cancel dur
 download and during the copy into a session, connecting while the screen rotates, the Builds tab against a real Kiwi (Install and its sheet, the wait
 for a first build in the foreground and in the background, its notification, the conflict
 warning before a build, Retry, patches, schedule, Build now, cancel, remove, turning Kiwi
-Builds on from Install), the carousel and pull to refresh
+Builds on from Install), the community section against a real Kiwi (Install with the Play
+Store app installed, search paging, choosing other patches, Update, the Mac's browse-only
+card), the carousel and pull to refresh
 by touch, the bottom sheets and menus, and the themed launcher icon.

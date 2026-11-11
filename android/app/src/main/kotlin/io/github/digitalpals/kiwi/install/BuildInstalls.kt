@@ -5,6 +5,7 @@ import io.github.digitalpals.kiwi.api.AppSummary
 import io.github.digitalpals.kiwi.api.KiwiApi
 import io.github.digitalpals.kiwi.api.KiwiException
 import io.github.digitalpals.kiwi.api.Platforms
+import io.github.digitalpals.kiwi.ui.Community
 import io.github.digitalpals.kiwi.ui.KiwiBuilds
 import io.github.digitalpals.kiwi.ui.PendingOutcome
 import io.github.digitalpals.kiwi.work.BuildNotice
@@ -23,7 +24,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * Installs Kiwi Builds apps once their build is ready, for "Build and install". The wish is
+ * Installs Kiwi Builds apps (community apps too, by their `community-<package>` id) once their
+ * build is ready, for "Build and install". The wish is
  * saved on the phone ([pending], SettingsStore.pendingInstalls) so it survives the app being
  * closed. While Kiwi is in the [foreground], this looks every few seconds and starts the
  * install of a ready build (Android asks to confirm it). In the background, UpdateWorker
@@ -39,7 +41,7 @@ class BuildInstalls(
     /** Forgets the wish of an app (SettingsStore.removePendingInstall). */
     private val forget: suspend (String) -> Unit,
     private val api: suspend () -> KiwiApi?,
-    /** Starts installing the published build of a Kiwi Builds app (by recipe id; InstallManager.start). */
+    /** Starts installing the published build of a Kiwi Builds app (by app id; InstallManager.start). */
     private val install: (String, AppSummary) -> Unit,
     /** Whether a package is on the phone. */
     private val isInstalled: (String) -> Boolean,
@@ -76,18 +78,21 @@ class BuildInstalls(
         if (waiting.isEmpty()) return
         val kiwi = api() ?: return
         try {
-            val apps = try {
-                KiwiBuilds.androidApps(kiwi.automation().apps)
+            val loaded = try {
+                if (waiting.any(Community::isId)) kiwi.buildApps() else BuildApps(kiwi.automation().apps, communityKnown = false)
             } catch (error: KiwiException.Http) {
                 // Turning Kiwi Builds off cancelled the builds.
                 if (!error.isBuildsOff) throw error
                 waiting.forEach { forget(it) }
                 return
             }
+            val apps = KiwiBuilds.androidApps(loaded.apps)
             val ended = apps.filter { it.id in waiting && KiwiBuilds.activeJob(it) == null }
             val published = if (ended.any { it.published != null }) catalogue(kiwi) else emptyMap()
             for (id in waiting) {
                 val app = apps.firstOrNull { it.id == id }
+                // The community list couldn't be read now: look again later.
+                if (app == null && Community.isId(id) && !loaded.communityKnown) continue
                 if (app == null) {
                     forget(id)
                     continue
@@ -115,7 +120,10 @@ class BuildInstalls(
         }
     }
 
-    /** Kiwi Builds' Android apps in Kiwi's catalogue, by bundle id. */
+    /**
+     * Kiwi Builds' Android apps in Kiwi's catalogue, by bundle id. Community builds are published
+     * to the same source.
+     */
     private suspend fun catalogue(kiwi: KiwiApi): Map<String, AppSummary> =
         kiwi.apps(hidden = true)
             .filter { it.sourceId == KiwiBuilds.SOURCE_ID && it.platform == Platforms.ANDROID }

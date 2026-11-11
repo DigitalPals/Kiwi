@@ -53,8 +53,9 @@ RFC 3339 strings in UTC. All `/api` responses are `application/json` with
 Kiwi patches and signs App Store apps on the Mac from the recipes in
 `automation/recipes.json`: `youtube`, `youtube-music`, `twitch`, `x` and `reddit`. It
 patches Android apps from the recipes in `automation/android.json`: `android-youtube`,
-`android-youtube-music` and `android-reddit`. `:app` below is one of those ids; an unknown
-id returns 404. Responses contain no credentials, signing keys, models, raw Apple or
+`android-youtube-music` and `android-reddit`. `:app` below is one of those ids, or the id of
+an added [community app](#community-builds) (`community-<package>`); an unknown id returns
+404. Responses contain no credentials, signing keys, models, raw Apple or
 Google responses, file paths or private logs.
 
 Kiwi Builds is off until the owner turns it on (`Settings.kiwi_builds`). While it is off,
@@ -131,7 +132,12 @@ job has `id`, `app`, `sequence`, `stage`, `created_at`, nullable `finished_at`, 
 job. `interactive` is `true` on jobs someone asked for and absent on scheduled ones (state
 saved by older versions loads as scheduled). A queued job also has `ahead`: how many builds
 run before it starts, the running one included (`0` when it starts next and the worker is
-free); show it as its place in the queue. Poll while `finished_at` is null. A `ready` job has passed package and signing checks;
+free); show it as its place in the queue. `error_kind` says what the owner can do about a
+failed or blocked job: `"retry"` (a download or rate limit; try again later),
+`"other_bundle"` (the patches failed or don't fit; choose another bundle) or
+`"unavailable"` (nothing works with a version Kiwi can download: paid, region-locked or
+not on Google Play); it is null otherwise and on Kiwi's own recipes. Poll while
+`finished_at` is null. A `ready` job has passed package and signing checks;
 it does not imply a test on a physical device. An Android job's `external_id` is the
 original app's version code. Its runner signs the app itself, so `signed_build_id` names
 the build Kiwi creates, already `ready`, when it publishes the app, and the job ends at
@@ -143,6 +149,114 @@ usual app/prepare/install APIs. Its source URL is an
 internal identifier; refreshing it returns the saved local catalogue without fetching the
 network. Raw artifacts and provenance files have no HTTP download route. See
 [kiwi-builds.md](kiwi-builds.md) for Mac setup and operational details.
+
+### Community builds
+
+Android apps patched with bundles from the Morphe community list
+([kiwi-builds.md](kiwi-builds.md#community-builds)). Every route needs Kiwi Builds on
+(`409 builds_off`). A community app's id is `community-<package>`, where the package matches
+`^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$`. The apps Kiwi Builds builds itself (YouTube,
+YouTube Music, Reddit) are not offered as community apps.
+
+`GET /api/community`:
+
+```json
+{"available": true, "reason": null,
+ "index": {"updated_at": "2026-11-11T06:00:00Z", "apps": 1645, "bundles": 482, "stale": false},
+ "popular": [CommunityApp, ...],
+ "added": [AutomationState, ...]}
+```
+
+- `available` is false, with a one-sentence `reason`, where community apps can't be built:
+  not on Linux ("Community builds need Kiwi on Linux or in Docker, where Kiwi can lock the
+  patcher in a sandbox."), on a Linux without Landlock and seccomp (the reason names what
+  is missing), or before the list was loaded. `popular` is still listed then (browse only).
+- `index` is null until the list was first fetched; `popular` is then empty and `reason`
+  says Kiwi is loading the community list. `updated_at` is when Kiwi last confirmed its
+  copy is current; `stale` is true when the last refresh failed or the copy is older than a
+  day (Kiwi keeps using it).
+- `popular`: up to 30 apps, the list's featured apps in its order, then the most installed.
+- `added`: the community apps the owner installed, in the shape of
+  `GET /api/automation/:app` (below).
+
+`GET /api/community/search?q=<text>&offset=0&limit=30` returns `{"results": [CommunityApp,
+...], "total": 123}`: apps whose name, package or patch names or descriptions contain `q`
+(case-insensitive), apps whose name or package matches first, each group by installs. An
+empty `q` lists every app by installs. `limit` is 1 through 100.
+
+CommunityApp:
+
+```json
+{"id": "community-com.discord", "package": "com.discord", "name": "Discord",
+ "icon_url": "/api/art/…", "category": "Social & Communication", "installs": 700000000,
+ "description": "…", "bundles": 4, "patches": 79, "featured": true, "added": false}
+```
+
+`icon_url` goes through Kiwi's artwork proxy (or is null); `bundles` is how many GitHub
+bundles have patches for the app, `patches` the most any one of them has (list data,
+informational).
+
+An added community app's state is the `GET /api/automation/:app` shape with `platform`
+`"android"`, `bundle_id` the package the build installs as (the original package until the
+first build), `tweak` `"<bundle> <tag>"`, `summary` a short patch summary, `experimental`
+true, `warning` a not-reviewed notice, `app_version` the pinned version, `limitations` the
+fixed community notices (not reviewed; replaces the Play Store app or installs beside it;
+Google sign-in and notifications may not work; Android 12L or later), `included` the
+default patches the build applied, `preferences.enabled` false, `next_check_at` null, and:
+
+```json
+"community": {"package": "com.discord", "repo": "VenusIsJaded/Venus-Patches",
+  "author": "VenusIsJaded", "tag": "v1.21.1", "chosen": "auto",
+  "update": null, "resolving": false}
+```
+
+- `repo`, `author`, `tag`: the pinned bundle release, null before the first build (`repo`
+  then names a bundle the owner chose, if any).
+- `chosen`: `"auto"` (Kiwi picked it) or `"manual"` (the owner did).
+- `update`: null, or `{"tag":"v1.22.0","published_at":"…"}` once a newer stable release of
+  the pinned repository is at least 72 hours old.
+- `resolving`: true while a build is choosing its bundle (no tag yet, or a manual choice).
+
+`GET`, `DELETE` and `POST .../cancel` on `/api/automation/:app` accept added community ids
+with the same meaning (`DELETE` also forgets the pinned bundle, so the next install picks
+again; the publisher's certificate stays pinned). `PATCH` and `POST .../check` and
+`.../add` answer 400: community apps have no schedule or options. Community jobs carry
+`community`: `{}` for an automatic pick, `{"repo": "owner/name"}` for a manual one or
+`{"update": "<tag>"}` for an approved update.
+
+`POST /api/community/:id/install` accepts `{}` or `{"repo": "owner/name"}` (a manual choice,
+one of the app's bundles in the list or the pinned one, any letter case) and returns the
+app's state. It adds the app and queues an interactive build (202), which starts before
+scheduled builds. It joins a queued or running build of the app (202) unless that build
+uses another bundle than a requested `repo` (`409 conflict`). When the app's build is
+published and the request names no other bundle, it returns 200 without building. Unknown
+apps return 404, a malformed or unlisted `repo` 400, and `409 community_unavailable` (with
+the reason) where community apps can't be built.
+
+`GET /api/community/:id/candidates` lists the app's bundles from the list and what Kiwi
+learned building them, without network access:
+
+```json
+[{"repo": "VenusIsJaded/Venus-Patches", "author": "VenusIsJaded", "stars": 180,
+  "updated_at": "2026-11-01T00:00:00Z", "patches": 78, "versions": ["351.11 - Stable"],
+  "recommended": true, "chosen": true, "failed": null}]
+```
+
+In Kiwi's order of preference by the list's data. `patches` and `versions` come from the
+bundle's own release once Kiwi checked it (else from the list); `recommended` marks
+Kiwi's automatic pick (its pinned automatic choice, else the best bundle not known to
+fail); `chosen` the pinned bundle; `failed` why a bundle can't be used at its latest
+release, or null.
+
+`POST /api/community/:id/update` approves the offered `update`: the next build pins the
+newer release and is queued as an interactive job (202, the app's state). `409` when no
+update is offered or another build of the app is on its way.
+
+Stages of community jobs include "Choosing patches", "Checking <owner/repo>",
+"Downloading original <App>", "Patching <App>", "Signing", "Validating the patched app"
+and "Adding to Kiwi". A job ends at "Available in Kiwi". Published community builds join
+the Kiwi Builds source (`kiwi-youtube`) under the package they install as, so the usual
+app/prepare/install routes and Kiwi's Android app install them like Kiwi's own builds.
 
 ## The owner
 

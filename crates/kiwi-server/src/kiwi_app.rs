@@ -262,10 +262,17 @@ pub(crate) async fn work(kiwi: Arc<Kiwi>, key: String, token: CancellationToken)
         builder: "The Android builder",
         timeout: TIMEOUT,
     };
-    let result = automation::invoke(&kiwi, call, &json!({ "input": key }), &token, |stage| {
-        tracing::debug!("Kiwi's Android app: {stage}");
-        Ok(())
-    })
+    let result = automation::invoke(
+        &kiwi,
+        call,
+        &json!({ "input": key }),
+        &token,
+        |stage| {
+            tracing::debug!("Kiwi's Android app: {stage}");
+            Ok(())
+        },
+        |_| Ok(()),
+    )
     .await;
     let outcome = match result {
         Ok(events) => check(&kiwi, &key, &events).await,

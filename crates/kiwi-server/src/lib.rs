@@ -7,6 +7,7 @@ pub mod art;
 pub mod automation;
 pub mod builds;
 pub mod catalog;
+pub mod community;
 pub mod config;
 pub mod db;
 pub mod devices;
@@ -171,6 +172,8 @@ pub struct Kiwi {
     settings: RwLock<Settings>,
     pub jobs: Jobs,
     pub automation: automation::Automation,
+    /// The Morphe community list and whether community builds can run here.
+    pub community: community::Community,
     pub owner: owner::Owner,
     /// IPA byte ranges served per install token (completion of ranged downloads).
     pub served: ServedRanges,
@@ -368,6 +371,7 @@ impl Kiwi {
             settings: RwLock::new(settings),
             jobs: Jobs::default(),
             automation,
+            community: community::Community::load(&config.data_dir),
             owner,
             served: ServedRanges::default(),
             retired: ota::RetiredTokens::default(),

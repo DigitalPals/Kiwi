@@ -10,6 +10,8 @@ import io.github.digitalpals.kiwi.api.AppDetail
 import io.github.digitalpals.kiwi.api.AppSummary
 import io.github.digitalpals.kiwi.api.AutomationPreferences
 import io.github.digitalpals.kiwi.api.AutomationState
+import io.github.digitalpals.kiwi.api.CommunityCandidate
+import io.github.digitalpals.kiwi.api.CommunityOverview
 import io.github.digitalpals.kiwi.api.InstalledPackage
 import io.github.digitalpals.kiwi.api.KiwiApi
 import io.github.digitalpals.kiwi.api.KiwiException
@@ -226,9 +228,12 @@ class AppViewModel(
         AppPage(detail, packageState, recipe.await()?.takeIf { detail.platform == Platforms.ANDROID })
     }
 
-    /** The Kiwi Builds recipe of this app; null when Kiwi Builds is off or unreachable. */
+    /**
+     * The Kiwi Builds recipe of this app, or the community app it was built as; null when Kiwi
+     * Builds is off or unreachable.
+     */
     private suspend fun recipe(kiwi: KiwiApi): AutomationState? = try {
-        KiwiBuilds.recipeFor(kiwi.automation().apps, bundleId)
+        KiwiBuilds.recipeFor(kiwi.automation().apps, bundleId) ?: KiwiBuilds.recipeFor(kiwi.community().added, bundleId)
     } catch (_: KiwiException) {
         null
     }
@@ -297,10 +302,31 @@ class BuildsViewModel(container: AppContainer, private val local: LocalPackages)
         val local: Map<String, LocalPackage> = emptyMap(),
         /** What must happen before an app's build can be installed here, by app id ([KiwiBuilds.blocker]). */
         val blockers: Map<String, String> = emptyMap(),
+        /**
+         * The Morphe community section (`/api/community`); null while Kiwi Builds is off, on a
+         * Kiwi without it, or when it couldn't be loaded ([communityError]).
+         */
+        val community: CommunityOverview? = null,
+        /** Why the community section couldn't be loaded (the previous one, if any, stays). */
+        val communityError: String? = null,
     ) {
+        /** Kiwi Builds' own added apps (community apps have no schedule). */
         val added: List<AutomationState> get() = apps.filter { it.added }
-        val active: Boolean get() = apps.any { KiwiBuilds.activeJob(it) != null }
+
+        /** The owner's community apps. */
+        val communityApps: List<AutomationState> get() = community?.added.orEmpty()
+
+        /** Kiwi is still fetching the community index: look again soon. */
+        val communityLoading: Boolean get() = community != null && community.index == null
+
+        val active: Boolean get() = (apps + communityApps).any { KiwiBuilds.activeJob(it) != null } || communityLoading
+
+        /** An app of either section by id. */
+        fun app(id: String?): AutomationState? = (apps + communityApps).firstOrNull { it.id == id }
     }
+
+    /** The bundles that can build a community app, for "Choose other patches". */
+    data class Candidates(val id: String, val load: Load<List<CommunityCandidate>>)
 
     private val _busy = MutableStateFlow<Set<String>>(emptySet())
 
@@ -329,21 +355,52 @@ class BuildsViewModel(container: AppContainer, private val local: LocalPackages)
     private var signerAsked = false
 
     override suspend fun fetch(kiwi: KiwiApi): Content = try {
-        val apps = KiwiBuilds.androidApps(kiwi.automation().apps).map { it.copy(iconUrl = it.iconUrl?.let(local::icon)) }
-        val published = if (apps.any { it.published != null }) catalogue(kiwi) else emptyMap()
-        val phone = withContext(Dispatchers.IO) { apps.associate { it.bundleId to local.of(it.bundleId) } }
-        Content(
-            off = false,
-            apps = apps,
-            tints = published.mapNotNull { (id, app) -> app.tintColor?.let { id to it } }.toMap(),
-            published = published,
-            local = phone,
-            blockers = blockers(kiwi, apps, published, phone),
-        )
+        coroutineScope {
+            val overview = async { communityOf(kiwi) }
+            // Community apps are listed in their own section, should Kiwi list them here too.
+            val apps = KiwiBuilds.androidApps(kiwi.automation().apps)
+                .filterNot { Community.isId(it.id) }
+                .map { it.copy(iconUrl = it.iconUrl?.let(local::icon)) }
+            val (community, communityError) = overview.await()
+            val all = apps + community?.added.orEmpty()
+            val published = if (all.any { it.published != null }) catalogue(kiwi) else emptyMap()
+            val phone = withContext(Dispatchers.IO) { all.associate { it.bundleId to local.of(it.bundleId) } }
+            Content(
+                off = false,
+                apps = apps,
+                tints = published.mapNotNull { (id, app) -> app.tintColor?.let { id to it } }.toMap(),
+                published = published,
+                local = phone,
+                blockers = blockers(kiwi, all, published, phone),
+                community = community,
+                communityError = communityError,
+            )
+        }
     } catch (error: KiwiException.Http) {
         if (!error.isBuildsOff) throw error
         Content(off = true, apps = KiwiBuilds.OFF_APPS)
     }
+
+    /**
+     * The community section with absolute icon URLs, or why it couldn't be loaded (keeping the
+     * previous one). A Kiwi without it (404) has none. `builds_off` passes through.
+     */
+    private suspend fun communityOf(kiwi: KiwiApi): Pair<CommunityOverview?, String?> = try {
+        val overview = kiwi.community()
+        overview.copy(
+            popular = overview.popular.map { it.copy(iconUrl = it.iconUrl?.let(local::icon)) },
+            added = KiwiBuilds.androidApps(overview.added).map { it.copy(iconUrl = it.iconUrl?.let(local::icon)) },
+        ) to null
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: KiwiException.Http) {
+        if (error.isBuildsOff) throw error
+        if (error.status == 404) null to null else previousCommunity() to error.userMessage()
+    } catch (error: KiwiException) {
+        previousCommunity() to error.userMessage()
+    }
+
+    private fun previousCommunity(): CommunityOverview? = (state.value as? Load.Ready)?.value?.community
 
     /** Kiwi Builds' Android apps in Kiwi's catalogue (also those hidden from Browse), by bundle id. */
     private suspend fun catalogue(kiwi: KiwiApi): Map<String, AppSummary> = try {
@@ -363,14 +420,7 @@ class BuildsViewModel(container: AppContainer, private val local: LocalPackages)
     ): Map<String, String> {
         val installed = apps.filter { phone[it.bundleId]?.installed == true }
         if (installed.isEmpty()) return emptyMap()
-        if (!signerAsked) {
-            try {
-                signer = kiwi.me().host?.androidSignerSha256?.takeIf { it.isNotBlank() }
-                signerAsked = true
-            } catch (_: KiwiException) {
-                // Asked again at the next refresh.
-            }
-        }
+        askSigner(kiwi)
         return withContext(Dispatchers.IO) {
             installed.mapNotNull { app ->
                 val foreign = published[app.bundleId]?.state?.foreignInstall == true
@@ -379,6 +429,100 @@ class BuildsViewModel(container: AppContainer, private val local: LocalPackages)
         }
     }
 
+    private suspend fun askSigner(kiwi: KiwiApi) {
+        if (signerAsked) return
+        try {
+            signer = kiwi.me().host?.androidSignerSha256?.takeIf { it.isNotBlank() }
+            signerAsked = true
+        } catch (_: KiwiException) {
+            // Asked again at the next refresh.
+        }
+    }
+
+    /**
+     * What is in the way of installing the build of a community app not added yet: its
+     * package on the phone with another signature (the Play Store app, usually). Null when
+     * nothing is, or Kiwi can't be asked.
+     */
+    suspend fun blockerFor(name: String, packageName: String): String? {
+        val installed = withContext(Dispatchers.IO) { local.installedPackage(packageName) } ?: return null
+        container.api()?.let { askSigner(it) }
+        return KiwiBuilds.blocker(name, installed, signer)
+    }
+
+    /**
+     * "Build and install" of a community app (`POST /api/community/:id/install`): adds it if
+     * needed and builds it with Kiwi's pick, or with [repo] ("owner/name", "Choose other
+     * patches"), then installs it when ready, as [buildAndInstall].
+     */
+    fun installCommunity(id: String, name: String, repo: String? = null, onStarted: () -> Unit = {}) =
+        act(id, "Building $name. It takes a few minutes; Kiwi installs it when it's ready.", watch = true) { kiwi ->
+            waitingFor(id) { kiwi.installCommunity(id, repo) }
+            onStarted()
+        }
+
+    /** Builds a failed community app again: with the bundle the owner chose, else Kiwi's pick. */
+    fun retryCommunity(app: AutomationState) = installCommunity(app.id, app.name, Community.retryRepo(app))
+
+    /** "Update": approves the newer patches on offer and installs the build when it's ready. */
+    fun updateCommunity(app: AutomationState, onStarted: () -> Unit = {}) =
+        act(app.id, "Updating ${app.name} with the newer patches. Kiwi installs it when it's ready.", watch = true) { kiwi ->
+            waitingFor(app.id) { kiwi.updateCommunity(app.id) }
+            onStarted()
+        }
+
+    /**
+     * Saves the wish to install [id] when ready, then runs [request]; forgets it again when the
+     * request fails, except for a conflict (a build is on its way already, and is installed).
+     */
+    private suspend fun waitingFor(id: String, request: suspend () -> Unit) {
+        container.settings.addPendingInstall(id)
+        try {
+            request()
+        } catch (error: KiwiException.Http) {
+            if (!error.isConflict) container.settings.removePendingInstall(id)
+            throw error
+        } catch (error: KiwiException) {
+            container.settings.removePendingInstall(id)
+            throw error
+        }
+    }
+
+    private val _candidates = MutableStateFlow<Candidates?>(null)
+
+    /** The candidates sheet's bundles, while it is open. */
+    val candidates: StateFlow<Candidates?> = _candidates
+    private var candidatesJob: Job? = null
+
+    /** Loads the bundles that can build community app [id] (`GET /api/community/:id/candidates`). */
+    fun loadCandidates(id: String) {
+        candidatesJob?.cancel()
+        _candidates.value = Candidates(id, Load.Loading)
+        candidatesJob = viewModelScope.launch {
+            val load = try {
+                val kiwi = container.api() ?: throw KiwiException.BadResponse("Connect to your Kiwi first.")
+                Load.Ready(Community.ordered(kiwi.communityCandidates(id)))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Load.Failed(error)
+            }
+            _candidates.update { if (it?.id == id) Candidates(id, load) else it }
+        }
+    }
+
+    fun closeCandidates() {
+        candidatesJob?.cancel()
+        _candidates.value = null
+    }
+
+    /** Searching the community catalogue (the search sheet). */
+    val search = CommunitySearch(viewModelScope, fetch = { query, offset, limit ->
+        val kiwi = container.api() ?: throw KiwiException.BadResponse("Connect to your Kiwi first.")
+        val page = kiwi.communitySearch(query, offset, limit)
+        page.copy(results = page.results.map { it.copy(iconUrl = it.iconUrl?.let(local::icon)) })
+    })
+
     /**
      * "Build and install": adds the app (or builds it again) with [preferences] and installs it
      * once its build is ready. The wish is saved first, so it survives the app being closed; it
@@ -386,8 +530,9 @@ class BuildsViewModel(container: AppContainer, private val local: LocalPackages)
      */
     fun buildAndInstall(app: AutomationState, preferences: AutomationPreferences, onStarted: () -> Unit = {}) =
         act(app.id, "Building ${app.name}. It takes a few minutes; Kiwi installs it when it's ready.", watch = true) { kiwi ->
-            container.settings.addPendingInstall(app.id)
-            try {
+            // A build already on its way (with other choices) is installed when ready, and the
+            // conflict's message says why nothing new was started.
+            waitingFor(app.id) {
                 when {
                     !app.added -> kiwi.addAutomation(app.id, preferences)
                     KiwiBuilds.activeJob(app) != null -> Unit
@@ -396,14 +541,6 @@ class BuildsViewModel(container: AppContainer, private val local: LocalPackages)
                         kiwi.checkAutomation(app.id)
                     }
                 }
-            } catch (error: KiwiException.Http) {
-                // A build of the app is already on its way (with other choices): it is installed
-                // when ready, and the message says why nothing new was started.
-                if (!error.isConflict) container.settings.removePendingInstall(app.id)
-                throw error
-            } catch (error: KiwiException) {
-                container.settings.removePendingInstall(app.id)
-                throw error
             }
             onStarted()
         }
@@ -414,7 +551,7 @@ class BuildsViewModel(container: AppContainer, private val local: LocalPackages)
     fun save(app: AutomationState, preferences: AutomationPreferences) =
         act(app.id, "Saved. The next build of ${app.name} uses these settings.") { it.updateAutomation(app.id, preferences) }
 
-    fun remove(app: AutomationState) = act(app.id, "Removed ${app.name} from Kiwi Builds.") {
+    fun remove(app: AutomationState) = act(app.id, if (Community.isId(app.id)) "Removed ${app.name}." else "Removed ${app.name} from Kiwi Builds.") {
         container.settings.removePendingInstall(app.id)
         it.removeAutomation(app.id)
     }
@@ -426,9 +563,9 @@ class BuildsViewModel(container: AppContainer, private val local: LocalPackages)
         it.cancelAutomation(app.id)
     }
 
-    /** "Build now": checks every added app that has no job yet. */
+    /** "Build now": checks every added app that has no job yet (not community apps: they have no checks). */
     fun checkAll(apps: List<AutomationState>) = act(ALL, null, watch = true) { kiwi ->
-        apps.filter { it.added && KiwiBuilds.activeJob(it) == null }.forEach { kiwi.checkAutomation(it.id) }
+        apps.filter { it.added && KiwiBuilds.activeJob(it) == null && !Community.isId(it.id) }.forEach { kiwi.checkAutomation(it.id) }
     }
 
     /**

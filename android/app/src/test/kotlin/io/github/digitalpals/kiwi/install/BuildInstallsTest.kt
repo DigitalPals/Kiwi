@@ -131,4 +131,79 @@ class BuildInstallsTest {
         installs().check()
         assertEquals(setOf("android-youtube"), pending.value)
     }
+
+    private fun community(vararg added: String) =
+        json(200, """{"available":true,"reason":null,"index":null,"popular":[],"added":[${added.joinToString(",")}]}""")
+
+    private fun discord(job: String, published: Boolean) =
+        """{"id":"community-com.discord","platform":"android","name":"Discord","bundle_id":"com.discord",""" +
+            """"added":true,"jobs":[$job],"published":${if (published) """{"version":"351.11"}""" else "null"},""" +
+            """"community":{"package":"com.discord","repo":"VenusIsJaded/Venus-Patches","author":"VenusIsJaded","tag":"v1.21.1"}}"""
+
+    @Test
+    fun installsACommunityAppOnceItsBuildIsReady() = runTest {
+        pending.value = setOf("community-com.discord")
+        val installs = installs()
+        server.enqueue(overview())
+        server.enqueue(community(discord("""{"id":"j","status":"running","stage":"Patching Discord"}""", published = false)))
+        installs.check()
+        assertEquals(setOf("community-com.discord"), pending.value)
+        assertEquals("/api/automation", server.takeRequest().url.encodedPath)
+        assertEquals("/api/community", server.takeRequest().url.encodedPath)
+
+        server.enqueue(overview())
+        server.enqueue(community(discord("""{"id":"j","status":"ready","finished_at":"2026-11-10T10:00:00Z"}""", published = true)))
+        server.enqueue(
+            json(
+                200,
+                """[{"source_id":"kiwi-youtube","bundle_id":"com.discord","platform":"android","name":"Discord",""" +
+                    """"state":{"action":"install","install_url":"/android/t/discord.apk"}}]""",
+            ),
+        )
+        installs.check()
+        assertEquals(emptySet<String>(), pending.value)
+        assertEquals("community-com.discord", installed.single().first)
+        assertEquals("com.discord", installed.single().second.bundleId)
+    }
+
+    @Test
+    fun aCommunityBuildThatNeedsOtherPatchesEndsTheWaitWithItsReason() = runTest {
+        pending.value = setOf("community-com.discord")
+        server.enqueue(overview())
+        server.enqueue(
+            community(
+                discord(
+                    """{"id":"j","status":"failed","error":"These patches failed on Discord 351.11.","error_kind":"other_bundle",""" +
+                        """"finished_at":"2026-11-10T10:00:00Z"}""",
+                    published = false,
+                ),
+            ),
+        )
+        installs().check()
+        assertEquals(emptySet<String>(), pending.value)
+        assertEquals("These patches failed on Discord 351.11.", failures.single().body)
+        assertEquals("community-com.discord", failures.single().app)
+    }
+
+    @Test
+    fun anUnreadableCommunityListKeepsTheWaitButAKiwiWithoutItEndsIt() = runTest {
+        pending.value = setOf("community-com.discord", "android-youtube")
+        server.enqueue(overview(youTube("""{"id":"j","status":"running","stage":"Patching"}""", published = false)))
+        server.enqueue(json(502, """{"error":{"code":"http","message":"Bad gateway"}}"""))
+        installs().check()
+        assertEquals(setOf("community-com.discord", "android-youtube"), pending.value)
+
+        server.enqueue(overview(youTube("""{"id":"j","status":"running","stage":"Patching"}""", published = false)))
+        server.enqueue(json(404, """{"error":{"code":"not_found","message":"Not found."}}"""))
+        installs().check()
+        assertEquals(setOf("android-youtube"), pending.value)
+    }
+
+    @Test
+    fun kiwiBuildsAppsAloneDontAskForTheCommunityList() = runTest {
+        pending.value = setOf("android-youtube")
+        server.enqueue(overview(youTube("""{"id":"j","status":"running","stage":"Patching"}""", published = false)))
+        installs().check()
+        assertEquals(1, server.requestCount)
+    }
 }

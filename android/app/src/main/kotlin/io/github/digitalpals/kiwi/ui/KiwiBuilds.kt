@@ -35,6 +35,12 @@ sealed interface BuildRowAction {
     /** A published build: the app's usual button (Install, Update, Open, its install's progress). */
     data class App(val summary: AppSummary, val view: ButtonView) : BuildRowAction
 
+    /** A community build failed with these patches: choose another bundle. */
+    data object ChoosePatches : BuildRowAction
+
+    /** A community app no bundle can build: remove it. */
+    data object Remove : BuildRowAction
+
     /** A build is on its way; the ⋮ menu can cancel it. */
     data object None : BuildRowAction
 }
@@ -271,7 +277,7 @@ object KiwiBuilds {
      */
     fun patcherName(tweak: String): String {
         var words = tweak.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
-        if (words.size > 1 && words.last().first().isDigit()) words = words.dropLast(1)
+        if (words.size > 1 && words.last().removePrefix("v").firstOrNull()?.isDigit() == true) words = words.dropLast(1)
         if (words.size > 1 && words.last().equals("Patches", ignoreCase = true)) words = words.dropLast(1)
         return words.joinToString(" ")
     }

@@ -303,6 +303,99 @@ and Kiwi's signing warnings don't apply to them.
   checked, playback and sign-in are not. The apps above were built and inspected on Linux
   and have not been installed on a physical Android device yet.
 
+## Community builds
+
+Besides its own three Android apps, Kiwi Builds can build apps from the
+[Morphe community](https://morphe-patches.software): about 1,700 Android apps, patched by
+some 500 bundles that people publish on GitHub. Kiwi's Android app lists them under the
+Kiwi Builds apps, badged **Community · not reviewed** with the bundle's author: the popular
+ones, and any other through search. Install works as for Kiwi's own apps: one tap builds
+the app, shows its place in the queue and installs it when it is ready.
+
+**Linux and Docker only.** A community bundle is a program written by someone Kiwi doesn't
+know, and it runs inside the patcher. Kiwi builds community apps only where it can lock the
+patcher in its sandbox ([How the patcher is contained](#how-the-patcher-is-contained)):
+Linux 6.2 or later with Landlock and seccomp, which includes Kiwi's Docker image. On a Mac
+the list is shown for browsing, with "Community builds need Kiwi on Linux or in Docker,
+where Kiwi can lock the patcher in a sandbox." instead of Install; on a Linux without the
+sandbox, the reason names what is missing. Kiwi checks once at startup (`python3
+automation/sandbox.py --probe` shows the same).
+
+### What Kiwi trusts, and what it doesn't
+
+- **The community list is only a list.** Kiwi fetches
+  `https://morphe-patches.software/data/bundles.json` itself, at most every 12 hours
+  (conditionally, at most 32 MB), checks every entry and keeps the last good copy in
+  `community/` in the data directory; when a refresh fails, it keeps using that copy. Your
+  phone never talks to the list, GitHub or Google Play. App icons come through Kiwi's
+  artwork proxy. Kiwi follows no address from the list: it takes a bundle's `owner/repo`,
+  checks its spelling, and builds GitHub's API addresses itself. Only GitHub bundles are
+  offered; Kiwi's own apps (YouTube, YouTube Music, Reddit) are left out.
+- **Bundles run only in the sandbox.** Reading a bundle's patch list (`list-patches`) and
+  patching both run in the sandbox, which is required for community builds: no network, no
+  access to Kiwi's data, and never the signing key. Kiwi signs the result afterwards, as
+  for its own apps. A patch that needs the network while patching (one Chess bundle
+  downloads a chess engine) fails, and Kiwi tries the next bundle.
+- **The bundle's default patches, as its author set them.** Kiwi doesn't choose patches
+  for community apps. Some bundles turn on patches that unlock paid features or change
+  how the app signs in; those are the author's choices, and they may not work.
+- **Pinned on the first build.** The first successful build pins the bundle's GitHub
+  repository (its numeric id and name), the release tag, the SHA-256 of its `.mpp` file,
+  the app version and version code, the publisher's certificate and what the patched app
+  installs as (package and version code; some bundles raise the version code so that a
+  store never replaces the app). Later builds must match: the same release with other
+  bytes stops with "The bundle's files changed without a new release", and so does a
+  renamed repository or an original signed by someone else. The publisher's certificate is
+  taken only from an original Google Play delivered, never from APKPure; APKPure is tried
+  only once the certificate is pinned, and its files must match it.
+
+### How Kiwi picks a bundle
+
+Several bundles often patch the same app. Kiwi ranks them by what the list says (bundles
+with patches on by default first, then the newest app version, most default patches, most
+recent update, fewest other apps, stars) and checks the top three against their latest
+stable GitHub release: the `.mpp` file (at most 64 MB), the patcher version its manifest
+asks for (no newer than the one Kiwi pins), and its patch list, read in the sandbox. A
+bundle is eligible when at least one of its patches for this app is on by default and it
+supports a version Kiwi can download. Kiwi takes the newest version it can download, then
+the most default patches, the most recent release, the fewest other apps and the most
+stars.
+
+A version name becomes a version code from the codes the bundle declares for 64-bit ARM,
+else from Google Play when it is Play's current version, else from APKPure's version list
+(each candidate code is tried at Google Play). When the chosen bundle fails to build, Kiwi
+marks it failed at that release and tries the next eligible one, three in all; a bundle
+that failed is skipped until it publishes a new release. Failures say what you can do:
+**try again** (GitHub's limit of 60 lookups an hour without an account, or a download),
+**choose another bundle** (its patches failed), or nothing (no bundle supports a version
+Google Play offers you, or the app is paid). Kiwi's Android app can show the candidates
+with what Kiwi learned about them, and builds the one you pick instead.
+
+### Updates
+
+Community apps are never rebuilt on a schedule. Once a day Kiwi asks GitHub for the pinned
+repository's latest stable release; when there is a newer one with a patch bundle and it
+is at least 72 hours old, the app shows **Update available (v1 → v2)**. Tapping Update
+builds that release and pins it; the app's package must stay the same. Until then the
+pinned build stays as it is. Removing a community app forgets its bundle (installing it
+again picks anew) but keeps the publisher's certificate.
+
+### Limitations
+
+- Every build keeps the original package unless the bundle renames it (few do by
+  default), so it replaces the Play Store app: uninstall that first.
+- Google sign-in, push notifications and Play Integrity checks are tied to the publisher's
+  signature and are likely to fail in a build signed with Kiwi's key. Some bundles need
+  [MicroG](https://github.com/MorpheApp/MicroG-RE) for Google sign-in.
+- Paid apps can't be downloaded with Kiwi's anonymous Google Play session, and an app not
+  offered in your region can't be built.
+- Bundles that expect another original than Google Play's (one Brave bundle wants Brave's
+  own GitHub build) fail and fall back to the next bundle.
+- Kiwi doesn't guess version codes: a version that neither the bundle, Google Play's
+  current release nor APKPure names can't be built.
+- Builds are inspected, not run on a device. Downloads are big (75 to 500 MB per original,
+  with every language); cached originals over 4 GB in total aren't kept after a build.
+
 ## Configure in Kiwi
 
 - **Kiwi Builds** lists the added apps with their status, the apps that can be added, and

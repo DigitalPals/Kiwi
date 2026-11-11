@@ -135,6 +135,40 @@ class KiwiApi(
     suspend fun cancelAutomation(app: String): AutomationState =
         send(mutate("POST", automationUrl(app, "cancel"), "{}"), AutomationState.serializer())
 
+    /** `GET /api/automation/:app`: one app of Kiwi Builds, a community app too. */
+    suspend fun automationApp(app: String): AutomationState = send(Request.Builder().url(automationUrl(app)).build(), AutomationState.serializer())
+
+    /** `GET /api/community`: popular community apps, the owner's community apps, and whether builds work here. */
+    suspend fun community(): CommunityOverview = send(get("api/community"), CommunityOverview.serializer())
+
+    /** `GET /api/community/search`: community apps matching [query] (all by installs when blank), one page. */
+    suspend fun communitySearch(query: String, offset: Int = 0, limit: Int = COMMUNITY_PAGE): CommunitySearchPage {
+        val url = url("api/community/search").newBuilder()
+            .addQueryParameter("q", query.trim())
+            .addQueryParameter("offset", offset.toString())
+            .addQueryParameter("limit", limit.toString())
+            .build()
+        return send(Request.Builder().url(url).build(), CommunitySearchPage.serializer())
+    }
+
+    /**
+     * `POST /api/community/:id/install`: adds the community app if needed and queues a build
+     * that goes before scheduled ones; [repo] ("owner/name") builds it with that bundle instead
+     * of Kiwi's pick. Joins an equal build on its way; `409 conflict` when another is.
+     */
+    suspend fun installCommunity(id: String, repo: String? = null): AutomationState {
+        val body = buildJsonObject { if (repo != null) put("repo", JsonPrimitive(repo)) }.toString()
+        return send(mutate("POST", communityUrl(id, "install"), body), AutomationState.serializer())
+    }
+
+    /** `GET /api/community/:id/candidates`: the bundles that can build the app. */
+    suspend fun communityCandidates(id: String): List<CommunityCandidate> =
+        send(Request.Builder().url(communityUrl(id, "candidates")).build(), ListSerializer(CommunityCandidate.serializer()))
+
+    /** `POST /api/community/:id/update`: approves the offered newer patches and builds with them. */
+    suspend fun updateCommunity(id: String): AutomationState =
+        send(mutate("POST", communityUrl(id, "update"), "{}"), AutomationState.serializer())
+
     /** An absolute URL for a path or URL from the API (icons may be `/api/icons/<sha>.png`). */
     fun resolve(url: String): HttpUrl? = baseUrl.resolve(url)
 
@@ -149,6 +183,9 @@ class KiwiApi(
 
     private fun automationUrl(app: String, action: String? = null): HttpUrl =
         url("api/automation").newBuilder().addPathSegment(app).apply { if (action != null) addPathSegment(action) }.build()
+
+    private fun communityUrl(id: String, action: String): HttpUrl =
+        url("api/community").newBuilder().addPathSegment(id).addPathSegment(action).build()
 
     private fun get(path: String): Request = Request.Builder().url(url(path)).build()
 
@@ -211,6 +248,9 @@ class KiwiApi(
         }.toString()
 
         const val REQUEST_TIMEOUT_SECONDS = 30L
+
+        /** Community search results per page. */
+        const val COMMUNITY_PAGE = 30
         private val JSON = "application/json".toMediaType()
         private const val NOT_KIWI = "This doesn't look like a Kiwi server. Check the address."
         private const val UNEXPECTED = "Kiwi sent an answer this app doesn't understand. Update Kiwi and this app."

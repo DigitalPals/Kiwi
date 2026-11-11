@@ -291,7 +291,7 @@ private fun HeroBar(
                 IconButton(onClick = { menu = true }) { Icon(KiwiIcons.More, contentDescription = "More", tint = Color.White) }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     page.recipe?.let { recipe ->
-                        DropdownMenuItem(text = { Text("Patches and schedule") }, onClick = {
+                        DropdownMenuItem(text = { Text(if (recipe.community != null) "Patches" else "Patches and schedule") }, onClick = {
                             menu = false
                             onEditBuild(recipe.id)
                         })

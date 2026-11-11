@@ -19,6 +19,7 @@ import io.github.digitalpals.kiwi.api.KiwiApi
 import io.github.digitalpals.kiwi.api.KiwiException
 import io.github.digitalpals.kiwi.api.Platforms
 import io.github.digitalpals.kiwi.install.InstallOutcome
+import io.github.digitalpals.kiwi.install.buildApps
 import io.github.digitalpals.kiwi.ui.KiwiBuilds
 import io.github.digitalpals.kiwi.ui.PendingOutcome
 import io.github.digitalpals.kiwi.util.ForegroundTracker
@@ -119,21 +120,26 @@ class UpdateWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         val allowed = Notifications.allowed(applicationContext)
         val notifyAll = allowed && container.settings.notifyBuilds.first()
         if (!notifyAll && pending.isEmpty()) return
-        val apps = try {
-            kiwi.automation().apps
+        val loaded = try {
+            kiwi.buildApps()
         } catch (error: KiwiException.Http) {
             if (!error.isBuildsOff) throw error
             // Turning Kiwi Builds off cancelled the builds.
             pending.forEach { container.settings.removePendingInstall(it) }
             return
         }
-        val (notices, seen) = BuildNotices.fresh(apps, container.settings.notifiedBuilds(), updated, pending)
+        val apps = loaded.apps
+        val previous = container.settings.notifiedBuilds()
+        val (notices, fresh) = BuildNotices.fresh(apps, previous, updated, pending)
+        // Without the community list this time, its jobs stay remembered, so they aren't news again later.
+        val seen = if (loaded.communityKnown || previous == null) fresh else fresh + previous
         val shown = notices.filter { notifyAll || (allowed && it.app in pending) }
             // In the foreground, BuildInstalls installs a ready build at once.
             .filterNot { it.install && ForegroundTracker.isForeground }
         Notifications.showBuilds(applicationContext, shown)
         container.settings.setNotifiedBuilds(seen)
         for (app in apps.filter { it.id in pending }) {
+            // (A community app missing from an unread list isn't in [apps]: its wish stays.)
             val outcome = KiwiBuilds.pendingOutcome(app, installable = app.published != null)
             if (outcome is PendingOutcome.Failed || outcome == PendingOutcome.Dropped) {
                 container.settings.removePendingInstall(app.id)

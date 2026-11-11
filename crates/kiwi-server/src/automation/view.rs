@@ -71,6 +71,9 @@ pub struct AppView {
     source_enabled: Option<bool>,
     configuration_changed: bool,
     next_check_at: Option<Time>,
+    /// Only on community apps: the bundle, how it was chosen and any offered update.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    community: Option<crate::community::View>,
 }
 
 #[derive(Serialize)]
@@ -202,11 +205,79 @@ fn build_view(
         source_enabled: source.map(|s| s.enabled),
         configuration_changed,
         next_check_at,
+        community: None,
     }
+}
+
+/// A community app's state, in the shape of a recipe's.
+fn community_view(kiwi: &Kiwi, id: &str) -> ApiResult<AppView> {
+    let mut state = kiwi.automation.snapshot();
+    let ahead = kiwi.automation.ahead(&state);
+    let added = state
+        .community
+        .remove(id)
+        .ok_or_else(|| crate::error::ApiError::not_found("Kiwi doesn't build that app."))?;
+    let app = state.apps.remove(id).unwrap_or_default();
+    let jobs: Vec<Job> = state.jobs.into_iter().filter(|j| j.app == id).collect();
+    let shown = crate::community::shown(&added, &jobs);
+    let source = kiwi.catalog.source(SOURCE_ID);
+    let published = added.pins.as_ref().and_then(|pins| {
+        let release = source.as_ref().and_then(|s| {
+            s.source
+                .catalog
+                .apps
+                .iter()
+                .find(|a| a.bundle_id == pins.output_package)
+                .and_then(|a| a.releases.first().cloned())
+        })?;
+        Some(Published {
+            version: release.version,
+            build: release.build,
+            revision: release.revision,
+            date: release.date,
+            tweaks: Some(Vec::new()),
+            name: None,
+        })
+    });
+    Ok(AppView {
+        id: id.to_owned(),
+        platform: Platform::Android,
+        name: shown.name,
+        bundle_id: shown.bundle_id,
+        icon_url: shown.icon_url,
+        tweak: shown.tweak,
+        summary: shown.summary,
+        experimental: true,
+        warning: Some(shown.warning),
+        names: Vec::new(),
+        app_version: shown.app_version,
+        limitations: shown.limitations,
+        included: shown
+            .included
+            .into_iter()
+            .map(|p| Feature {
+                id: p.name.clone(),
+                name: p.name,
+                description: p.description,
+            })
+            .collect(),
+        available_tweaks: Vec::new(),
+        state: app,
+        jobs: job_views(jobs, &ahead),
+        checks: Vec::new(),
+        published,
+        source_enabled: source.map(|s| s.enabled),
+        configuration_changed: false,
+        next_check_at: None,
+        community: Some(shown.view),
+    })
 }
 
 /// One app's build settings, status and full job history.
 pub fn app_view(kiwi: &Kiwi, id: &str) -> ApiResult<AppView> {
+    if crate::community::is_id(id) {
+        return community_view(kiwi, id);
+    }
     let recipe = recipe(id)?;
     let mut state = kiwi.automation.snapshot();
     let checks = kiwi.automation.checks(&state);

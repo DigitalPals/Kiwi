@@ -14,6 +14,7 @@ pub mod devices;
 pub mod error;
 pub mod kiwi_app;
 pub mod linked;
+pub mod mac_builder;
 pub mod ota;
 pub mod owner;
 pub mod peers;

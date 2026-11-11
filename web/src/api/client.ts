@@ -3,6 +3,8 @@ import type {
   AutomationPreferences,
   AutomationState,
   AppDetail,
+  BuilderInfo,
+  BuilderPairing,
   AppPatch,
   AppSummary,
   Build,
@@ -168,6 +170,8 @@ export function createClient(
     if (res.status === 204) return undefined as T;
 
     const type = res.headers.get("Content-Type") ?? "";
+    // "Accepted" without a body, e.g. `POST /api/builder/check`.
+    if (res.status === 202 && !type.includes("json")) return undefined as T;
     if (!type.includes("json")) {
       throw new ApiError("Unexpected response from Kiwi. Is the server up to date?", res.status, "bad_response");
     }
@@ -199,6 +203,16 @@ export function createClient(
     checkAutomation: (app: string, force = false) =>
       post<AutomationState>(`/api/automation/${seg(app)}/check`, { force }),
     cancelAutomation: (app: string) => post<AutomationState>(`/api/automation/${seg(app)}/cancel`),
+
+    /** Settings › Mac Builder: the paired Mac, a pending pairing code, or why there is none. */
+    builder: () => get<BuilderInfo>("/api/builder"),
+    /** A new one-time pairing code; replaces an earlier unused one. */
+    pairBuilder: () => post<BuilderPairing>("/api/builder/pairing"),
+    cancelBuilderPairing: () => del("/api/builder/pairing"),
+    /** Unpairs the Mac: its token stops working and iOS jobs wait for a new one. */
+    removeBuilder: () => del("/api/builder"),
+    /** Asks the Mac to run its setup checks when it next connects. */
+    checkBuilder: () => post<void>("/api/builder/check"),
     me,
     updateMe: (body: MePatch) => patch<Me>("/api/me", body),
 

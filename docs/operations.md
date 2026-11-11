@@ -39,6 +39,26 @@ Signing uses the Apple Development identity in your login keychain and the profi
 Signing uses an identity and profiles uploaded to Kiwi, kept in the data directory under
 `signing/` ([Install](install.md#signing-ios-apps-on-linux)).
 
+### On a Mac builder
+
+A Mac that builds iOS apps for a Kiwi on Linux or in Docker (`./install.sh --builder`;
+[Kiwi Builds](kiwi-builds.md#mac-builder)):
+
+| What | Where |
+|---|---|
+| Service | LaunchAgent `local.kiwi-builder` in your login (Aqua) session, separate from Kiwi's `local.kiwi`. `KeepAlive` restarts it |
+| LaunchAgent | `~/Library/LaunchAgents/local.kiwi-builder.plist`, rendered from `deploy/local.kiwi-builder.plist.in` |
+| Program | `~/Library/Application Support/Kiwi Builder/app/kiwi` (`kiwi builder run`); the previous build in `app.prev/` |
+| Listens on | Nothing: it connects out to Kiwi's address (HTTPS, certificate verified) |
+| Data | `~/Library/Application Support/Kiwi Builder/`: `builder.json` (Kiwi's address, the builder's token and name; 0600), `automation/` (runner, recipes, decryption models, job logs; artifacts only while they upload) |
+| Toolchain | `~/.kiwi-builder-tools`, shared with a Kiwi on the same Mac |
+| Log | `~/Library/Logs/kiwi-builder.log`; `kiwi-builder.pid` next to it |
+| Log rotation | `/etc/newsyslog.d/kiwi-builder.conf`: rotated above 5 MB, 3 gzipped copies kept; the builder is then restarted (a running build is retried) |
+
+Kiwi keeps the pairing in `kiwi.db` (`meta` `mac_builder`: the Mac's name, the SHA-256 of
+its token, what it last reported). Settings › Mac builder shows whether it is online, its
+version and checks, and the build it works on.
+
 ### In Docker
 
 | What | Where |
@@ -84,6 +104,10 @@ Change them by running `./install.sh` again with other options (see
 | `--trust-local` | `KIWI_TRUST_LOCAL` | Off; takes every user and program on the computer for the owner, as on a Mac (development, or a computer only you use) |
 | `--allow-simulators` | `KIWI_ALLOW_SIMULATORS` | Off; treats simulators as linkable devices, for testing |
 
+`kiwi builder run` (the Mac builder) takes `--data-dir` (`KIWI_BUILDER_DATA_DIR`, default
+`~/Library/Application Support/Kiwi Builder`) and `--python` (`KIWI_BUILDER_PYTHON`, default
+`/opt/homebrew/bin/python3.13`); `kiwi builder pair` also `--server`, `--code` and `--name`.
+
 Without `--public-url`, Kiwi asks Tailscale for this computer's name at start, and keeps
 asking in the background while tailscaled is still starting. The App Store country starts as the
 region of the Mac's locale, on Linux of `LC_ALL`, `LC_MESSAGES` or `LANG`, until you pick one
@@ -110,6 +134,14 @@ systemctl status kiwi                                 # state, pid, last exit
 sudo systemctl restart kiwi                           # restart
 curl -s http://127.0.0.1:8742/api/health              # {"ok":true,"pid":…,"version":"…"}
 tailscale serve status                                # / -> http://127.0.0.1:8742
+```
+
+On a Mac builder:
+
+```sh
+tail -f ~/Library/Logs/kiwi-builder.log                       # the log
+launchctl print gui/$(id -u)/local.kiwi-builder | head -30    # state, pid, last exit
+launchctl kickstart -k gui/$(id -u)/local.kiwi-builder        # restart
 ```
 
 In Docker, from the directory with `compose.yaml`:
@@ -221,6 +253,11 @@ identity); that's fine.
 Without `--purge`, the data directory and logs stay, so installing again picks up where
 you left off. The Kiwi Builds toolchain in `~/.kiwi-builder-tools` is never removed;
 delete it yourself if you used Kiwi Builds.
+
+On a Mac builder, `./uninstall.sh --builder` stops and removes `local.kiwi-builder`, its
+program and log rotation rule and keeps its data directory (the pairing and decryption
+models) and log; `--builder --purge` deletes those too. Remove the Mac in Kiwi's
+**Settings › Mac builder** as well, which revokes its token. Neither touches Kiwi itself.
 
 On Linux, `./uninstall.sh` removes `kiwi.service`, the serve mapping and `/opt/kiwi`, and
 keeps `/var/lib/kiwi` and the user `kiwi`; `--purge` deletes them too. When `KIWI_MAC` is

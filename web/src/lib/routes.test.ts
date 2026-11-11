@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   BUILDS_PATH,
   DEVICE_PATH,
+  MAC_BUILDER_PATH,
   NOTIFICATIONS_PATH,
   SIGNING_PATH,
   appPath,
@@ -44,7 +45,9 @@ describe("matchRoute", () => {
     expect(matchRoute(SIGNING_PATH)).toEqual({ name: "signing" });
     expect(matchRoute(`${DEVICE_PATH}/`)).toEqual({ name: "device" });
     expect(matchRoute(NOTIFICATIONS_PATH)).toEqual({ name: "notifications" });
-    for (const name of ["signing", "device", "notifications"] as const) expect(routeTab({ name })).toBe("settings");
+    expect(matchRoute(MAC_BUILDER_PATH)).toEqual({ name: "mac-builder" });
+    expect(matchRoute("/settings/mac-builder/")).toEqual({ name: "mac-builder" });
+    for (const name of ["signing", "device", "notifications", "mac-builder"] as const) expect(routeTab({ name })).toBe("settings");
   });
 
   it("decodes app routes; bundle ids with dots are one segment", () => {

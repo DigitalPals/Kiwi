@@ -153,7 +153,7 @@ More detail: [architecture](docs/architecture.md).
 
 | | |
 |---|---|
-| **Server** | An always-on Mac you can stay logged in to (Kiwi runs in your login session so `codesign` can use your keychain). Tested on macOS 27 with Xcode 27 on Apple Silicon. Or a Linux computer or VM with systemd or Docker ([Linux](docs/install.md#linux), [Docker](docs/install.md#docker)); Kiwi Builds builds patched iOS apps on a Mac only. |
+| **Server** | An always-on Mac you can stay logged in to (Kiwi runs in your login session so `codesign` can use your keychain). Tested on macOS 27 with Xcode 27 on Apple Silicon. Or a Linux computer or VM with systemd or Docker ([Linux](docs/install.md#linux), [Docker](docs/install.md#docker)); Kiwi Builds builds patched iOS apps on a Mac: Kiwi's own, or a Mac paired as its [Mac builder](docs/kiwi-builds.md#mac-builder). |
 | **Apple** | An [Apple Developer Program](https://developer.apple.com/programs/) membership, with an Apple Development certificate and a development profile that includes your iPhones. [The install guide](docs/install.md#2-signing-certificate-and-profile) walks you through it. |
 | **Tailscale** | Tailscale on the Mac and on every iPhone, with MagicDNS and HTTPS certificates turned on for your tailnet. |
 | **Build tools** | Xcode (or its command line tools), [Rust](https://rustup.rs) and Node.js 20.19, or 22.12 or later. `install.sh` checks them all. |

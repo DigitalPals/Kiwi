@@ -111,11 +111,18 @@ The demo answers as an iPhone. Add `KIWI_MOCK_DEVICE=android` and it answers as 
 phone: Browse lists Android apps only, and a simulated Android build installs as an APK
 download. `KIWI_MOCK_DEVICE=desktop` answers as a desktop browser (no platform detected).
 `KIWI_MOCK_ONBOARDED=0` starts before the first-run setup, `KIWI_MOCK_HOST=linux` answers as
-a Kiwi on Linux (Kiwi Builds' checks are only the missing Mac, and adding or checking an iOS
-app answers `409 needs_mac`), `KIWI_MOCK_ANDROID_APP=0` without Kiwi's Android app,
+a Kiwi on Linux without a Mac builder (Kiwi Builds' checks are only the missing Mac, and adding
+or checking an iOS app answers `409 needs_mac`), `KIWI_MOCK_ANDROID_APP=0` without Kiwi's Android app,
 `KIWI_MOCK_ANDROID_APP=failed` as a Kiwi that couldn't sign it (Android devices get the
 `android_app` warning), and `KIWI_MOCK_FOREIGN=app.morphe.android.youtube` with that package
 installed under another signature.
+
+`KIWI_MOCK_BUILDER` sets the Mac builder of that Kiwi on Linux (and implies
+`KIWI_MOCK_HOST=linux`): `none` (the default; **Pair a Mac** in Settings › Mac Builder then
+pairs "Mac Studio" after 15 seconds, as if its command had run), `pairing` (a code no Mac
+uses, until it expires), `online`, `building`, `offline` (iOS jobs wait for it) or
+`incompatible` (another version of Kiwi; iOS jobs wait for an update). Switch it while the
+demo runs with `POST /__mock/builder` and `{"state": "offline"}`.
 
 The demo imitates a Kiwi on a Mac, which signs with the keychain. Add
 `KIWI_MOCK_SIGNING=files` and it imitates one on Linux (`Signing.backend: "files"`): the

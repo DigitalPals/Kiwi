@@ -113,7 +113,12 @@ pub fn require(kiwi: &Kiwi, device: &DeviceRow) -> ApiResult<()> {
     if is_owner(kiwi, device) {
         return Ok(());
     }
-    Err(ApiError::not_owner(match kiwi.owner.login() {
+    Err(someone_else(kiwi))
+}
+
+/// `403 not_owner` for a Tailscale user other than the owner.
+pub fn someone_else(kiwi: &Kiwi) -> ApiError {
+    ApiError::not_owner(match kiwi.owner.login() {
         Some(owner) => format!(
             "This Kiwi belongs to {owner}. To use it here, sign in to Tailscale as {owner} on this device."
         ),
@@ -121,5 +126,5 @@ pub fn require(kiwi: &Kiwi, device: &DeviceRow) -> ApiResult<()> {
                  install Kiwi again with ./install.sh --owner <your Tailscale login> (in \
                  Docker, set KIWI_OWNER)."
             .into(),
-    }))
+    })
 }

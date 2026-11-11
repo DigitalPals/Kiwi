@@ -10,7 +10,14 @@ async fn main() -> std::process::ExitCode {
                 .unwrap_or_else(|_| EnvFilter::new("info,apple_codesign=error")),
         )
         .init();
-    match kiwi_server::run(kiwi_server::Args::parse()).await {
+    let mut args = kiwi_server::Args::parse();
+    let result = match args.command.take() {
+        Some(kiwi_server::config::Command::Builder(command)) => {
+            kiwi_server::mac_builder::client::main(command).await
+        }
+        None => kiwi_server::run(args).await,
+    };
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("{e}");

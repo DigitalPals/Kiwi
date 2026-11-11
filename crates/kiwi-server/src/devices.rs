@@ -531,6 +531,31 @@ pub async fn resolve(kiwi: &Kiwi, req: &Requester) -> ApiResult<(DeviceRow, Opti
     Ok((device, set_cookie))
 }
 
+/// Whether a request from `origin` is the owner's, by the rules [`resolve`] applies, without
+/// making or touching a device: for the Mac builder, a program rather than a device. A
+/// tailnet peer must be a node of the owner's Tailscale user other than this computer's
+/// own; a request on the computer itself counts only where it is the owner's alone
+/// ([`LocalTrust::Anyone`]).
+pub async fn require_owner_origin(kiwi: &Kiwi, origin: Origin) -> ApiResult<()> {
+    let anyone = kiwi.config.local == LocalTrust::Anyone;
+    match origin {
+        Origin::Tailnet(ip) => match whois(kiwi, ip).await? {
+            Some(peer)
+                if !anyone
+                    && peer.stable_id == kiwi.caches.node_id(kiwi.devices.as_ref()).await? =>
+            {
+                Err(owner::not_on_this_computer(kiwi))
+            }
+            Some(peer) if kiwi.owner.login().as_ref() == Some(&user_of(&peer)) => Ok(()),
+            Some(_) => Err(owner::someone_else(kiwi)),
+            None if anyone => Ok(()),
+            None => Err(owner::not_on_this_computer(kiwi)),
+        },
+        Origin::Local => Ok(()),
+        Origin::Unknown => Err(owner::not_on_this_computer(kiwi)),
+    }
+}
+
 /// The Tailscale user of a peer: their login, or `node:<StableID>` for a node without a
 /// user (which is never the owner).
 fn user_of(peer: &TailscalePeer) -> String {

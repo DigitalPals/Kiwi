@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Plugin } from "vite";
 import { createMockApi, type MockApi } from "./api.ts";
+import { isMockBuilderState, MOCK_BUILDER_STATES } from "./builder.ts";
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -56,9 +57,18 @@ export function mockApi(): Plugin {
       const device = ({ android: "android", desktop: "desktop" } as const)[process.env.KIWI_MOCK_DEVICE ?? ""] ?? "ios";
       // KIWI_MOCK_ONBOARDED=0: the device has not been through the first-run setup yet.
       const onboarded = process.env.KIWI_MOCK_ONBOARDED !== "0";
+      // KIWI_MOCK_BUILDER=none|pairing|online|building|offline|incompatible: the Mac builder of a
+      // Kiwi on Linux (implies KIWI_MOCK_HOST=linux). Switch it while running with
+      // POST /__mock/builder {"state": "offline"}. "none" (default): no Mac paired; "Pair a Mac"
+      // then pairs one after 15 seconds, as if its command had run.
+      const builderEnv = process.env.KIWI_MOCK_BUILDER;
+      if (builderEnv !== undefined && !isMockBuilderState(builderEnv)) {
+        throw new Error(`KIWI_MOCK_BUILDER must be one of ${MOCK_BUILDER_STATES.join(", ")}`);
+      }
+      const builder = builderEnv;
       // KIWI_MOCK_HOST=linux: Kiwi runs on Linux (iOS signing with uploaded files, no devicectl,
-      // Kiwi Builds builds Android apps only).
-      const host = process.env.KIWI_MOCK_HOST === "linux" ? "linux" : "macos";
+      // Kiwi Builds builds Android apps until a Mac builder is paired).
+      const host = process.env.KIWI_MOCK_HOST === "linux" || (builder && process.env.KIWI_MOCK_HOST !== "macos") ? "linux" : "macos";
       // KIWI_MOCK_ANDROID_APP=0: Kiwi serves no Android app; =failed: signing it failed, and
       // Android devices are warned about it.
       const androidApp = ({ "0": false, failed: "failed" } as const)[process.env.KIWI_MOCK_ANDROID_APP ?? ""] ?? true;
@@ -67,13 +77,14 @@ export function mockApi(): Plugin {
       const signing = ({ files: "files", keychain: "keychain" } as const)[process.env.KIWI_MOCK_SIGNING ?? ""];
       // KIWI_MOCK_FOREIGN=<package>,...: Android packages installed with another signature.
       const foreign = (process.env.KIWI_MOCK_FOREIGN ?? "").split(",").filter(Boolean);
-      api = createMockApi(Date.now, { builds, device, onboarded, host, androidApp, foreign, signing });
+      api = createMockApi(Date.now, { builds, device, onboarded, host, androidApp, foreign, signing, builder });
       const notes = [
         builds === "simulated" && "simulated Kiwi Builds",
         device === "android" && "Android device",
         device === "desktop" && "desktop browser",
         !onboarded && "not set up",
         host === "linux" && "Linux host",
+        host === "linux" && builder && `Mac builder ${builder}`,
         signing === "files" && host !== "linux" && "signing with uploaded files",
         !androidApp && "no Android app",
         androidApp === "failed" && "Android app failed",
@@ -88,6 +99,17 @@ export function mockApi(): Plugin {
             .then((body) => {
               const { bundle_id, version } = JSON.parse(body) as { bundle_id: string; version: string };
               send(res, api.releaseOnAppStore(bundle_id, version) ? 200 : 404, "text/plain", "");
+            })
+            .catch((error: unknown) => send(res, 400, "text/plain", String(error)));
+          return;
+        }
+        // POST {"state"}: the Mac builder's state (see KIWI_MOCK_BUILDER).
+        if (req.method === "POST" && url.pathname === "/__mock/builder") {
+          void readBody(req)
+            .then((body) => {
+              const { state } = JSON.parse(body) as { state: unknown };
+              if (!isMockBuilderState(state)) return send(res, 400, "text/plain", `state must be one of ${MOCK_BUILDER_STATES.join(", ")}`);
+              send(res, api.setBuilder(state) ? 200 : 409, "text/plain", "");
             })
             .catch((error: unknown) => send(res, 400, "text/plain", String(error)));
           return;

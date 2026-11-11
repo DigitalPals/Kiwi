@@ -5,6 +5,14 @@
 #   ./uninstall.sh           remove Kiwi and keep its data and logs
 #   ./uninstall.sh --purge   also delete the data directory and logs
 #   ./uninstall.sh --local   on Linux: remove Kiwi from this computer even when KIWI_MAC is set
+#   ./uninstall.sh --builder on a Mac: remove the Mac builder (install.sh --builder) instead
+#
+# --builder stops and removes the LaunchAgent local.kiwi-builder, the program
+# ("~/Library/Application Support/Kiwi Builder/app", app.prev, app.new) and
+# /etc/newsyslog.d/kiwi-builder.conf. Its data directory (the pairing in builder.json and the
+# decryption models) and ~/Library/Logs/kiwi-builder.log stay unless --purge is given. It
+# never touches Kiwi itself (local.kiwi). Remove the builder in Kiwi's Settings › Mac builder
+# too, which revokes its token.
 #
 # Stops and removes the LaunchAgent local.kiwi, the `tailscale serve` mapping of / (only
 # when it points at Kiwi; other paths stay), /etc/newsyslog.d/kiwi.conf, the installed app
@@ -151,6 +159,50 @@ on_mac() {
 	fi
 }
 
+# The Mac builder: its LaunchAgent, program and log rotation; with --purge also its data
+# directory and log.
+on_mac_builder() {
+	local purge=0
+	case "${1:-}" in
+	--keep-data) ;;
+	--purge) purge=1 ;;
+	*) die "usage: uninstall.sh --builder [--purge]" ;;
+	esac
+	[ "$(uname -s)" = Darwin ] || die "the Mac builder runs on macOS"
+	local label=local.kiwi-builder conf=/etc/newsyslog.d/kiwi-builder.conf service
+	local data="$HOME/Library/Application Support/Kiwi Builder"
+	local log="$HOME/Library/Logs/kiwi-builder.log"
+	local plist="$HOME/Library/LaunchAgents/$label.plist"
+	service="gui/$(id -u)/$label"
+	if launchctl print "$service" >/dev/null 2>&1; then
+		say "Stopping $label"
+		lctl bootout "$service" || true
+		for _ in $(seq 1 30); do
+			launchctl print "$service" >/dev/null 2>&1 || break
+			sleep 1
+		done
+		if launchctl print "$service" >/dev/null 2>&1; then
+			die "$service is still loaded 30 s after bootout"
+		fi
+	fi
+	rm -f "$plist"
+	if [ -e "$conf" ]; then
+		say "Removing $conf"
+		as_root rm -f "$conf"
+	fi
+	say "Removing the Mac builder's program"
+	rm -rf "$data/app" "$data/app.new" "$data/app.prev"
+	rm -f "$HOME/Library/Logs/kiwi-builder.pid"
+	if [ "$purge" = 1 ]; then
+		say "Purging $data and $log"
+		rm -rf "$data"
+		rm -f "$log" "$log".*.gz
+	else
+		say "Kept $data (the pairing and decryption models) and $log (use --purge to delete them)"
+	fi
+	say "Remove the builder in Kiwi's Settings › Mac builder too"
+}
+
 # Linux: whether the account $SERVICE_USER is the one install.sh makes: a system account
 # with the home $LINUX_DATA and no login shell. Another account of that name is not Kiwi's.
 kiwi_service_user() {
@@ -218,18 +270,23 @@ on_linux() {
 }
 
 main() {
-	local mode=--keep-data mac here=0
+	local mode=--keep-data mac here=0 builder=0
 	while [ $# -gt 0 ]; do
 		case "$1" in
 		--purge) mode=--purge ;;
 		--local) here=1 ;;
+		--builder) builder=1 ;;
 		*)
-			echo "Usage: ./uninstall.sh [--purge] [--local]" >&2
+			echo "Usage: ./uninstall.sh [--purge] [--local] [--builder]" >&2
 			return 2
 			;;
 		esac
 		shift
 	done
+	if [ "$builder" = 1 ]; then
+		on_mac_builder "$mode"
+		return
+	fi
 	if [ "$(uname -s)" = Darwin ]; then
 		on_mac "$mode"
 		return

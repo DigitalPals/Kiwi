@@ -151,8 +151,19 @@ See [Kiwi Builds](kiwi-builds.md). **Mac Setup** on the Kiwi Builds page shows w
 missing, and `runner.py doctor` checks the toolchain, the App Store sign-in and enrollment.
 
 **"iOS apps can only be built on a Mac"** (`409 needs_mac`): Kiwi runs on Linux or in
-Docker. Patched iOS apps are decrypted and built with Apple's tools on a Mac; Android apps
-build anywhere. The Mac setup shows a single **macOS** check that is never ready.
+Docker and no Mac builder is paired. Patched iOS apps are decrypted and built with Apple's
+tools on a Mac; Android apps build anywhere. Pair a Mac in **Settings › Mac builder**
+([Kiwi Builds › Mac builder](kiwi-builds.md#mac-builder)); until then the Mac setup shows a
+single **macOS** check that is never ready.
+
+**iOS builds stay at "Waiting for <Mac>"**: the Mac builder hasn't called Kiwi for a
+minute. Wake the Mac and log in to its desktop, then look at `~/Library/Logs/kiwi-builder.log`
+there: "could not reach Kiwi" means the Mac can't reach Kiwi's address (Tailscale), "not
+paired" that Kiwi no longer knows it (pair again with a new code). **"Waiting for an update
+of Kiwi on <Mac>"**: the Mac runs another version of Kiwi's runner; run `git pull &&
+./install.sh --builder` there (and keep both on the same commit). **"Lost contact with <Mac>
+during the build"**: the Mac went to sleep or offline mid-build; the job can be checked
+again, and the schedule retries it.
 
 **"Kiwi Builds for Android needs Python 3.12 or newer"**: Kiwi runs the Android builder with
 an older Python. Install a newer one for the whole system and point Kiwi at it:

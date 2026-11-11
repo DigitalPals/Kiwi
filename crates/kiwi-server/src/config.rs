@@ -56,6 +56,16 @@ pub struct Args {
     /// Take every user and program on this computer for the owner, as on a Mac: for development, or a computer only you use (always so on macOS)
     #[arg(long, env = "KIWI_TRUST_LOCAL")]
     pub trust_local: bool,
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// What `kiwi` runs instead of the server.
+#[derive(Debug, clap::Subcommand)]
+pub enum Command {
+    /// The Mac builder: builds iOS apps on a Mac for a Kiwi that runs elsewhere
+    #[command(subcommand)]
+    Builder(crate::mac_builder::client::Command),
 }
 
 /// Which loopback requests speak for whom (architecture.md "Security").

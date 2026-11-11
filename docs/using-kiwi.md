@@ -137,3 +137,10 @@ devicectl**). Installs from other stores show up in My Apps as "installed outsid
 Kiwi can also patch App Store apps on your Mac: YouTube, YouTube Music, Twitch, X and
 Reddit. It's off by default; read [Kiwi Builds](kiwi-builds.md) before you turn it on under
 Settings › **Kiwi Builds**.
+
+iOS apps can only be built on a Mac. When Kiwi runs elsewhere (Linux or Docker), pair a Mac
+under Settings › **Mac Builder**: **Pair a Mac** shows a command to run in Terminal on the
+Mac, with a one-time code that works for 10 minutes, and the screen updates once the Mac has
+paired. The Mac downloads, decrypts and patches the apps; Kiwi signs and installs them. The
+same screen shows whether the Mac is online and up to date, its setup checks and what it is
+building, with **Check Again** and **Remove**.

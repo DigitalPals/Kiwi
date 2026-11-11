@@ -256,6 +256,40 @@ in its data directory, under `signing/`. [Signing on Linux](signing-on-linux.md)
 each step, including how to make the `.p12` with OpenSSL. Without a Mac there is no
 `devicectl`, so Kiwi learns an iPhone's iOS version from Safari and from installs.
 
+### iOS apps from Kiwi Builds: a Mac builder
+
+Kiwi Builds builds Android apps on Linux by itself. Patching iOS apps needs a Mac (the App
+Store download with your Apple account, FairPlay decryption on Apple silicon, Xcode to
+compile the tweaks), so a Kiwi on Linux or in Docker builds them on a paired **Mac
+builder**: a small service on a Mac in your tailnet that does only those steps. Kiwi keeps
+doing the rest: it validates the patched app, signs it with your uploaded `.p12`, publishes
+and installs it. The Mac connects out to Kiwi; nothing listens on the Mac, and Kiwi gets no
+shell on it.
+
+1. In Kiwi, open **Settings › Mac builder › Pair a Mac**. It shows a command with a
+   one-time code (valid 10 minutes).
+2. On the Mac, logged in to its desktop, in Terminal, from a clone of this repository:
+
+   ```sh
+   ./install.sh --builder --check --server https://kiwi.example.ts.net
+   ./install.sh --builder --server https://kiwi.example.ts.net --pair K7QF-9XMD-2PLA
+   ```
+
+   It needs Xcode, Homebrew's `python3.13` and Rust, builds the `kiwi` program, pairs, and
+   installs the LaunchAgent `local.kiwi-builder` (log: `~/Library/Logs/kiwi-builder.log`).
+   `--name` names the Mac in Kiwi (default: its computer name).
+3. Set up the build tools, the App Store sign-in and decryption on the Mac as the installer
+   prints them ([Kiwi Builds › Mac builder](kiwi-builds.md#mac-builder)). A Mac that already
+   ran Kiwi with Kiwi Builds can keep its enrollment: add `--import-enrollment`.
+4. In Kiwi, **Settings › Mac builder** shows the Mac online with its checks; add iOS apps
+   under Kiwi Builds as on a Mac.
+
+The Mac needs to be on and logged in for iOS builds; while it is offline, iOS builds wait
+("Waiting for <Mac>") and Android builds go on. Update it with `git pull && ./install.sh
+--builder` whenever you update Kiwi (Kiwi says when they differ), and remove it with
+`./uninstall.sh --builder` and **Remove** in Settings. The builder can run on the same Mac
+as an older Kiwi; it never touches that Kiwi's LaunchAgent or data.
+
 ### Updating and removing
 
 The same commands as on a Mac: `git pull && ./install.sh` updates Kiwi (backing up

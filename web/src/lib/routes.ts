@@ -11,6 +11,7 @@ export type Route =
   | { name: "signing" }
   | { name: "device" }
   | { name: "notifications" }
+  | { name: "mac-builder" }
   | { name: "builds" }
   | { name: "build"; app: string }
   | { name: "app"; sourceId: string; bundleId: string }
@@ -26,6 +27,8 @@ export interface TabLink {
 export const SIGNING_PATH = "/settings/signing";
 export const DEVICE_PATH = "/settings/device";
 export const NOTIFICATIONS_PATH = "/settings/notifications";
+/** The Mac that builds iOS apps for a Kiwi that doesn't run on macOS. */
+export const MAC_BUILDER_PATH = "/settings/mac-builder";
 /** Kiwi Builds: under Sources on an iPhone, its own tab on Android. */
 export const BUILDS_PATH = "/builds";
 
@@ -82,6 +85,8 @@ export function matchRoute(pathname: string): Route {
       return { name: "device" };
     case NOTIFICATIONS_PATH:
       return { name: "notifications" };
+    case MAC_BUILDER_PATH:
+      return { name: "mac-builder" };
     case BUILDS_PATH:
     // Earlier links: the YouTube-only build settings, then Kiwi Builds under Settings.
     case "/automation":
@@ -136,6 +141,7 @@ export function routeTab(route: Route): Tab | null {
     case "signing":
     case "device":
     case "notifications":
+    case "mac-builder":
       return "settings";
     default:
       return null;

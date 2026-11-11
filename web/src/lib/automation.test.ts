@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AutomationJob, AutomationState } from "../api/types";
+import type { AutomationJob, AutomationState, Builder } from "../api/types";
 import {
   appsForDevice, automationSummary, buildsIos, buildsNotice, heroLine, intervalLabel, overviewSummary, samePreferences, selectedFeatures, statusLine,
 } from "./automation";
@@ -94,20 +94,32 @@ describe("buildsNotice", () => {
     expect(buildsNotice(true, linux)).toBe(buildsNotice(true, mac));
   });
 
-  it("tells an iPhone plainly that a Kiwi on Linux builds Android apps only", () => {
+  it("tells an iPhone plainly that a Kiwi on Linux without a Mac builder builds Android apps only", () => {
     const notice = buildsNotice(false, linux);
     expect(notice).toContain("Google Play");
-    expect(notice).toContain("iPhone apps can only be built on a Mac");
+    expect(notice).toContain("iOS apps need a Mac builder");
+    expect(notice).toContain("Settings › Mac Builder");
     expect(notice).not.toContain("this Mac");
     expect(notice).not.toContain("Apple account");
     expect(buildsNotice(false, { os: "other" })).toBe(notice);
+    expect(buildsNotice(false, linux, { builder: null })).toBe(notice);
+  });
+
+  it("names the paired Mac builder on a Kiwi on Linux", () => {
+    const notice = buildsNotice(false, linux, { builder: { name: "Mac Studio" } as Builder });
+    expect(notice).toContain("Apple account");
+    expect(notice).toContain("decrypt them on Mac Studio");
+    expect(notice).not.toContain("Google Play");
+    expect(buildsNotice(true, linux, { builder: { name: "Mac Studio" } as Builder })).toBe(buildsNotice(true, mac));
   });
 });
 
 describe("buildsIos", () => {
-  it("builds iOS apps on a Mac only", () => {
+  it("builds iOS apps on a Mac, or elsewhere with a paired Mac builder", () => {
     expect(buildsIos({ os: "macos" })).toBe(true);
     expect(buildsIos({ os: "linux" })).toBe(false);
     expect(buildsIos({ os: "other" })).toBe(false);
+    expect(buildsIos({ os: "linux" }, { builder: null })).toBe(false);
+    expect(buildsIos({ os: "linux" }, { builder: { name: "Mac Studio" } as Builder })).toBe(true);
   });
 });

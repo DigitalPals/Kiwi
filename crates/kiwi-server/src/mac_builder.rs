@@ -133,9 +133,12 @@ impl Hello {
 fn text_ok(text: &str, max: usize) -> bool {
     !text.trim().is_empty()
         && text.chars().count() <= max
-        && !text
-            .chars()
-            .any(|c| c.is_control() || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        && !text.chars().any(|c| c.is_control() || bidi_control(c))
+}
+
+/// Characters that reorder text (a name that reads differently than it is).
+fn bidi_control(c: char) -> bool {
+    matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
 /// The paired builder, as saved.
@@ -534,7 +537,8 @@ pub(crate) async fn run_task(
     loop {
         tokio::select! {
             result = &mut receiver => {
-                return result.unwrap_or_else(|_| Err(failed("The Mac builder's task ended without a result")));
+                let ended = || Err(failed("The Mac builder's task ended without a result"));
+                return result.unwrap_or_else(|_| ended());
             }
             _ = token.cancelled() => {
                 mac.cancel_task(&job.id);

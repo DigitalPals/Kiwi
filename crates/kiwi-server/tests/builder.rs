@@ -789,9 +789,20 @@ fn youtube_ipa(revision: u64) -> Vec<u8> {
 </dict></plist>"#
     )
     .unwrap();
-    zip.start_file("Payload/YouTube.app/YouTube", options)
+    // Larger than axum's default body limit, and incompressible: the upload streams.
+    let stored = options.compression_method(zip::CompressionMethod::Stored);
+    zip.start_file("Payload/YouTube.app/YouTube", stored)
         .unwrap();
-    zip.write_all(&vec![0x78; 300_000]).unwrap();
+    let mut state = 0x2545_f491_u32;
+    let binary: Vec<u8> = (0..3 * 1024 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    zip.write_all(&binary).unwrap();
     zip.finish().unwrap().into_inner()
 }
 
@@ -838,8 +849,8 @@ async fn uploads_are_checked_against_their_digest_and_the_order_of_calls() {
     let sequence = build["request"]["sequence"].as_u64().unwrap();
     let ipa = youtube_ipa(sequence);
     let sha = hex::encode(Sha256::digest(&ipa));
-    // The artifact event comes first.
-    let r = upload(&k, &token, &job_id, &sha, ipa.clone()).await;
+    // The artifact event comes first. (Refused before the body is read: a small one.)
+    let r = upload(&k, &token, &job_id, &sha, vec![0; 16]).await;
     assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.body);
     let r = events(
         &k,
@@ -859,7 +870,7 @@ async fn uploads_are_checked_against_their_digest_and_the_order_of_calls() {
     let automation = k.kiwi.config.data_dir.join("automation");
     assert!(!automation.join(format!("artifacts/{sha}.ipa")).exists());
     assert!(!automation.join(format!("{job_id}.upload")).exists());
-    let r = upload(&k, &token, &job_id, &"b".repeat(64), ipa.clone()).await;
+    let r = upload(&k, &token, &job_id, &"b".repeat(64), vec![0; 16]).await;
     assert_eq!(
         r.status,
         StatusCode::CONFLICT,

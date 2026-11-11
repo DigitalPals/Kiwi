@@ -874,16 +874,26 @@ impl Builder {
                 .body(body)
                 .send()
                 .await;
-            match sent {
+            let error = match sent {
                 Ok(response) => return answer(response).await.map(drop),
-                Err(e) if attempt < 3 => {
-                    tracing::warn!(
-                        "uploading the patched app of task {id} failed: {e}; trying again"
-                    );
-                    tokio::time::sleep(Duration::from_secs(5 * attempt)).await;
-                }
-                Err(e) => return Err(network(e)),
+                Err(e) => e,
+            };
+            // Kiwi may have refused it before reading it all (the task is gone or was
+            // cancelled), which breaks the connection: ask before sending it again.
+            let events = format!("api/builder/tasks/{id}/events");
+            match self
+                .post(&events, &json!({ "events": [] }), Duration::from_secs(60))
+                .await
+            {
+                Ok((_, answer)) if answer["cancel"] == true => return Err(CallError::Gone),
+                Err(e @ (CallError::Gone | CallError::Unpaired(_))) => return Err(e),
+                _ => {}
             }
+            if attempt >= 3 {
+                return Err(network(error));
+            }
+            tracing::warn!("uploading the patched app of task {id} failed: {error}; trying again");
+            tokio::time::sleep(Duration::from_secs(5 * attempt)).await;
         }
     }
 

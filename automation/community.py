@@ -63,6 +63,9 @@ OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
 REPO_NAME = re.compile(r"[A-Za-z0-9._-]{1,100}")
 TAG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+/-]{0,127}")
 SHA = re.compile(r"[0-9a-f]{64}")
+ASSET = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,199}\.mpp", re.I)
+# Release files download from here (not the API, so they don't count against its limit).
+DOWNLOADS = "https://github.com"
 
 
 class CommunityError(BuildError):
@@ -450,7 +453,8 @@ class Community:
 
     def release(self, candidate):
         """(repo id, release, asset) of a candidate: its latest stable release, or the pinned
-        or approved tag."""
+        or approved tag. The repository's id is looked up only for a pinned bundle here;
+        others get theirs once Kiwi builds them (repository_id), which saves GitHub requests."""
         repo = candidate["repo"]
         if self.pins and self.mode in ("pinned", "update"):
             info = self.github(f"/repositories/{self.pins['repo_id']}")
@@ -461,15 +465,12 @@ class Community:
             tag = self.request["update_tag"] if self.mode == "update" else self.pins["tag"]
             release = self.github(f"/repositories/{repo_id}/releases/tags/{urllib.parse.quote(tag, safe='')}")
         else:
-            info = self.github(f"/repos/{repo}")
-            repo_id = info.get("id")
-            if type(repo_id) is not int or str(info.get("full_name", "")).lower() != repo.lower():
-                raise android.SourceError("GitHub has no such repository")
-            release = self.github(f"/repositories/{repo_id}/releases/latest")
+            repo_id = None
+            release = self.github(f"/repos/{repo}/releases/latest")
         if release.get("draft") or release.get("prerelease") or not valid_tag(release.get("tag_name")):
             raise CandidateFailed("its latest release is not a stable release")
         bundles = sorted((a for a in release["assets"] if isinstance(a.get("name"), str)
-                          and a["name"].lower().endswith(".mpp") and type(a.get("id")) is int),
+                          and ASSET.fullmatch(a["name"]) and type(a.get("id")) is int),
                          key=lambda a: a["name"])
         if not bundles:
             raise CandidateFailed("its latest release has no patch bundle")
@@ -478,12 +479,21 @@ class Community:
             raise CandidateFailed("its patch bundle is larger than Kiwi accepts")
         return repo_id, release, asset
 
-    def bundle(self, repo_id, release, asset):
-        """The bundle file, downloaded through GitHub's API by asset id, and its SHA-256."""
-        partial = self.store / "bundles" / f"{repo_id}-{asset['id']}.partial"
+    def repository_id(self, repo):
+        """The numeric id of a repository, which the pins keep (it survives renames)."""
+        info = self.github(f"/repos/{repo}")
+        if type(info.get("id")) is not int or str(info.get("full_name", "")).lower() != repo.lower():
+            raise CandidateFailed("GitHub has no such repository", "other_bundle")
+        return info["id"]
+
+    def bundle(self, repo, release, asset):
+        """The bundle file of a release, from the address GitHub gives every release file (built
+        from the checked repository, tag and file name), and its SHA-256."""
+        partial = self.store / "bundles" / f"{asset['id']}.partial"
+        url = (f"{DOWNLOADS}/{repo}/releases/download/{urllib.parse.quote(release['tag_name'], safe='')}/"
+               f"{urllib.parse.quote(asset['name'], safe='')}")
         try:
-            sha = android.download(f"{self.api}/repositories/{repo_id}/releases/assets/{asset['id']}", partial,
-                                   limit=MAX_BUNDLE, headers={"Accept": "application/octet-stream"})
+            sha = android.download(url, partial, limit=MAX_BUNDLE)
         except android.SourceError as error:
             raise CommunityError("Kiwi couldn't download a patch bundle from GitHub. Try again later.", "retry") from error
         path = self.store / "bundles" / f"{sha}.mpp"
@@ -610,7 +620,8 @@ class Community:
             return None
         event = {"repo": repo, "repo_id": repo_id, "tag": tag, "published_at": release.get("published_at")}
         try:
-            path, sha = self.bundle(repo_id, release, asset)
+            path, sha = self.bundle(self.pins["repo"] if self.pins and self.mode in ("pinned", "update") else repo,
+                                    release, asset)
             if self.pins and self.mode == "pinned" and sha != self.pins["asset_sha256"]:
                 raise CommunityError("The bundle's files changed without a new release, so Kiwi stopped. Choose "
                                      "another bundle, or wait for a new release.", "other_bundle", True)
@@ -854,6 +865,8 @@ class Community:
         for chosen in rank(eligible)[:MAX_BUILDS]:
             emit("community", kind="chosen", repo=chosen["repo"], tag=chosen["tag"])
             try:
+                if chosen["repo_id"] is None:
+                    chosen["repo_id"] = self.repository_id(chosen["repo"])
                 return self.build_candidate(chosen, java, patcher, signer_jar, keystore)
             except CandidateFailed as error:
                 self.log(f"{chosen['repo']} {chosen['tag']}: {error}")

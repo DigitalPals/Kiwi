@@ -219,7 +219,7 @@ class BuildTests(unittest.TestCase):
         for repo, r in self.releases.items():
             if path in (f"/repos/{repo}", f"/repositories/{r['id']}"):
                 return 200, json.dumps({"id": r["id"], "full_name": repo, "owner": {"login": repo.split("/")[0]}}).encode(), {}
-            if path in (f"/repositories/{r['id']}/releases/latest", f"/repositories/{r['id']}/releases/tags/{r['tag']}"):
+            if path in (f"/repos/{repo}/releases/latest", f"/repositories/{r['id']}/releases/tags/{r['tag']}"):
                 return 200, json.dumps({"id": 5, "tag_name": r["tag"], "draft": False, "prerelease": False,
                                         "published_at": f"2026-11-0{r['id']}T00:00:00Z",
                                         "assets": [{"id": r["asset"], "name": "patches.mpp", "size": 4000},
@@ -227,7 +227,9 @@ class BuildTests(unittest.TestCase):
         return 404, b"{}", {}
 
     def download(self, url, target, **_):
-        number = int(url.rsplit("/", 1)[1]) - 100
+        self.downloads = getattr(self, "downloads", []) + [url]
+        repo = url.removeprefix("https://github.com/").split("/releases/")[0]
+        number = self.releases[repo]["id"]
         shutil.copyfile(self.bundles[number], target)
         return android.digest(target)
 
@@ -299,8 +301,11 @@ class BuildTests(unittest.TestCase):
         published = self.builder.root / "artifacts" / f"{artifact['sha256']}.apk"
         self.assertEqual(apk.inspect(published)["certificates"], [KIWI_KEY.fingerprint])
         # GitHub addresses are built from the checked owner/repo and numeric ids only.
+        self.assertIn("https://api.github.com/repos/bad/bundle/releases/latest", self.github_calls)
+        self.assertIn("https://github.com/bad/bundle/releases/download/v1.2.0/patches.mpp", self.downloads)
+        # Only the bundle that was built needed its repository's id.
         self.assertIn("https://api.github.com/repos/bad/bundle", self.github_calls)
-        self.assertIn("https://api.github.com/repositories/2/releases/latest", self.github_calls)
+        self.assertNotIn("https://api.github.com/repos/good/bundle", self.github_calls)
 
     def test_bundle_code_runs_only_in_the_required_sandbox_without_the_key(self):
         made = self.community()
@@ -363,7 +368,7 @@ class BuildTests(unittest.TestCase):
     def test_bundles_that_failed_at_their_latest_release_are_skipped(self):
         artifact = self.run_build(self.community(skip={"bad/bundle": "v1.2.0"}))
         self.assertEqual(artifact["community"]["repo"], "good/bundle")
-        self.assertNotIn("https://api.github.com/repositories/2/releases/assets/102", self.github_calls)
+        self.assertFalse([u for u in self.downloads if "bad/bundle" in u])
 
     def test_a_manual_choice_builds_only_that_bundle(self):
         self.failing = {1}

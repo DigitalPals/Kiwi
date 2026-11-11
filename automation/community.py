@@ -254,7 +254,7 @@ def codes_to_try(version, declared, play, pure):
     return out
 
 
-NETWORK_HINTS = ("UnknownHostException", "ConnectException", "SocketException", "Permission denied (connect",
+NETWORK_HINTS = ("UnknownHostException", "ConnectException", "SocketException", "BindException", "Permission denied (connect",
                  "didn't answer", "Network is unreachable")
 
 

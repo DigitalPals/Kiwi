@@ -89,7 +89,7 @@ export function createMockBuilder(options: { supported: boolean; publicUrl: stri
         builder = paired(now);
         staticTask = {
           job: "6f1c0b9e2a4d4c7f8e3b1a20",
-          app: "ios-youtube",
+          app: "youtube",
           name: "YouTube",
           command: "build",
           stage: "Decrypting YouTube",

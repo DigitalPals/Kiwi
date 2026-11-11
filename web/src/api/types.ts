@@ -79,6 +79,8 @@ export interface Host {
   devicectl: boolean;
   /** SHA-256 (hex) of the certificate of the key Kiwi signs Android apps with; null until Kiwi Builds has loaded it. */
   android_signer_sha256: string | null;
+  /** Kiwi Builds can build iOS apps: on macOS, or with a paired Mac builder (also while it is offline). */
+  builds_ios?: boolean;
 }
 
 /** Kiwi's Android app, when this Kiwi serves it. */
@@ -502,7 +504,7 @@ export interface AutomationOverview {
 export interface BuilderTask {
   /** The Kiwi Builds job (plan and build); a doctor task has none. */
   job: string | null;
-  /** The recipe, e.g. "ios-youtube". */
+  /** The recipe id, e.g. "youtube". */
   app: string | null;
   /** The app's name, e.g. "YouTube". */
   name: string | null;

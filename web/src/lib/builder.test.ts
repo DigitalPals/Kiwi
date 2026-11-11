@@ -41,7 +41,7 @@ const pairing = (over: Partial<NonNullable<BuilderInfo["pairing"]>> = {}) => ({
 const info = (over: Partial<BuilderInfo> = {}): BuilderInfo => ({ supported: true, reason: null, builder: null, pairing: null, ...over });
 
 const task = (over: Partial<BuilderTask> = {}): BuilderTask => ({
-  job: "6f1c0b9e2a4d4c7f8e3b1a20", app: "ios-youtube", name: "YouTube", command: "build",
+  job: "6f1c0b9e2a4d4c7f8e3b1a20", app: "youtube", name: "YouTube", command: "build",
   stage: "Decrypting YouTube", started_at: at(-60_000), ...over,
 });
 
@@ -144,7 +144,7 @@ describe("builder status", () => {
     expect(taskLine(task())).toBe("Building YouTube · Decrypting YouTube");
     expect(taskLine(task({ command: "plan", stage: "Looking for a new YouTube version" }))).toBe("Checking YouTube · Looking for a new YouTube version");
     expect(taskLine(task({ command: "doctor", job: null, app: null, name: null, stage: "" }))).toBe("Checking the Mac");
-    expect(taskLine(task({ name: null }))).toBe("Building ios-youtube · Decrypting YouTube");
+    expect(taskLine(task({ name: null }))).toBe("Building youtube · Decrypting YouTube");
   });
 
   it("sums the state up for the Settings row", () => {

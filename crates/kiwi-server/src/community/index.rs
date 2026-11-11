@@ -419,6 +419,10 @@ fn parse_bundle(b: &Map<String, Value>, compatibilities: usize) -> Option<Bundle
     })
 }
 
+/// Per package while reading the index: patch counts by bundle, its patches (for search)
+/// and the name a compatibility entry gives it.
+type Found<'a> = (BTreeMap<usize, usize>, Vec<&'a Patch>, Option<&'a str>);
+
 fn apps(
     index: &Index,
     store: &Map<String, Value>,
@@ -426,8 +430,7 @@ fn apps(
     excluded: &BTreeSet<String>,
 ) -> BTreeMap<String, App> {
     // Per package: bundle -> patch count, and the patch text for search.
-    let mut found: HashMap<&str, (BTreeMap<usize, usize>, Vec<&Patch>, Option<&str>)> =
-        HashMap::new();
+    let mut found: HashMap<&str, Found> = HashMap::new();
     for (number, bundle) in index.bundles.iter().enumerate() {
         for patch in &bundle.patches {
             let Some(targets) = patch.compatibility.map(|c| &index.compatibilities[c]) else {
@@ -486,7 +489,7 @@ fn apps(
 /// "Any" (empty) sorts before every version.
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
     let parts = |v: &str| -> Vec<String> {
-        v.split(|c: char| matches!(c, '.' | '-' | '_' | ' '))
+        v.split(['.', '-', '_', ' '])
             .filter(|p| !p.is_empty())
             .map(str::to_owned)
             .collect()

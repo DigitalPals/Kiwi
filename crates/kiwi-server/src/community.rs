@@ -215,6 +215,9 @@ pub struct Community {
     /// `Err(reason)` where community builds can't run; `None` until checked.
     sandbox: RwLock<Option<Result<(), String>>>,
     busy: AtomicBool,
+    /// Whether Kiwi refreshes the list and checks for updates by itself (tests turn it off
+    /// and call [`refresh`] and [`check_updates`]).
+    pub background: AtomicBool,
 }
 
 /// The packages Kiwi Builds builds itself: not offered as community apps.
@@ -256,6 +259,7 @@ impl Community {
             loaded: RwLock::new(loaded),
             sandbox: RwLock::new(None),
             busy: AtomicBool::new(false),
+            background: AtomicBool::new(true),
         }
     }
 
@@ -368,7 +372,10 @@ pub async fn refresh(kiwi: &Kiwi, force: bool) -> Result<(), String> {
 
 /// Starts a background refresh of the index and the daily update checks, unless one runs.
 pub fn kick(kiwi: &Arc<Kiwi>) {
-    if automation::require_on(kiwi).is_err() || kiwi.community.busy.swap(true, Ordering::SeqCst) {
+    if automation::require_on(kiwi).is_err()
+        || !kiwi.community.background.load(Ordering::Relaxed)
+        || kiwi.community.busy.swap(true, Ordering::SeqCst)
+    {
         return;
     }
     let kiwi = kiwi.clone();
@@ -959,7 +966,7 @@ pub fn offer(
     }
 }
 
-async fn check_updates(kiwi: &Arc<Kiwi>) {
+pub async fn check_updates(kiwi: &Arc<Kiwi>) {
     let now = Utc::now();
     let state = kiwi.automation.snapshot();
     let due: Vec<(String, Pins)> = state

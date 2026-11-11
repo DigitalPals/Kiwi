@@ -1992,6 +1992,60 @@ mod tests {
     }
 
     #[test]
+    fn community_apps_survive_restarts_and_older_state_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("test.db")).unwrap();
+        // State from before community builds: no community map, no error kinds.
+        let old = json!({"apps": {"android-youtube": {"added": true}}, "jobs": [{"id": "f".repeat(24),
+            "app": "android-youtube", "sequence": 1, "status": "ready", "stage": "Available in Kiwi",
+            "version": "1", "external_id": "1", "recipe_key": null, "signed_build_id": null, "error": null,
+            "created_at": "2026-11-09T10:00:00Z", "finished_at": "2026-11-09T10:05:00Z"}], "checks": []});
+        db.set_meta(META, &old.to_string()).unwrap();
+        let state = Automation::load(&db, tmp.path()).unwrap().snapshot();
+        assert!(state.apps["android-youtube"].added);
+        assert!(state.community.is_empty());
+        assert_eq!(state.jobs[0].error_kind, None);
+        let saved: Value = serde_json::from_str(&db.meta(META).unwrap().unwrap()).unwrap();
+        assert!(
+            saved.get("community").is_none(),
+            "unchanged for an older Kiwi"
+        );
+
+        // A community app with a build running when Kiwi stopped, a damaged community id
+        // and a job of an app Kiwi doesn't know.
+        let id = "community-com.discord";
+        let state = json!({"apps": {id: {"added": true, "sequence": 3}},
+            "community": {id: {"package": "com.discord", "name": "Discord", "certificate": "e".repeat(64)},
+                          "community-../x": {"package": "x"}},
+            "jobs": [{"id": "a".repeat(24), "app": id, "sequence": 3, "status": "running", "stage": "Patching Discord",
+                "version": null, "external_id": null, "recipe_key": null, "signed_build_id": null, "error": null,
+                "created_at": "2026-11-11T10:00:00Z", "finished_at": null, "interactive": true,
+                "community": {"repo": "VenusIsJaded/Venus-Patches"}},
+                {"id": "b".repeat(24), "app": "community-com.gone", "sequence": 1, "status": "ready", "stage": "",
+                "version": null, "external_id": null, "recipe_key": null, "signed_build_id": null, "error": null,
+                "created_at": "2026-11-11T10:00:00Z", "finished_at": "2026-11-11T10:00:00Z"}]});
+        db.set_meta(META, &state.to_string()).unwrap();
+        let state = Automation::load(&db, tmp.path()).unwrap().snapshot();
+        assert_eq!(state.community.len(), 1);
+        assert_eq!(
+            state.community[id].certificate.as_deref(),
+            Some("e".repeat(64).as_str())
+        );
+        assert!(state.apps[id].added);
+        assert_eq!(state.apps[id].sequence, 3);
+        assert_eq!(state.jobs.len(), 1, "jobs of unknown apps are dropped");
+        let job = &state.jobs[0];
+        assert_eq!(job.status, "failed");
+        assert_eq!(job.error_kind.as_deref(), Some("retry"));
+        assert_eq!(
+            job.community.as_ref().and_then(|c| c.repo.as_deref()),
+            Some("VenusIsJaded/Venus-Patches")
+        );
+        // A scheduled check never queues a community app.
+        assert!(recipe(id).is_err());
+    }
+
+    #[test]
     fn single_app_state_migrates_to_youtube_and_new_apps_start_unadded() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Db::open(&tmp.path().join("test.db")).unwrap();

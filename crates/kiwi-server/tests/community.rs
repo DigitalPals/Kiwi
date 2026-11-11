@@ -145,8 +145,9 @@ b=json.loads(b.read_text()) if b.exists() else {}
 emit('stage',stage='Choosing patches')
 time.sleep(b.get('pause',0))
 cands=request['candidates']
-for c in cands[:2]:
-    emit('community',kind='candidate',repo=c['repo'],repo_id=42,tag='v1.21.1',versions=['351.11 - Stable'],patches=2,default_patches=2,eligible=True,reason=None)
+for i,c in enumerate(cands[:2]):
+    bad=b.get('ineligible') and i==0
+    emit('community',kind='candidate',repo=c['repo'],repo_id=42,tag='v1.21.1',versions=['351.11 - Stable'],patches=2,default_patches=2,eligible=not bad,reason='no version Kiwi can download' if bad else None)
 if b.get('fail'):
     emit('community',kind='failed',repo=cands[0]['repo'],tag='v1.21.1',reason='its patches failed (Stockfish analysis)')
     emit('error',message='No bundle built Discord.',blocked=False,kind=b.get('kind','other_bundle'))
@@ -610,6 +611,37 @@ async fn failures_carry_what_the_owner_can_do_and_mark_the_bundle() {
         last_request(&k)["skip"],
         json!({"VenusIsJaded/Venus-Patches": "v1.21.1"})
     );
+
+    // A bundle that wasn't eligible is shown with its reason but checked again next time.
+    let path = format!("/api/automation/{DISCORD}");
+    phone.send(Method::DELETE, &path, None).await;
+    behave(&k, json!({"ineligible": true}));
+    phone
+        .post(&format!("/api/community/{DISCORD}/install"), json!({}))
+        .await;
+    assert_eq!(finished(&k, DISCORD).await["jobs"][0]["status"], "ready");
+    let candidates = phone
+        .ok(&format!("/api/community/{DISCORD}/candidates"))
+        .await;
+    // (The fake runner reports the first candidate ineligible and builds it anyway.)
+    let venus = candidates
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["repo"] == "VenusIsJaded/Venus-Patches")
+        .unwrap();
+    assert_eq!(
+        venus["failed"], "no version Kiwi can download",
+        "{candidates}"
+    );
+    phone.send(Method::DELETE, &path, None).await;
+    behave(&k, json!({}));
+    phone
+        .post(&format!("/api/community/{DISCORD}/install"), json!({}))
+        .await;
+    finished(&k, DISCORD).await;
+    let skip = last_request(&k)["skip"].clone();
+    assert!(skip.get("VenusIsJaded/Venus-Patches").is_none(), "{skip}");
 
     // A retry-type failure.
     behave(&k, json!({"fail": true, "kind": "retry"}));

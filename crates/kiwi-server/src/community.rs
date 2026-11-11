@@ -143,8 +143,11 @@ pub struct Learned {
     pub patches: Option<usize>,
     pub default_patches: Option<usize>,
     pub eligible: Option<bool>,
-    /// Why it can't be used, at `tag`.
+    /// Why its build failed at `tag`; skipped by automatic picks while `tag` is its latest.
     pub failed: Option<String>,
+    /// Why it wasn't eligible when last checked (checked again next time: what Google Play
+    /// offers changes).
+    pub unusable: Option<String>,
 }
 
 /// A community app the owner installed.
@@ -618,7 +621,7 @@ pub fn candidates(kiwi: &Kiwi, id: &str) -> ApiResult<Value> {
                     .map_or_else(|| c.versions.clone(), |l| l.versions.clone()),
                 "recommended": recommended.as_deref().is_some_and(|r| r.eq_ignore_ascii_case(&c.repo)),
                 "chosen": pins.is_some_and(|p| p.repo.eq_ignore_ascii_case(&c.repo)),
-                "failed": learned.and_then(|l| l.failed.clone()),
+                "failed": learned.and_then(|l| l.failed.clone().or_else(|| l.unusable.clone())),
             })
         })
         .collect();
@@ -1146,9 +1149,11 @@ fn learn(kiwi: &Kiwi, id: &str, event: &Value) -> Result<(), Failure> {
                     entry.patches = event["patches"].as_u64().map(|n| n as usize);
                     entry.default_patches = event["default_patches"].as_u64().map(|n| n as usize);
                     entry.eligible = event["eligible"].as_bool();
-                    if entry.eligible == Some(false) {
-                        entry.failed = text("reason");
-                    }
+                    entry.unusable = if entry.eligible == Some(false) {
+                        text("reason")
+                    } else {
+                        None
+                    };
                 }
                 (Some("failed"), Some(repo)) => {
                     let entry = added.learned.entry(repo.to_owned()).or_default();

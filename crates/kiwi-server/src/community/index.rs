@@ -875,3 +875,39 @@ mod tests {
         assert_eq!(index.compatibilities[0].len(), 1);
     }
 }
+
+#[cfg(test)]
+mod real {
+    /// `KIWI_INDEX_SAMPLE=/path/to/bundles.json cargo test -p kiwi-server real_index -- --ignored`
+    #[test]
+    #[ignore = "needs a downloaded community list"]
+    fn real_index() {
+        let path = std::env::var("KIWI_INDEX_SAMPLE").expect("KIWI_INDEX_SAMPLE");
+        let bytes = std::fs::read(path).unwrap();
+        let started = std::time::Instant::now();
+        let index = super::parse(&bytes, &crate::community::official_packages()).unwrap();
+        println!(
+            "{} apps, {} bundles, {} featured in {:?}",
+            index.apps.len(),
+            index.bundles.len(),
+            index.featured.len(),
+            started.elapsed()
+        );
+        for package in [
+            "com.discord",
+            "tv.twitch.android.app",
+            "com.chess",
+            "com.pinterest",
+        ] {
+            let ranked: Vec<String> = index
+                .candidates(package)
+                .iter()
+                .take(4)
+                .map(|c| format!("{} {:?} d{}", c.repo, c.versions.first(), c.default_patches))
+                .collect();
+            println!("{package}: {ranked:?}");
+        }
+        let popular: Vec<&str> = index.popular(30).iter().map(|a| a.name.as_str()).collect();
+        println!("popular: {popular:?}");
+    }
+}

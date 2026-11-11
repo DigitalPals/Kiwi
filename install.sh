@@ -1030,6 +1030,14 @@ import_enrollment() {
 	done
 	[ "$count" -gt 0 ] || die "no decryption models (*.bin) in $source"
 	say "Copied $count decryption model(s) from $source"
+	# Share that Kiwi's build tools (and its ipatool) when they live elsewhere than the
+	# default ~/.kiwi-builder-tools, rather than setting them up a second time.
+	local tools
+	if [ ! -e "$B_DATA/automation/tools" ] && [ ! -L "$B_DATA/automation/tools" ] &&
+		tools=$(readlink "$IMPORT/automation/tools" 2>/dev/null) && [ -d "$tools" ]; then
+		ln -s "$tools" "$B_DATA/automation/tools"
+		say "Using the build tools in $tools"
+	fi
 }
 
 install_builder() {

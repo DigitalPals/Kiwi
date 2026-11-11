@@ -525,7 +525,8 @@ Kiwi accepts the builder only through Tailscale from a device of its owner (or, 
    it), and loads the LaunchAgent `local.kiwi-builder`. `--name "Mac Studio"` names the Mac
    in Kiwi; `--import-enrollment` copies the decryption models from a Kiwi on this Mac
    (`~/Library/Application Support/Kiwi`, or the data directory you name), so the Mac
-   needn't enroll again. Kiwi's own LaunchAgent and data are never touched.
+   needn't enroll again, and uses that Kiwi's build tools when they live somewhere other
+   than `~/.kiwi-builder-tools`. Kiwi's own LaunchAgent and data are never touched.
 3. Set up the build tools, sign in to the App Store and enroll, as in [Set up the
    Mac](#set-up-the-mac) but against the builder's data directory, in Terminal (setup uses
    Homebrew and enrollment `sudo -n`; ipatool may ask for a two-factor code):

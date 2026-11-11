@@ -51,7 +51,6 @@ const META: &str = "mac_builder";
 /// Pairing codes: 12 characters of these 32 (60 bits), shown as `XXXX-XXXX-XXXX`.
 const CODE_ALPHABET: &[u8; 32] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 const CODE_LENGTH: usize = 12;
-const CODE_LIFETIME: chrono::Duration = chrono::Duration::minutes(10);
 /// Wrong pairing codes allowed per [`PAIR_WINDOW`] before pairing answers `429`.
 const PAIR_FAILURES: usize = 5;
 const PAIR_WINDOW: Duration = Duration::from_secs(600);
@@ -73,6 +72,8 @@ pub struct Timing {
     /// How often the builder runs `doctor` (also when it connects and when asked).
     pub doctor_every: Duration,
     pub doctor_timeout: Duration,
+    /// How long a pairing code works.
+    pub code_lifetime: chrono::Duration,
 }
 
 impl Default for Timing {
@@ -83,6 +84,7 @@ impl Default for Timing {
             poll: Duration::from_secs(25),
             doctor_every: Duration::from_secs(6 * 3600),
             doctor_timeout: Duration::from_secs(300),
+            code_lifetime: chrono::Duration::minutes(10),
         }
     }
 }
@@ -624,7 +626,7 @@ pub fn start_pairing(kiwi: &Kiwi, public_url: &str) -> ApiResult<Value> {
         .iter()
         .map(|b| CODE_ALPHABET[usize::from(*b) % CODE_ALPHABET.len()] as char)
         .collect();
-    let expires = Utc::now() + CODE_LIFETIME;
+    let expires = Utc::now() + mac.timing().code_lifetime;
     mac.inner.lock().unwrap().pairing = Some((code.clone(), expires));
     Ok(pairing_json(&code, expires, public_url))
 }

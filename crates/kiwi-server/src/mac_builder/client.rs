@@ -671,7 +671,14 @@ impl Builder {
         stop: &CancellationToken,
         artifacts: &mut Vec<String>,
     ) -> &'static str {
-        if let Err(e) = write_private(request, task.request.to_string().as_bytes()).await {
+        let written = match request.parent() {
+            Some(root) => tokio::fs::create_dir_all(root).await,
+            None => Ok(()),
+        };
+        if let Err(e) = match written {
+            Ok(()) => write_private(request, task.request.to_string().as_bytes()).await,
+            Err(e) => Err(e),
+        } {
             let message = format!("{} could not write the task's request: {e}", self.name);
             self.finish(&task.id, "failed", Some(&message), None).await;
             return "failed";

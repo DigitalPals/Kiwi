@@ -251,6 +251,41 @@ def codes_to_try(version, declared, play, pure):
     return out
 
 
+NETWORK_HINTS = ("UnknownHostException", "ConnectException", "SocketException", "Permission denied (connect",
+                 "didn't answer", "Network is unreachable")
+
+
+def patch_failure(outcome):
+    """Why the patcher's result says patches failed, in a few words: the patches' names, and
+    whether one needed the network (which the sandbox doesn't have)."""
+    failed = outcome.get("failedPatches") if isinstance(outcome, dict) else None
+    if not isinstance(failed, list) or not failed:
+        return None
+    names, network = [], False
+    for entry in failed[:50]:
+        name = entry.get("name") if isinstance(entry, dict) else entry
+        error = str(entry.get("error", "")) if isinstance(entry, dict) else ""
+        network = network or any(hint in error for hint in NETWORK_HINTS)
+        if isinstance(name, str) and len(names) < 3:
+            names.append(name[:80])
+    listed = ", ".join(names) + (" and more" if len(failed) > 3 else "")
+    if network:
+        return f"a patch needs the network while patching, which the sandbox doesn't allow ({listed})"
+    return f"some of its patches failed ({listed})"
+
+
+def read_result(path):
+    """The patcher's result file, read as a plain file (not a link), or None."""
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > android.MAX_RESULT:
+            return None
+        outcome = json.loads(Path(path).read_text())
+        return outcome if isinstance(outcome, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 def check_original(files, package, version, code, certificate):
     """The certificates of a complete original: every file is the app at that version code,
     one base APK has the version name, all files are signed alike and include arm64 code
@@ -699,7 +734,8 @@ class Community:
         except BuildError as error:
             if error.blocked:
                 raise
-            raise CandidateFailed("its patches failed") from error
+            reason = patch_failure(read_result(box / "result.json"))
+            raise CandidateFailed(reason or "the patcher stopped with an error") from error
         unsigned, result = work / "unsigned.apk", work / "result.json"
         for made, kept in ((box / "unsigned.apk", unsigned), (box / "result.json", result)):
             try:
@@ -721,8 +757,7 @@ class Community:
         if not isinstance(applied, list) or not all(isinstance(p, str) for p in applied):
             raise CandidateFailed("the patcher reported an unreadable result")
         if outcome.get("failedPatches"):
-            names = [str(p.get("name") if isinstance(p, dict) else p)[:80] for p in outcome["failedPatches"][:3]]
-            raise CandidateFailed("some of its patches failed (" + ", ".join(names) + ")")
+            raise CandidateFailed(patch_failure(outcome))
         if outcome.get("success") is not True or not applied:
             raise CandidateFailed("no patches applied")
         try:

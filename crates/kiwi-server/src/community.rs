@@ -666,6 +666,10 @@ pub struct Shown {
     pub view: View,
 }
 
+fn repo_for_view(switching: &Option<String>, pins: Option<&Pins>) -> Option<String> {
+    switching.clone().or_else(|| pins.map(|p| p.repo.clone()))
+}
+
 pub fn shown(added: &Added, jobs: &[Job]) -> Shown {
     let pending = jobs.iter().find(|j| j.finished_at.is_none());
     let manual = pending
@@ -736,21 +740,29 @@ pub fn shown(added: &Added, jobs: &[Job]) -> Shown {
         app_version: pins.map(|p| p.version.clone()),
         limitations,
         included: pins.map(|p| p.patches.clone()).unwrap_or_default(),
-        view: View {
-            package: added.package.clone(),
-            author: pins.map(|p| p.author.clone()).or_else(|| {
-                repo.as_ref()
-                    .and_then(|r| r.split('/').next().map(str::to_owned))
-            }),
-            repo,
-            tag: pins.map(|p| p.tag.clone()),
-            chosen: match (pins, &manual) {
-                (_, Some(_)) => Chosen::Manual,
-                (Some(p), None) => p.chosen,
-                (None, None) => Chosen::Auto,
-            },
-            update: added.update.clone(),
-            resolving: pending.is_some() && (pins.is_none() || manual.is_some()),
+        view: {
+            // While a build with another chosen bundle is on its way, the view names that
+            // bundle (no tag yet); the rest still describes the published build.
+            let switching = manual
+                .clone()
+                .filter(|m| pins.is_none_or(|p| !p.repo.eq_ignore_ascii_case(m)));
+            let shown_pins = pins.filter(|_| switching.is_none());
+            View {
+                package: added.package.clone(),
+                author: shown_pins.map(|p| p.author.clone()).or_else(|| {
+                    repo_for_view(&switching, shown_pins)
+                        .and_then(|r| r.split('/').next().map(str::to_owned))
+                }),
+                repo: repo_for_view(&switching, shown_pins),
+                tag: shown_pins.map(|p| p.tag.clone()),
+                chosen: match (pins, &manual) {
+                    (_, Some(_)) => Chosen::Manual,
+                    (Some(p), None) => p.chosen,
+                    (None, None) => Chosen::Auto,
+                },
+                update: added.update.clone(),
+                resolving: pending.is_some() && (pins.is_none() || switching.is_some()),
+            }
         },
     }
 }

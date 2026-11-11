@@ -97,6 +97,15 @@ class ParsingTests(unittest.TestCase):
             with self.assertRaises(community.CandidateFailed):
                 community.read_manifest(Path(folder) / "bad.mpp")
 
+    def test_failed_patches_are_named_and_network_needs_recognised(self):
+        error = 'PatchException: Couldn\'t download Stockfish 19: github.com didn\'t answer (UnknownHostException: github.com)'
+        self.assertEqual(community.patch_failure({"failedPatches": [{"name": "Stockfish analysis", "error": error}]}),
+                         "a patch needs the network while patching, which the sandbox doesn't allow (Stockfish analysis)")
+        self.assertEqual(community.patch_failure({"failedPatches": [{"name": n, "error": "x"} for n in "abcd"]}),
+                         "some of its patches failed (a, b, c and more)")
+        self.assertIsNone(community.patch_failure({"failedPatches": []}))
+        self.assertIsNone(community.patch_failure(None))
+
     def test_versions_compare_like_the_server(self):
         self.assertEqual(community.compare_versions("351.11 - Stable", "351.9"), 1)
         self.assertEqual(community.compare_versions("12.40.1-prod.01", "12.41.0-prod.01"), -1)
@@ -325,8 +334,24 @@ class BuildTests(unittest.TestCase):
         artifact = self.run_build(self.community())
         failed = [e for e in self.events if e.get("kind") == "failed"]
         self.assertEqual([(f["repo"], f["tag"]) for f in failed], [("bad/bundle", "v1.2.0")])
-        self.assertIn("Stockfish analysis", failed[0]["reason"])
+        self.assertEqual(failed[0]["reason"], "some of its patches failed (Stockfish analysis)")
         self.assertEqual(artifact["community"]["repo"], "good/bundle")
+
+    def test_a_patcher_that_exits_with_an_error_still_names_the_patch(self):
+        def offline_patch(args, env=None, **options):
+            inner = [str(a) for a in args][7:]
+            if "patch" in inner and "list-patches" not in inner:
+                box = Path(inner[inner.index("--out") + 1]).parent
+                (box / "result.json").write_text(json.dumps({"success": False, "appliedPatches": ["A"], "failedPatches": [
+                    {"name": "Stockfish analysis", "error": "UnknownHostException: github.com"}]}))
+                raise BuildError("patch failed")
+            return self.command(args, env, **options)
+        made = self.community(mode="manual", candidates=[{"repo": "good/bundle"}])
+        made.base.builder.command = offline_patch
+        with self.assertRaises(community.CommunityError) as raised:
+            self.run_build(made)
+        self.assertIn("needs the network while patching", str(raised.exception))
+        self.assertEqual(raised.exception.kind, "other_bundle")
 
     def test_when_every_bundle_fails_the_owner_is_told_to_choose_another(self):
         self.failing = {1, 2}

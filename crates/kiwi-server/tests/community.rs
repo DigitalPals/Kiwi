@@ -499,6 +499,13 @@ async fn installing_builds_once_publishes_and_installs_like_kiwis_own_builds() {
         .await;
     assert_eq!(manual.status, StatusCode::ACCEPTED);
     assert_eq!(manual.body["community"]["chosen"], "manual");
+    assert_eq!(manual.body["community"]["repo"], "lildanlid1/Cordly");
+    assert_eq!(manual.body["community"]["tag"], Value::Null);
+    assert_eq!(manual.body["community"]["resolving"], true);
+    assert_eq!(
+        manual.body["tweak"], "Venus-Patches v1.21.1",
+        "the published build until the new one is ready"
+    );
     let rebuilt = finished(&k, DISCORD).await;
     assert_eq!(rebuilt["jobs"][0]["status"], "ready", "{rebuilt}");
     assert_eq!(last_request(&k)["mode"], "manual");

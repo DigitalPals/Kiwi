@@ -48,13 +48,51 @@ impl ApiError {
             "Kiwi Builds is off. Turn it on in Settings.",
         )
     }
-    /// Kiwi Builds can only build iOS apps on a Mac.
+    /// Kiwi Builds can only build iOS apps on a Mac: this one, or a paired Mac builder.
     pub fn needs_mac() -> Self {
         Self::new(
             StatusCode::CONFLICT,
             "needs_mac",
-            "iOS apps can only be built on a Mac. This Kiwi doesn't run on macOS, so Kiwi \
-             Builds builds Android apps here.",
+            "iOS apps can only be built on a Mac. This Kiwi doesn't run on macOS: pair a Mac \
+             in Settings › Mac builder to build them. Until then Kiwi Builds builds Android \
+             apps here.",
+        )
+    }
+    /// A Kiwi on macOS builds iOS apps itself and pairs no Mac builder.
+    pub fn builder_unsupported() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "builder_unsupported",
+            "This Kiwi runs on a Mac and builds iOS apps itself.",
+        )
+    }
+    /// A Mac builder's token is unknown or was revoked.
+    pub fn builder_unpaired() -> Self {
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            "builder_unpaired",
+            "This Mac builder isn't paired with Kiwi. Pair it again from Settings › Mac builder.",
+        )
+    }
+    /// A wrong or expired pairing code.
+    pub fn bad_code() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "bad_code",
+            "That pairing code is wrong or has expired. Make a new one in Settings › Mac builder.",
+        )
+    }
+    /// Too many attempts; try again later.
+    pub fn rate_limited(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", message)
+    }
+    /// A Mac builder's task that Kiwi no longer has (finished, cancelled, lost, or Kiwi
+    /// restarted).
+    pub fn task_gone() -> Self {
+        Self::new(
+            StatusCode::GONE,
+            "task_gone",
+            "Kiwi no longer has this task. Stop it.",
         )
     }
     /// Community builds can't run on this Kiwi (macOS, no sandbox, or no community list

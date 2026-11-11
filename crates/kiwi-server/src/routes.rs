@@ -25,7 +25,7 @@ use crate::{
     db::{BrowseMode, DeviceRow, OriginalChoice, Platform, SourceRow},
     devices::{self, COOKIE, Client, Requester, device_json},
     error::{ApiError, ApiResult},
-    ota, owner,
+    mac_builder, ota, owner,
     peers::{self, Connection},
     push::{self, Payload, SubscribeBody},
     sources,
@@ -46,6 +46,17 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .route("/automation/{app}/add", post(automation_add))
         .route("/automation/{app}/check", post(automation_check))
         .route("/automation/{app}/cancel", post(automation_cancel))
+        .route("/builder", get(builder_view).delete(builder_unpair))
+        .route(
+            "/builder/pairing",
+            post(builder_start_pairing).delete(builder_withdraw_pairing),
+        )
+        .route("/builder/check", post(builder_check))
+        .route("/builder/pair", post(builder_pair))
+        .route("/builder/poll", post(builder_poll))
+        .route("/builder/tasks/{id}/events", post(builder_events))
+        .route("/builder/tasks/{id}/artifact", put(builder_artifact))
+        .route("/builder/tasks/{id}/finish", post(builder_finish))
         .route("/community", get(community_overview))
         .route("/community/search", get(community_search))
         .route("/community/{app}/install", post(community_install))
@@ -193,11 +204,16 @@ async fn log_requests(req: Request, next: Next) -> Response {
 #[derive(Clone, Default)]
 struct CookieSlot(Arc<Mutex<Option<String>>>);
 
-fn check_csrf(headers: &HeaderMap) -> ApiResult<()> {
+/// `raw`: a body that isn't JSON (a Mac builder's artifact upload, which also needs its
+/// bearer token).
+fn check_csrf(headers: &HeaderMap, raw: bool) -> ApiResult<()> {
     if headers.get("x-kiwi").and_then(|v| v.to_str().ok()) != Some("1") {
         return Err(ApiError::csrf(
             "Missing X-Kiwi header; requests must come from the Kiwi app.",
         ));
+    }
+    if raw {
+        return Ok(());
     }
     let has_body = headers
         .get(header::CONTENT_LENGTH)
@@ -223,7 +239,11 @@ async fn api_guard(mut req: Request, next: Next) -> Response {
         *req.method(),
         Method::POST | Method::PATCH | Method::DELETE | Method::PUT
     );
-    let mut response = match mutating.then(|| check_csrf(req.headers())) {
+    let path = req.uri().path();
+    let raw = *req.method() == Method::PUT
+        && path.contains("/builder/tasks/")
+        && path.ends_with("/artifact");
+    let mut response = match mutating.then(|| check_csrf(req.headers(), raw)) {
         Some(Err(e)) => e.into_response(),
         _ => {
             let slot = CookieSlot::default();
@@ -522,6 +542,7 @@ async fn me_json(kiwi: &Kiwi, ctx: &Ctx) -> ApiResult<Value> {
             "ios_signing": if HOST_OS == "macos" { "keychain" } else { "files" },
             "devicectl": devicectl,
             "android_signer_sha256": android_signer,
+            "builds_ios": kiwi.automation.ios_buildable(),
         },
         "features": features(
             platform,
@@ -1216,6 +1237,100 @@ async fn delete_profile(State(kiwi): K, _: Ctx, P(uuid): P<String>) -> ApiResult
 
 async fn get_settings(State(kiwi): K, _: Ctx) -> Response {
     Json(kiwi.settings()).into_response()
+}
+
+// ---- Mac builder (owner: Settings; builder: the Mac) ----
+
+async fn builder_view(State(kiwi): K, ctx: Ctx) -> Json<Value> {
+    Json(mac_builder::view(&kiwi, &ctx.public_url))
+}
+
+async fn builder_start_pairing(State(kiwi): K, ctx: Ctx) -> ApiResult<Response> {
+    let pairing = mac_builder::start_pairing(&kiwi, &ctx.public_url)?;
+    Ok((StatusCode::CREATED, Json(pairing)).into_response())
+}
+
+async fn builder_withdraw_pairing(State(kiwi): K, _: Ctx) -> StatusCode {
+    mac_builder::withdraw_pairing(&kiwi);
+    StatusCode::NO_CONTENT
+}
+
+async fn builder_unpair(State(kiwi): K, _: Ctx) -> ApiResult<StatusCode> {
+    mac_builder::unpair(&kiwi)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn builder_check(State(kiwi): K, _: Ctx) -> ApiResult<StatusCode> {
+    mac_builder::request_check(&kiwi)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn builder_pair(
+    State(kiwi): K,
+    headers: HeaderMap,
+    _: mac_builder::BuilderOrigin,
+    JsonBody(body): JsonBody<mac_builder::PairBody>,
+) -> ApiResult<Response> {
+    let paired = mac_builder::pair(&kiwi, body, &kiwi.public_url(&headers))?;
+    crate::automation::start_next(&kiwi);
+    Ok((StatusCode::CREATED, Json(paired)).into_response())
+}
+
+async fn builder_poll(
+    State(kiwi): K,
+    auth: mac_builder::BuilderAuth,
+    JsonBody(body): JsonBody<mac_builder::PollBody>,
+) -> ApiResult<Response> {
+    Ok(match mac_builder::poll(&kiwi, auth, body).await? {
+        Some(task) => Json(json!({ "task": task })).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuilderEvents {
+    events: Vec<Value>,
+}
+
+async fn builder_events(
+    State(kiwi): K,
+    _: mac_builder::BuilderAuth,
+    P(id): P<String>,
+    JsonBody(body): JsonBody<BuilderEvents, { 3 * 1024 * 1024 }>,
+) -> ApiResult<Json<Value>> {
+    let cancel = mac_builder::events(&kiwi, &id, body.events)?;
+    Ok(Json(json!({ "cancel": cancel })))
+}
+
+#[derive(Deserialize)]
+struct ArtifactQuery {
+    sha256: String,
+}
+
+async fn builder_artifact(
+    State(kiwi): K,
+    _: mac_builder::BuilderAuth,
+    P(id): P<String>,
+    axum::extract::Query(query): axum::extract::Query<ArtifactQuery>,
+    headers: HeaderMap,
+    body: Body,
+) -> ApiResult<StatusCode> {
+    let length = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+    mac_builder::upload(&kiwi, &id, &query.sha256, length, body).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn builder_finish(
+    State(kiwi): K,
+    _: mac_builder::BuilderAuth,
+    P(id): P<String>,
+    JsonBody(body): JsonBody<mac_builder::FinishBody, { 1024 * 1024 }>,
+) -> ApiResult<StatusCode> {
+    mac_builder::finish(&kiwi, &id, body).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn automation_overview(State(kiwi): K, _: Ctx) -> ApiResult<Response> {

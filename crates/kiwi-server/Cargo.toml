@@ -29,6 +29,7 @@ hex.workspace = true
 hmac = "0.13"
 libc = "0.2"
 plist.workspace = true
+reqwest.workspace = true
 rusqlite = { version = "0.41", features = ["bundled", "chrono"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -42,7 +43,6 @@ zeroize = "1"
 
 [dev-dependencies]
 kiwi-signer = { path = "../kiwi-signer", features = ["test-support"] }
-reqwest.workspace = true
 sha1 = "0.11"
 tempfile.workspace = true
 zip.workspace = true

@@ -69,6 +69,8 @@ async fn devices_have_a_platform_and_a_first_run_setup() {
             "ios_signing": if MACOS { "keychain" } else { "files" },
             "devicectl": true,
             "android_signer_sha256": null,
+            // iOS apps build on a Mac, or on a paired Mac builder.
+            "builds_ios": MACOS,
         })
     );
     assert!(me["android_app"].is_null());

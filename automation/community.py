@@ -55,6 +55,8 @@ ABI = "arm64-v8a"
 ABI_KEY = "ARM64_V8A"
 # Cached originals beyond this are not kept after a successful community build.
 ORIGINALS_BUDGET = 4 * 1024**3
+# Downloaded bundles and their patch lists unused for this long are deleted.
+KEEP_DAYS = 30
 MODES = ("auto", "manual", "pinned", "update")
 PACKAGE = re.compile(r"[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+")
 OWNER = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
@@ -453,12 +455,25 @@ class Community:
         partial.replace(path)
         return path, sha
 
+    def prune(self, now=None):
+        """Deletes bundles, patch lists and partial files no build used for KEEP_DAYS."""
+        now = time.time() if now is None else now
+        for folder in (self.store / "bundles", self.store / "lists"):
+            for path in folder.iterdir():
+                try:
+                    info = os.lstat(path)
+                    if stat.S_ISREG(info.st_mode) and now - info.st_mtime > KEEP_DAYS * 86400:
+                        path.unlink()
+                except OSError:
+                    pass
+
     # --- inspecting a candidate ---------------------------------------------------------
 
     def list_patches(self, bundle, sha, java, patcher):
         """`list-patches` of a bundle, run in the sandbox (required); kept per bundle digest."""
         kept = self.store / "lists" / f"{sha}-{PATCHER_SHA256[:16]}.txt"
         if kept.is_file():
+            os.utime(kept)
             return kept.read_text(errors="replace")
         box = self.job_dir / f"list-{sha[:12]}"
         shutil.rmtree(box, ignore_errors=True)
@@ -773,6 +788,7 @@ class Community:
                          f"reviewed); signed with this Kiwi's own key.\nNot yet tested on a physical device."}
 
     def run(self):
+        self.prune()
         candidates = self.request["candidates"]
         if self.mode in ("auto", "manual"):
             emit("stage", stage="Choosing patches")

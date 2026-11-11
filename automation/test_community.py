@@ -435,6 +435,19 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(sent[1]["If-None-Match"], '"abc"')
 
 
+    def test_unused_bundles_and_lists_age_out(self):
+        made = self.community()
+        old, new = made.store / "bundles" / "old.mpp", made.store / "lists" / "new.txt"
+        for path in (old, new):
+            path.write_text("x")
+        import os
+        import time
+        os.utime(old, (time.time() - 40 * 86400,) * 2)
+        made.prune()
+        self.assertFalse(old.exists())
+        self.assertTrue(new.exists())
+
+
 class PlayRetryTests(unittest.TestCase):
     def test_one_failed_split_download_is_retried_alone(self):
         originals = (android.download, android.http, android.RETRY_SECONDS)

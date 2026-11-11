@@ -256,7 +256,8 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
   `signing/` (0700: `identity`, the `.p12` with its password, 0600, on `files` hosts;
   uploaded `profiles/<uuid>.mobileprovision` on every host),
   `automation/` (Kiwi Builds; `automation/android/signer.json` names the certificate of the
-  Android signing key), `android-app/` (Kiwi's Android app, `kiwi.apk` + `kiwi.json`, written
+  Android signing key), `community/` (the last good Morphe community list, `bundles.json`,
+  and `status.json` with its validators), `android-app/` (Kiwi's Android app, `kiwi.apk` + `kiwi.json`, written
   by the Android runner's `kiwi-app` command; `unsigned/` holds the owner's own builds),
   `kiwi.lock`.
 - At start Kiwi takes an exclusive lock on `<data>/kiwi.lock` before any startup cleanup
@@ -483,6 +484,42 @@ are a single `{"name":"macOS","ready":false}`. Android recipes build as on a Mac
 runners run with `--python`; the Android runner stops with a blocked error on Python older
 than 3.12.
 
+### Community builds
+
+`community.rs` (with `community/index.rs`) adds the Morphe community list to Kiwi Builds
+([kiwi-builds.md](kiwi-builds.md#community-builds), [api.md](api.md#community-builds)):
+
+- **The list** is fetched by the server only (`SourceClient::json_document`: conditional,
+  at most 32 MB, the same network policy as sources), at most every 12 hours (15 minutes
+  while there is no copy), and parsed as untrusted data on a blocking thread: an index
+  without the expected shape or beyond the entry limits is refused whole, and single
+  entries that don't validate (packages, `owner/repo`, URLs, numbers, text without control
+  or bidi characters) are skipped. The last good copy is kept in `<data>/community` and
+  loaded at start. Kiwi keeps apps, bundles, compatibility entries and, per app, the patch
+  text for search; it never follows a URL from the list except icons through `/api/art`.
+- **Availability**: community builds run only where `sandbox.py --probe` (run once, with
+  `--python`) finds Landlock ABI 3 or later and the seccomp filter; macOS answers with a
+  fixed reason without probing.
+- **State**: community apps are `State.community` (`Added`: name, icon, the publisher
+  certificate, `Pins`, an offered update, what builds learned per candidate) inside the
+  automation state, keyed `community-<package>`, with their `AppState` in `State.apps`
+  like recipes (no schema change; older state loads with an empty map, and state without
+  community apps is saved as before). Jobs gain `error_kind` and `community` (the intent:
+  a manual `repo` or an approved `update`). The scheduler never queues community apps.
+- **A build** is the Android runner's `community` command (`automation/community.py`): the
+  server sends the app, the candidates it pre-ranked from the list (top 6; the runner
+  checks at most 3), the pins, the certificate and the bundles to skip; the runner reports
+  `community` events (each candidate's facts, failures, the certificate first seen on a
+  Google Play original), stages, and an artifact carrying the new pins. `invoke` passes
+  `community` and `error` events to the caller as they arrive, so what a failed job learned
+  is kept. The server checks the artifact against the pins (a pinned rebuild must match
+  exactly; an update keeps the repository and package), refuses packages of Kiwi's own
+  apps or another community app, then publishes into the Kiwi Builds source like an
+  official Android build (`publish_community`).
+- **Updates**: once a day per pinned app, `GET /repositories/<id>/releases/latest` on
+  GitHub's API; a newer stable release with a `.mpp` asset that is at least 72 hours old
+  becomes `update`. Approving it queues an interactive job in `update` mode.
+
 ### App actions
 
 Computed per device; see `AppState` in api.md.
@@ -586,7 +623,8 @@ without one, the same bundle id).
 - Scheduler tick every minute:
   - when Kiwi Builds is on, queue the added apps whose check is due (see
     [kiwi-builds.md](kiwi-builds.md)), and sign Kiwi's Android app again when its input
-    changed (see "Android devices");
+    changed (see "Android devices"); in the background, refresh the community list when
+    due and check pinned community apps for updates (see "Community builds");
   - apply Android devices' last package reports to installs whose grace period ended;
   - refresh enabled sources older than `refresh_interval_minutes` (conditional requests;
     `last_attempt_at` is written before the fetch, so a fetch that crashes the server is

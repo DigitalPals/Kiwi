@@ -46,6 +46,11 @@ pub fn router(kiwi: Arc<Kiwi>) -> Router {
         .route("/automation/{app}/add", post(automation_add))
         .route("/automation/{app}/check", post(automation_check))
         .route("/automation/{app}/cancel", post(automation_cancel))
+        .route("/community", get(community_overview))
+        .route("/community/search", get(community_search))
+        .route("/community/{app}/install", post(community_install))
+        .route("/community/{app}/candidates", get(community_candidates))
+        .route("/community/{app}/update", post(community_update))
         .route("/me", get(me).patch(patch_me))
         .route("/me/packages", put(put_packages))
         .route("/sources", get(list_sources).post(add_source))
@@ -1230,6 +1235,7 @@ async fn automation_preferences(
     JsonBody(body): JsonBody<crate::automation::Preferences>,
 ) -> ApiResult<Response> {
     crate::automation::require_on(&kiwi)?;
+    no_options(&app)?;
     kiwi.automation.preferences(&kiwi, &app, body)?;
     Ok(Json(crate::automation::app_view(&kiwi, &app)?).into_response())
 }
@@ -1241,6 +1247,7 @@ async fn automation_add(
     JsonBody(body): JsonBody<crate::automation::Preferences>,
 ) -> ApiResult<Response> {
     crate::automation::require_on(&kiwi)?;
+    no_options(&app)?;
     crate::automation::add(&kiwi, &app, body)?;
     Ok((
         StatusCode::ACCEPTED,
@@ -1269,6 +1276,7 @@ async fn automation_check(
     JsonBody(body): JsonBody<AutomationCheck>,
 ) -> ApiResult<Response> {
     crate::automation::require_on(&kiwi)?;
+    no_options(&app)?;
     crate::automation::queue(&kiwi, &app, body.force, true)?;
     Ok((
         StatusCode::ACCEPTED,
@@ -1279,9 +1287,80 @@ async fn automation_check(
 
 async fn automation_cancel(State(kiwi): K, _: Ctx, P(app): P<String>) -> ApiResult<Response> {
     crate::automation::require_on(&kiwi)?;
-    crate::automation::recipe(&app)?;
+    crate::automation::known(&kiwi, &app)?;
     crate::automation::cancel(&kiwi, &app);
     Ok(Json(crate::automation::app_view(&kiwi, &app)?).into_response())
+}
+
+/// Community apps have no schedule or patch options: `400` for their ids.
+fn no_options(app: &str) -> ApiResult<()> {
+    if crate::community::is_id(app) {
+        return Err(ApiError::bad_request(
+            "Community apps have no schedule or options. Use Install or Update.",
+        ));
+    }
+    Ok(())
+}
+
+async fn community_overview(State(kiwi): K, _: Ctx) -> ApiResult<Response> {
+    crate::automation::require_on(&kiwi)?;
+    Ok(Json(crate::community::overview(&kiwi).await).into_response())
+}
+
+async fn community_search(
+    State(kiwi): K,
+    _: Ctx,
+    RawQuery(query): RawQuery,
+) -> ApiResult<Response> {
+    crate::automation::require_on(&kiwi)?;
+    let (mut q, mut offset, mut limit) = (String::new(), 0usize, 30usize);
+    for (k, v) in url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        let number = || {
+            v.parse::<usize>()
+                .map_err(|_| ApiError::bad_request(format!("Invalid {k}.")))
+        };
+        match k.as_ref() {
+            "q" => q = v.clone().into_owned(),
+            "offset" => offset = number()?,
+            "limit" => limit = number()?.clamp(1, 100),
+            _ => {}
+        }
+    }
+    if q.len() > 200 {
+        return Err(ApiError::bad_request("The search is too long."));
+    }
+    Ok(Json(crate::community::search(&kiwi, &q, offset, limit)).into_response())
+}
+
+async fn community_install(
+    State(kiwi): K,
+    _: Ctx,
+    P(app): P<String>,
+    JsonBody(body): JsonBody<crate::community::InstallBody>,
+) -> ApiResult<Response> {
+    crate::automation::require_on(&kiwi)?;
+    let queued = crate::community::install(&kiwi, &app, body).await?;
+    let status = if queued {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(crate::automation::app_view(&kiwi, &app)?)).into_response())
+}
+
+async fn community_candidates(State(kiwi): K, _: Ctx, P(app): P<String>) -> ApiResult<Response> {
+    crate::automation::require_on(&kiwi)?;
+    Ok(Json(crate::community::candidates(&kiwi, &app)?).into_response())
+}
+
+async fn community_update(State(kiwi): K, _: Ctx, P(app): P<String>) -> ApiResult<Response> {
+    crate::automation::require_on(&kiwi)?;
+    crate::community::approve_update(&kiwi, &app).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(crate::automation::app_view(&kiwi, &app)?),
+    )
+        .into_response())
 }
 
 async fn patch_settings(

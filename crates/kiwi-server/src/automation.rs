@@ -40,6 +40,7 @@ const ANDROID_RECIPES: &str = include_str!("../../../automation/android.json");
 const ANDROID_RUNNER: &str = include_str!("../../../automation/android.py");
 const APK_READER: &str = include_str!("../../../automation/apk.py");
 const SANDBOX: &str = include_str!("../../../automation/sandbox.py");
+const COMMUNITY_RUNNER: &str = include_str!("../../../automation/community.py");
 
 mod view;
 pub use view::{AppView, Overview, app_view, overview};
@@ -71,6 +72,9 @@ pub struct Recipe {
     /// The App Store app whose icon stands for this app, when `bundle_id` is not one.
     #[serde(default)]
     pub icon_bundle_id: Option<String>,
+    /// An Android app's package as downloaded, when patching renames it.
+    #[serde(default)]
+    pub original_package: Option<String>,
     pub tweak: String,
     pub summary: String,
     #[serde(default)]
@@ -254,6 +258,14 @@ pub struct Job {
     /// jobs that are waiting. Absent in state saved by older versions, which is `false`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub interactive: bool,
+    /// What a failed build's owner can do about it: `retry` (a download or rate limit),
+    /// `other_bundle` (the patches failed; choose another bundle) or `unavailable`
+    /// (nothing works with a version Kiwi can download). Set for community builds.
+    #[serde(default)]
+    pub error_kind: Option<String>,
+    /// What a community build was asked to do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community: Option<crate::community::JobIntent>,
 }
 fn legacy_app() -> String {
     "youtube".into()
@@ -300,6 +312,9 @@ pub struct State {
     /// Newest first, at most [`JOBS_PER_APP`] per app.
     pub jobs: Vec<Job>,
     pub checks: Vec<Value>,
+    /// Community apps by id (`community-<package>`); their `AppState` is in `apps`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub community: BTreeMap<String, crate::community::Added>,
 }
 const JOBS_PER_APP: usize = 30;
 
@@ -335,6 +350,7 @@ impl From<LegacyState> for State {
             apps: BTreeMap::from([("youtube".into(), youtube)]),
             jobs: old.jobs,
             checks: old.checks,
+            community: BTreeMap::new(),
         }
     }
 }
@@ -367,9 +383,23 @@ impl Automation {
                 None => State::default(),
             },
         };
-        // Apps whose recipe Kiwi no longer ships (Rambler PoC and Gboard Rambler).
-        state.apps.retain(|id, _| recipe(id).is_ok());
-        state.jobs.retain(|j| recipe(&j.app).is_ok());
+        // Apps whose recipe Kiwi no longer ships (Rambler PoC and Gboard Rambler). Community
+        // apps are kept, also when the community list no longer has them.
+        state
+            .community
+            .retain(|id, _| crate::community::package_of(id).is_some());
+        let known = |id: &str, s: &BTreeMap<String, crate::community::Added>| {
+            recipe(id).is_ok() || s.contains_key(id)
+        };
+        let community = state.community.clone();
+        state.apps.retain(|id, _| known(id, &community));
+        state.jobs.retain(|j| known(&j.app, &community));
+        for id in community.keys() {
+            state.apps.entry(id.clone()).or_insert_with(|| AppState {
+                preferences: crate::community::preferences(),
+                ..AppState::default()
+            });
+        }
         for recipe in recipes() {
             state
                 .apps
@@ -389,6 +419,9 @@ impl Automation {
                 job.status = "failed".into();
                 job.stage = "Interrupted by restart".into();
                 job.finished_at = Some(Utc::now());
+                if crate::community::is_id(&job.app) {
+                    job.error_kind = Some("retry".into());
+                }
             }
         }
         db.set_meta(
@@ -404,6 +437,7 @@ impl Automation {
             ("android.py", ANDROID_RUNNER),
             ("apk.py", APK_READER),
             ("sandbox.py", SANDBOX),
+            ("community.py", COMMUNITY_RUNNER),
             ("android.json", ANDROID_RECIPES),
             ("kiwi-app.json", crate::kiwi_app::PIN),
         ] {
@@ -462,7 +496,11 @@ impl Automation {
             vec![json!({"name": NEEDS_MAC_CHECK, "ready": false})]
         }
     }
-    fn change<T>(&self, db: &Db, edit: impl FnOnce(&mut State) -> ApiResult<T>) -> ApiResult<T> {
+    pub(crate) fn change<T>(
+        &self,
+        db: &Db,
+        edit: impl FnOnce(&mut State) -> ApiResult<T>,
+    ) -> ApiResult<T> {
         let mut current = self.state.lock().unwrap();
         let mut next = current.clone();
         let result = edit(&mut next)?;
@@ -473,7 +511,7 @@ impl Automation {
         *current = next;
         Ok(result)
     }
-    fn app<T>(
+    pub(crate) fn app<T>(
         &self,
         db: &Db,
         id: &str,
@@ -501,7 +539,7 @@ impl Automation {
         kiwi.kick.notify_one();
         Ok(())
     }
-    fn job(&self, db: &Db, id: &str, edit: impl FnOnce(&mut Job)) -> ApiResult<()> {
+    pub(crate) fn job(&self, db: &Db, id: &str, edit: impl FnOnce(&mut Job)) -> ApiResult<()> {
         self.change(db, |s| {
             let job = s
                 .jobs
@@ -561,16 +599,105 @@ pub fn add(kiwi: &Arc<Kiwi>, id: &str, mut preferences: Preferences) -> ApiResul
 /// Removes an app from Kiwi Builds: stops its builds and takes it out of the source.
 /// Installed copies keep working until they expire; retained inputs age out.
 pub fn remove(kiwi: &Kiwi, id: &str) -> ApiResult<()> {
-    recipe(id)?;
+    known(kiwi, id)?;
     cancel(kiwi, id);
-    kiwi.automation.app(&kiwi.db, id, |a| {
+    kiwi.automation.change(&kiwi.db, |s| {
+        let a = s
+            .apps
+            .get_mut(id)
+            .ok_or_else(|| ApiError::not_found("Kiwi doesn't build that app."))?;
         a.added = false;
         a.last_success_key = None;
         a.failed_recipe = None;
         a.failed_attempts = 0;
+        // A community app picks its bundle again when it is installed again.
+        if let Some(c) = s.community.get_mut(id) {
+            crate::community::forget_pins(c);
+        }
         Ok(())
     })?;
     publish(kiwi, None)
+}
+
+/// `404` unless Kiwi builds `id`: a recipe's app, or a community app it has state for.
+pub fn known(kiwi: &Kiwi, id: &str) -> ApiResult<()> {
+    if crate::community::is_id(id) {
+        if kiwi.automation.snapshot().community.contains_key(id) {
+            return Ok(());
+        }
+        return Err(ApiError::not_found("Kiwi doesn't build that app."));
+    }
+    recipe(id).map(|_| ())
+}
+
+/// The name an app's jobs show: its recipe's, or a community app's.
+fn display_name(s: &State, id: &str) -> Option<String> {
+    recipe(id)
+        .ok()
+        .map(|r| r.name.clone())
+        .or_else(|| s.community.get(id).map(|c| c.name.clone()))
+}
+
+/// A new job's id.
+pub(crate) fn new_job_id() -> ApiResult<String> {
+    let mut bytes = [0u8; 12];
+    getrandom::fill(&mut bytes).map_err(ApiError::internal)?;
+    Ok(hex::encode(bytes))
+}
+
+/// Queues an interactive community job for the added app `id` (its next revision).
+pub(crate) fn push_job(
+    s: &mut State,
+    job_id: &str,
+    id: &str,
+    intent: Option<crate::community::JobIntent>,
+) -> ApiResult<()> {
+    let waiting_for = s
+        .jobs
+        .iter()
+        .find(|j| j.active())
+        .and_then(|j| display_name(s, &j.app));
+    let app = s
+        .apps
+        .get_mut(id)
+        .ok_or_else(|| ApiError::not_found("Kiwi doesn't build that app."))?;
+    app.sequence += 1;
+    app.last_checked_at = Some(Utc::now());
+    let job = Job {
+        id: job_id.into(),
+        app: id.into(),
+        sequence: app.sequence,
+        status: "queued".into(),
+        stage: waiting_for.map_or_else(
+            || "Choosing patches".into(),
+            |other| format!("Waiting for {other}"),
+        ),
+        version: None,
+        external_id: None,
+        recipe_key: None,
+        signed_build_id: None,
+        error: None,
+        created_at: Utc::now(),
+        finished_at: None,
+        preferences: None,
+        force: false,
+        interactive: true,
+        error_kind: None,
+        community: intent,
+    };
+    insert_job(s, job);
+    Ok(())
+}
+
+/// Adds a job, newest first, keeping at most [`JOBS_PER_APP`] per app.
+fn insert_job(s: &mut State, job: Job) {
+    s.jobs.insert(0, job);
+    let mut kept = BTreeMap::<String, usize>::new();
+    s.jobs.retain(|j| {
+        let count = kept.entry(j.app.clone()).or_default();
+        *count += 1;
+        *count <= JOBS_PER_APP
+    });
 }
 
 pub fn cancel(kiwi: &Kiwi, id: &str) {
@@ -606,9 +733,7 @@ pub fn cancel(kiwi: &Kiwi, id: &str) {
 pub fn queue(kiwi: &Arc<Kiwi>, id: &str, force: bool, interactive: bool) -> ApiResult<()> {
     let recipe = recipe(id)?;
     kiwi.automation.require_buildable(recipe)?;
-    let mut bytes = [0u8; 12];
-    getrandom::fill(&mut bytes).map_err(ApiError::internal)?;
-    let job_id = hex::encode(bytes);
+    let job_id = new_job_id()?;
     kiwi.automation.change(&kiwi.db, |s| {
         if s.jobs.iter().any(|j| j.app == id && j.active()) {
             return Err(ApiError::conflict(format!(
@@ -620,8 +745,7 @@ pub fn queue(kiwi: &Arc<Kiwi>, id: &str, force: bool, interactive: bool) -> ApiR
             .jobs
             .iter()
             .find(|j| j.active())
-            .and_then(|j| self::recipe(&j.app).ok())
-            .map(|r| r.name.as_str());
+            .and_then(|j| display_name(s, &j.app));
         let app = s
             .apps
             .get_mut(id)
@@ -653,14 +777,10 @@ pub fn queue(kiwi: &Arc<Kiwi>, id: &str, force: bool, interactive: bool) -> ApiR
             preferences: Some(app.preferences.clone()),
             force,
             interactive,
+            error_kind: None,
+            community: None,
         };
-        s.jobs.insert(0, job);
-        let mut kept = BTreeMap::<String, usize>::new();
-        s.jobs.retain(|j| {
-            let count = kept.entry(j.app.clone()).or_default();
-            *count += 1;
-            *count <= JOBS_PER_APP
-        });
+        insert_job(s, job);
         Ok(())
     })?;
     start_next(kiwi);
@@ -718,6 +838,9 @@ pub fn cancel_all(kiwi: &Kiwi) {
     for recipe in recipes() {
         cancel(kiwi, &recipe.id);
     }
+    for id in kiwi.automation.snapshot().community.keys() {
+        cancel(kiwi, id);
+    }
     crate::kiwi_app::cancel(kiwi);
 }
 
@@ -762,12 +885,22 @@ pub fn tick(kiwi: &Arc<Kiwi>) {
 }
 
 async fn work(kiwi: Arc<Kiwi>, job: Job, token: CancellationToken) {
-    let result = match recipe(&job.app) {
-        Ok(recipe) => execute(&kiwi, recipe, &job, &token).await,
-        Err(e) => Err(failed(e)),
+    let community = crate::community::is_id(&job.app);
+    let (result, kind) = if community {
+        match crate::community::execute(&kiwi, &job, &token).await {
+            Ok(done) => (Ok(done), None),
+            Err((failure, kind)) => (Err(failure), kind),
+        }
+    } else {
+        let result = match recipe(&job.app) {
+            Ok(recipe) => execute(&kiwi, recipe, &job, &token).await,
+            Err(e) => Err(failed(e)),
+        };
+        (result, None)
     };
+    let kind = kind.filter(|_| !token.is_cancelled());
     let (status, stage, error) = match result {
-        Ok(true) if recipe(&job.app).is_ok_and(Recipe::android) => {
+        Ok(true) if community || recipe(&job.app).is_ok_and(Recipe::android) => {
             ("ready", "Available in Kiwi", None)
         }
         Ok(true) => ("ready", "Signed and available in Kiwi", None),
@@ -792,6 +925,7 @@ async fn work(kiwi: Arc<Kiwi>, job: Job, token: CancellationToken) {
         job.status = status.into();
         job.stage = stage.into();
         job.error = error;
+        job.error_kind = kind.map(str::to_owned);
         job.finished_at = Some(Utc::now());
         if status == "failed"
             && let Some(key) = job.recipe_key.clone()
@@ -820,7 +954,8 @@ async fn work(kiwi: Arc<Kiwi>, job: Job, token: CancellationToken) {
     start_next(&kiwi);
 }
 
-type Failure = (String, bool);
+/// A failed build: the message, and whether it needs the owner's attention.
+pub type Failure = (String, bool);
 fn failed(e: impl std::fmt::Display) -> Failure {
     (e.to_string(), false)
 }
@@ -877,11 +1012,18 @@ async fn runner(
         },
         timeout: Duration::from_secs(if command == "plan" { 600 } else { 7200 }),
     };
-    invoke(kiwi, call, request, token, |stage| {
-        kiwi.automation
-            .job(&kiwi.db, &job.id, |j| j.stage = stage.into())
-            .map_err(failed)
-    })
+    invoke(
+        kiwi,
+        call,
+        request,
+        token,
+        |stage| {
+            kiwi.automation
+                .job(&kiwi.db, &job.id, |j| j.stage = stage.into())
+                .map_err(failed)
+        },
+        |_| Ok(()),
+    )
     .await
 }
 
@@ -898,13 +1040,16 @@ pub(crate) struct Invocation<'a> {
 }
 
 /// Runs a builder script with `request` and returns its `plan`, `artifact` and `kiwi_app`
-/// events; `on_stage` receives its progress. The request file is removed afterwards.
+/// events; `on_stage` receives its progress, `on_event` its `community` events as they
+/// arrive and its `error` event (for fields beyond the message). The request file is
+/// removed afterwards.
 pub(crate) async fn invoke(
     kiwi: &Kiwi,
     call: Invocation<'_>,
     request: &Value,
     token: &CancellationToken,
     on_stage: impl FnMut(&str) -> Result<(), Failure>,
+    on_event: impl FnMut(&Value) -> Result<(), Failure>,
 ) -> Result<Vec<Value>, Failure> {
     let path = kiwi
         .config
@@ -914,7 +1059,7 @@ pub(crate) async fn invoke(
     tokio::fs::write(&path, serde_json::to_vec(request).map_err(failed)?)
         .await
         .map_err(failed)?;
-    let result = invoke_with(kiwi, &call, &path, token, on_stage).await;
+    let result = invoke_with(kiwi, &call, &path, token, on_stage, on_event).await;
     let _ = tokio::fs::remove_file(&path).await;
     result
 }
@@ -925,6 +1070,7 @@ async fn invoke_with(
     request: &std::path::Path,
     token: &CancellationToken,
     mut on_stage: impl FnMut(&str) -> Result<(), Failure>,
+    mut on_event: impl FnMut(&Value) -> Result<(), Failure>,
 ) -> Result<Vec<Value>, Failure> {
     let builder = call.builder;
     let python = &kiwi.config.python;
@@ -991,7 +1137,9 @@ async fn invoke_with(
                         })
                         .map_err(failed)?;
                 }
+                Some("community") => on_event(&event)?,
                 Some("error") => {
+                    let _ = on_event(&event);
                     runner_error = Some((
                         event["message"]
                             .as_str()
@@ -1029,14 +1177,14 @@ async fn invoke_with(
     Ok(events)
 }
 
-/// The newest release of a recipe's app in the published source.
-fn published_release(kiwi: &Kiwi, recipe: &Recipe) -> Option<Release> {
+/// The newest release of the app with `bundle_id` in the published source.
+pub(crate) fn published_release(kiwi: &Kiwi, bundle_id: &str) -> Option<Release> {
     kiwi.catalog.source(SOURCE_ID).and_then(|s| {
         s.source
             .catalog
             .apps
             .iter()
-            .find(|a| a.bundle_id == recipe.bundle_id)
+            .find(|a| a.bundle_id == bundle_id)
             .and_then(|a| a.releases.first().cloned())
     })
 }
@@ -1087,7 +1235,7 @@ async fn execute(
         .unwrap_or_default();
     if !job.force
         && app.last_success_key.as_deref() == Some(key)
-        && published_release(kiwi, recipe).is_some()
+        && published_release(kiwi, &recipe.bundle_id).is_some()
     {
         return Ok(false);
     }
@@ -1107,7 +1255,11 @@ async fn execute(
         .find(|e| e["event"] == "artifact")
         .ok_or_else(|| failed("The builder returned no patched app"))?;
     let release = validate_artifact(kiwi, recipe, artifact, version, job.sequence, token).await?;
-    let update = (recipe, preferences.name.as_deref(), release.clone());
+    let update = Update {
+        id: recipe.id.clone(),
+        name: Some(recipe.catalog_name(preferences.name.as_deref())),
+        release: release.clone(),
+    };
     let row = source_row(kiwi, Some(update.clone()))
         .map_err(failed)?
         .ok_or_else(|| failed(format!("{} is no longer in Kiwi Builds", recipe.name)))?;
@@ -1397,36 +1549,104 @@ fn store_icon(kiwi: &Kiwi, bundle_id: &str) -> Option<String> {
         .and_then(|a| a.icon_url)
 }
 
-/// A new release of one app, with the Home Screen name it was built with.
-type Update<'a> = (&'a Recipe, Option<&'a str>, Release);
+/// A new release of one app (by its id in Kiwi Builds), with the name it was built with.
+#[derive(Clone)]
+pub(crate) struct Update {
+    id: String,
+    name: Option<String>,
+    release: Release,
+}
 
-/// The Kiwi Builds source: every added app with its retained releases, plus `update`.
-/// `None` when nothing was ever published.
-fn source_row(kiwi: &Kiwi, update: Option<Update<'_>>) -> ApiResult<Option<SourceRow>> {
-    let now = Utc::now();
-    let old = kiwi.catalog.source(SOURCE_ID);
-    let state = kiwi.automation.snapshot();
-    let mut apps = Vec::new();
+/// One app of the Kiwi Builds source, before its releases.
+struct Listing {
+    id: String,
+    bundle_id: String,
+    /// Its name unless an update or the published source names it.
+    name: String,
+    /// Community apps always show the community list's name.
+    fixed_name: bool,
+    retain: usize,
+    icon: Option<String>,
+    details: Value,
+}
+
+/// Every added app the source lists: recipes' apps, then community apps with a pinned
+/// build.
+fn listings(kiwi: &Kiwi, state: &State) -> Vec<Listing> {
+    let mut out = Vec::new();
     for recipe in recipes() {
         if !state.apps.get(&recipe.id).is_some_and(|a| a.added) {
             continue;
         }
+        let c = &recipe.catalog;
+        out.push(Listing {
+            id: recipe.id.clone(),
+            bundle_id: recipe.bundle_id.clone(),
+            name: recipe.catalog_name(None),
+            fixed_name: false,
+            retain: recipe.retain,
+            icon: store_icon(kiwi, recipe.icon_id()),
+            details: json!({"developer": c.developer, "subtitle": c.subtitle,
+                "description": c.description, "tint_color": c.tint_color, "category": c.category}),
+        });
+    }
+    for (id, added) in &state.community {
+        let Some(pins) = &added.pins else {
+            continue;
+        };
+        if !state.apps.get(id).is_some_and(|a| a.added) {
+            continue;
+        }
+        out.push(Listing {
+            id: id.clone(),
+            bundle_id: pins.output_package.clone(),
+            name: added.name.clone(),
+            fixed_name: true,
+            retain: crate::community::RETAIN,
+            icon: added.icon_url.clone(),
+            details: json!({
+                "developer": format!("{} · community", pins.author),
+                "subtitle": "Community · not reviewed",
+                "description": format!(
+                    "Built privately from the original Google Play app with the default patches of \
+                     {} {}, a community bundle Kiwi hasn't reviewed, then signed with this Kiwi's \
+                     own key.", pins.repo, pins.tag),
+                "tint_color": "#5B6770",
+                "category": added.category.clone().unwrap_or_else(|| "other".into()),
+            }),
+        });
+    }
+    out
+}
+
+/// The Kiwi Builds source: every added app with its retained releases, plus `update`.
+/// `None` when nothing was ever published.
+fn source_row(kiwi: &Kiwi, update: Option<Update>) -> ApiResult<Option<SourceRow>> {
+    let now = Utc::now();
+    let old = kiwi.catalog.source(SOURCE_ID);
+    let state = kiwi.automation.snapshot();
+    let mut apps = Vec::new();
+    for listing in listings(kiwi, &state) {
         let previous = old.as_ref().and_then(|s| {
             s.source
                 .catalog
                 .apps
                 .iter()
-                .find(|a| a.bundle_id == recipe.bundle_id)
+                .find(|a| a.bundle_id == listing.bundle_id)
         });
         let mut releases = Vec::new();
-        let mut name = previous.map(|a| a.name.clone());
-        if let Some((updated, chosen, release)) = &update
-            && updated.id == recipe.id
+        let mut name = previous
+            .map(|a| a.name.clone())
+            .filter(|_| !listing.fixed_name);
+        if let Some(update) = &update
+            && update.id == listing.id
         {
-            releases.push(release.clone());
-            name = Some(recipe.catalog_name(*chosen));
+            releases.push(update.release.clone());
+            if !listing.fixed_name {
+                name = update.name.clone().or(name);
+            }
         }
-        let kept = recipe.retain.saturating_sub(releases.len());
+        let kept = listing.retain.saturating_sub(releases.len());
         releases.extend(
             previous
                 .into_iter()
@@ -1435,14 +1655,17 @@ fn source_row(kiwi: &Kiwi, update: Option<Update<'_>>) -> ApiResult<Option<Sourc
         if releases.is_empty() {
             continue;
         }
-        let icon = store_icon(kiwi, recipe.icon_id())
+        let icon = listing
+            .icon
             .or_else(|| previous.and_then(|a| a.icon_url.as_ref().map(Url::to_string)));
-        let c = &recipe.catalog;
-        apps.push(json!({
-            "name": name.unwrap_or_else(|| recipe.catalog_name(None)), "bundle_id": recipe.bundle_id,
-            "developer": c.developer, "subtitle": c.subtitle, "description": c.description,
-            "tint_color": c.tint_color, "category": c.category, "icon_url": icon, "releases": releases,
-        }));
+        let mut app = json!({
+            "name": name.unwrap_or(listing.name), "bundle_id": listing.bundle_id,
+            "icon_url": icon, "releases": releases,
+        });
+        if let (Some(app), Some(details)) = (app.as_object_mut(), listing.details.as_object()) {
+            app.extend(details.clone());
+        }
+        apps.push(app);
     }
     if apps.is_empty() && old.is_none() {
         return Ok(None);
@@ -1484,17 +1707,112 @@ pub fn retire(kiwi: &Kiwi) -> ApiResult<()> {
     let Some(old) = kiwi.catalog.source(SOURCE_ID) else {
         return Ok(());
     };
-    let retired = old
+    let state = kiwi.automation.snapshot();
+    let community: HashSet<&str> = state
+        .community
+        .values()
+        .filter_map(|c| c.pins.as_ref().map(|p| p.output_package.as_str()))
+        .collect();
+    let retired = old.source.catalog.apps.iter().any(|a| {
+        !recipes().iter().any(|r| r.bundle_id == a.bundle_id)
+            && !community.contains(a.bundle_id.as_str())
+    });
+    if retired { publish(kiwi, None) } else { Ok(()) }
+}
+
+/// The release a community build's artifact event describes, after its digest checked out.
+pub(crate) async fn community_release(
+    kiwi: &Kiwi,
+    artifact: &Value,
+    sequence: u64,
+    token: &CancellationToken,
+) -> Result<Release, Failure> {
+    let sha = artifact["sha256"]
+        .as_str()
+        .filter(|s| valid_sha(s))
+        .ok_or_else(|| failed("Invalid artifact SHA-256"))?;
+    let version = artifact["version"]
+        .as_str()
+        .filter(|v| !v.is_empty() && v.len() <= 100)
+        .ok_or_else(|| failed("Missing patched version"))?;
+    let build = artifact["build"]
+        .as_str()
+        .filter(|b| !b.is_empty() && b.len() <= 20 && b.bytes().all(|c| c.is_ascii_digit()))
+        .ok_or_else(|| failed("Missing patched version code"))?;
+    if !artifact["min_os"].is_null() {
+        return Err(failed("Android builds declare no minimum OS version"));
+    }
+    let release = Release {
+        version: version.into(),
+        build: Some(build.into()),
+        revision: Some(
+            artifact["revision"]
+                .as_u64()
+                .filter(|r| *r == sequence)
+                .ok_or_else(|| failed("Patched revision does not match the job"))?,
+        ),
+        date: Some(Utc::now().to_rfc3339()),
+        notes: artifact["notes"]
+            .as_str()
+            .map(|n| n.chars().take(4000).collect()),
+        download_url: Url::parse(&format!("https://kiwi.invalid/automation/{sha}.apk")).unwrap(),
+        size: artifact["size"].as_u64(),
+        sha256: Some(sha.into()),
+        min_os: None,
+        max_os: None,
+        platforms: vec!["Android".into()],
+    };
+    restore_artifact(kiwi, &release, token)
+        .await
+        .map_err(failed)?;
+    Ok(release)
+}
+
+/// Adds a community app's new release to the Kiwi Builds source (its pins already name its
+/// package) and prepares it for installs.
+pub(crate) async fn publish_community(
+    kiwi: &Arc<Kiwi>,
+    id: &str,
+    release: Release,
+    token: &CancellationToken,
+) -> Result<(), Failure> {
+    let update = Update {
+        id: id.into(),
+        name: None,
+        release,
+    };
+    let bundle_id = kiwi
+        .automation
+        .snapshot()
+        .community
+        .get(id)
+        .and_then(|c| c.pins.as_ref().map(|p| p.output_package.clone()))
+        .ok_or_else(|| failed("This community app is no longer in Kiwi Builds"))?;
+    let row = source_row(kiwi, Some(update.clone()))
+        .map_err(failed)?
+        .ok_or_else(|| failed("This community app is no longer in Kiwi Builds"))?;
+    let index = row
         .source
         .catalog
         .apps
         .iter()
-        .any(|a| !recipes().iter().any(|r| r.bundle_id == a.bundle_id));
-    if retired { publish(kiwi, None) } else { Ok(()) }
+        .position(|a| a.bundle_id == bundle_id)
+        .ok_or_else(|| failed("This community app is no longer in Kiwi Builds"))?;
+    let candidate = CatalogApp {
+        source: Arc::new(row),
+        index,
+    };
+    builds::prepare_release(kiwi, &candidate, 0)
+        .await
+        .map_err(failed)?;
+    if token.is_cancelled() {
+        return Err(failed("Cancelled"));
+    }
+    publish(kiwi, Some(update)).map_err(failed)
 }
 
 /// Saves and shows the Kiwi Builds source with `update` applied.
-fn publish(kiwi: &Kiwi, update: Option<Update<'_>>) -> ApiResult<()> {
+fn publish(kiwi: &Kiwi, update: Option<Update>) -> ApiResult<()> {
     if let Some(row) = source_row(kiwi, update)? {
         kiwi.db.save_source(&row)?;
         crate::sources::record_apps(kiwi, &row);
@@ -1558,6 +1876,8 @@ mod tests {
             preferences: None,
             force: false,
             interactive,
+            error_kind: None,
+            community: None,
         }
     }
 
@@ -1642,6 +1962,8 @@ mod tests {
             preferences: None,
             force: false,
             interactive: false,
+            error_kind: None,
+            community: None,
         };
         automation
             .change(&db, |s| {

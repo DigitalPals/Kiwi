@@ -67,6 +67,8 @@ SESSION_SECONDS = 1800
 # The JVM options of every tool Kiwi runs: no shared-memory statistics in /tmp, no attach socket.
 JVM = ("-XX:-UsePerfData", "-XX:+DisableAttachMechanism")
 MAX_RESULT = 16 * 1024**2
+# Each file Play delivers is tried this often, with a growing pause between tries.
+DOWNLOAD_ATTEMPTS, RETRY_SECONDS = 3, 5
 # hashlib.file_digest (3.11) and tarfile's extraction filters (3.12).
 MIN_PYTHON = (3, 12)
 
@@ -334,7 +336,17 @@ class Play:
         files = []
         for name, link, size in wanted:
             path = target / f"{name}.apk"
-            download(link, path, limit=size + 1024 if isinstance(size, int) and 0 < size < MAX_APK else MAX_APK)
+            limit = size + 1024 if isinstance(size, int) and 0 < size < MAX_APK else MAX_APK
+            # Each file is retried on its own: an app can have 80 splits, and one failed
+            # download shouldn't fetch them all again.
+            for attempt in range(DOWNLOAD_ATTEMPTS):
+                try:
+                    download(link, path, limit=limit)
+                    break
+                except SourceError:
+                    if attempt == DOWNLOAD_ATTEMPTS - 1:
+                        raise
+                    time.sleep(RETRY_SECONDS * (attempt + 1))
             files.append(path)
         return files
 
@@ -933,7 +945,7 @@ def run_kiwi_app(builder, android, request):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["plan", "build", "kiwi-app"])
+    parser.add_argument("command", choices=["plan", "build", "kiwi-app", "community"])
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--request")
     parser.add_argument("--job-id")
@@ -960,12 +972,12 @@ def main():
     if args.command == "kiwi-app":
         run_kiwi_app(builder, android, request if isinstance(request, dict) else {})
         return
-    app = android.app(args.recipe or "")
     if args.command == "plan":
-        android.plan(app, request)
+        android.plan(android.app(args.recipe or ""), request)
         return
     if not args.job_id or not re.fullmatch(r"[0-9a-f]{24}", args.job_id):
         raise BuildError("Invalid build job identifier")
+    app = android.app(args.recipe or "") if args.command == "build" else None
     job_dir = builder.tools / "jobs" / args.job_id
     job_dir.mkdir(mode=0o700, exist_ok=True)
     log_dir = builder.root / "jobs" / args.job_id
@@ -975,7 +987,12 @@ def main():
     try:
         with open(log_dir / "build.log", "ab") as log:
             builder.log = log
-            android.build(app, request["plan"], request["sequence"], job_dir)
+            if args.command == "community":
+                # Community bundles: community.py, which requires the sandbox throughout.
+                import community
+                community.run(builder, request, job_dir)
+            else:
+                android.build(app, request["plan"], request["sequence"], job_dir)
     finally:
         sandbox.kill_strays()
         # Only the private log, the verified original cache and the artifact remain.
@@ -991,7 +1008,8 @@ if __name__ == "__main__":
         require_python()
         main()
     except BuildError as error:
-        emit("error", message=str(error), blocked=error.blocked)
+        kind = getattr(error, "kind", None)
+        emit("error", message=str(error), blocked=error.blocked, **({"kind": kind} if kind else {}))
         sys.exit(1)
     except Exception:
         emit("error", message="The builder encountered an unexpected error; inspect the private build log.", blocked=False)

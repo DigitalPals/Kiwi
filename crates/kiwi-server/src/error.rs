@@ -57,6 +57,11 @@ impl ApiError {
              Builds builds Android apps here.",
         )
     }
+    /// Community builds can't run on this Kiwi (macOS, no sandbox, or no community list
+    /// yet); `message` says why.
+    pub fn community_unavailable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "community_unavailable", message)
+    }
     pub fn signing_unavailable(message: impl Into<String>) -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,

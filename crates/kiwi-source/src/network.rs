@@ -459,7 +459,40 @@ impl SourceClient {
         }
         limited_body(response, max, cancel, stage).await
     }
+    /// A large JSON document (such as a catalog index) of at most `max` bytes, fetched
+    /// conditionally: `None` when it has not changed since `validators` (ETag,
+    /// Last-Modified). The caller parses and validates the bytes.
+    pub async fn json_document(
+        &self,
+        url: &Url,
+        max: u64,
+        validators: (Option<String>, Option<String>),
+        cancel: &CancellationToken,
+    ) -> Result<Option<JsonDocument>> {
+        let Some(fetched) = self.get(url, Some(validators), cancel).await? else {
+            return Ok(None);
+        };
+        if is_html(&fetched) {
+            return Err(Error::new("Source fetch", "Expected JSON, got a web page"));
+        }
+        let bytes = limited_body(fetched.response, max, cancel, "Source fetch").await?;
+        Ok(Some(JsonDocument {
+            bytes,
+            etag: fetched.etag,
+            last_modified: fetched.last_modified,
+        }))
+    }
 }
+
+/// A document [`SourceClient::json_document`] fetched, with the validators for the next
+/// conditional request.
+#[derive(Debug, Clone)]
+pub struct JsonDocument {
+    pub bytes: Vec<u8>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
 /// A successful `GET`, with the validators for the next conditional one.
 pub(crate) struct Fetched {
     response: reqwest::Response,

@@ -39,8 +39,8 @@ class BuildError(Exception):
         self.blocked = blocked
 
 
-def emit(kind, **data):
-    print(json.dumps({"event": kind, **data}, sort_keys=True), flush=True)
+def emit(event, /, **data):
+    print(json.dumps({"event": event, **data}, sort_keys=True), flush=True)
 
 
 def digest(path):

@@ -7,7 +7,8 @@ RFC 3339 strings in UTC. All `/api` responses are `application/json` with
 ## Conventions
 
 - Mutating requests (`POST`, `PUT`, `PATCH`, `DELETE`) must send `X-Kiwi: 1`; requests with
-  a body must send `Content-Type: application/json`. Otherwise `403 csrf`. The web app
+  a body must send `Content-Type: application/json` (except a Mac builder's artifact upload,
+  see "Mac builder"). Otherwise `403 csrf`. The web app
   sends `{}` for POST/PATCH without parameters and no body for DELETE (it still sends
   both headers); the server accepts empty and `{}` bodies alike.
 - Errors: HTTP 4xx/5xx with `{ "error": { "code": string, "message": string } }`.
@@ -17,7 +18,11 @@ RFC 3339 strings in UTC. All `/api` responses are `application/json` with
   `not_owner` (403, the device belongs to someone other than the owner, or the request was
   made on the computer Kiwi runs on, not on a Mac, without Tailscale), `builds_off` (409,
   Kiwi Builds is turned off in Settings), `needs_mac` (409, an iOS app in Kiwi Builds on a
-  Kiwi that doesn't run on macOS), `internal`.
+  Kiwi that doesn't run on macOS and has no Mac builder), `builder_unsupported` (409, Mac
+  builder routes on a Kiwi that runs on macOS), `builder_unpaired` (401, a Mac builder's
+  token is unknown or revoked), `bad_code` (400, a wrong or expired pairing code),
+  `rate_limited` (429, too many wrong pairing codes), `task_gone` (410, a Mac builder's task
+  Kiwi no longer has), `internal`.
 - Every request (`/api`, `/ota` and the web app) must be addressed to the public URL's
   host (`Host`, as `tailscale serve` forwards it) or to the listen address
   (`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`); an `X-Forwarded-Host`, when
@@ -66,9 +71,14 @@ source. A Kiwi that had added apps before this setting existed keeps it on.
 `GET /api/automation` returns `{apps, checks}`: every app's state (as below, with only its
 newest 3 `jobs`) in display order, and the shared Mac setup `checks` (`{name,ready}[]`).
 
-iOS apps are built only on a Mac. On a Kiwi that doesn't run on macOS, `checks` is always
-`[{"name":"macOS","ready":false}]`, `POST .../add` and `POST .../check` of an iOS app answer
-`409 needs_mac`, and added iOS apps are not scheduled. Android apps build everywhere.
+iOS apps are built only on a Mac: the one Kiwi runs on, or a paired [Mac
+builder](#mac-builder). On a Kiwi that doesn't run on macOS and has no Mac builder,
+`checks` is always `[{"name":"macOS","ready":false}]`, `POST .../add` and `POST .../check`
+of an iOS app answer `409 needs_mac` (its message points to Settings › Mac builder), and
+added iOS apps are not scheduled. With a Mac builder paired, iOS apps are added, checked and
+scheduled as on a Mac, and `checks` starts with `{"name":"Mac builder","ready":…}` (ready
+while the builder is online and runs this Kiwi's runner), followed by the checks the Mac's
+runner last reported. Android apps build everywhere.
 
 `GET /api/automation/:app` returns one app's state with up to 30 `jobs`, newest first:
 
@@ -92,7 +102,8 @@ iOS apps are built only on a Mac. On a Kiwi that doesn't run on macOS, `checks` 
 - `configuration_changed`: true when saved patch choices or the app name differ from the
   published build. Schedule changes alone never require rebuilding.
 - `next_check_at`: scheduled UTC time, or null when not added, disabled, a job is active or
-  the app can't be built here (an iOS app on a Kiwi that doesn't run on macOS).
+  the app can't be built here (an iOS app on a Kiwi that doesn't run on macOS and has no
+  Mac builder).
 - `checks`: the shared Mac setup checks. They concern iOS builds only: an Android job
   never changes them and is never blocked by them.
 
@@ -124,7 +135,9 @@ running one completes asynchronously and preserves the published release.
 One job runs at a time. Jobs someone asked for (`POST .../add` and `POST .../check`) start
 before jobs the schedule queued: the worker takes the oldest queued `interactive` job, else
 the oldest scheduled one (signing Kiwi's own Android app, which takes seconds, still goes
-first). Job statuses are `queued` (waiting for another job; its `stage` names the job that
+first). With a Mac builder, iOS jobs don't start while it is offline (stage `Waiting for
+<Mac name>`) or runs another runner (`Waiting for an update of Kiwi on <Mac name>`): the
+jobs behind them start instead, and they start once the builder can take them. Job statuses are `queued` (waiting for another job; its `stage` names the job that
 was running when it was queued), `running`, `ready`, `unchanged`, `blocked`, `failed` or `cancelled`. Each
 job has `id`, `app`, `sequence`, `stage`, `created_at`, nullable `finished_at`, `version`,
 `external_id`, `recipe_key`, `signed_build_id`, a bounded user-facing `error`, and the
@@ -337,6 +350,8 @@ interface Me {
     devicectl: boolean;             // devicectl is available (as server.devicectl_available)
     android_signer_sha256: string | null; // SHA-256 (hex) of the certificate of the key Kiwi signs
                                     // Android apps with; null until Kiwi Builds has loaded it
+    builds_ios: boolean;            // Kiwi Builds can build iOS apps: on macOS, or with a paired
+                                    // Mac builder (also while it is offline)
   };
   features: Feature[];              // what to show on this device
   android_app: AndroidApp | null;   // Kiwi's Android app, when this Kiwi serves it
@@ -638,6 +653,100 @@ and while the installer keeps using it (within the last hour) up to 48 hours. On
 replaced token that still worked keeps leading to its build for 2 hours (until Kiwi
 restarts), so a page or app that still shows it, and a download that started with it, go
 on working; an expired one stays expired.
+
+## Mac builder
+
+A Kiwi that doesn't run on macOS builds iOS apps on a paired Mac: the Mac builder (`kiwi
+builder run`, installed with `./install.sh --builder`; [kiwi-builds.md](kiwi-builds.md#mac-builder)).
+The Mac connects out to Kiwi and asks for work; Kiwi hands it the iOS runner's `plan`,
+`build` and `doctor` calls as tasks, never code. One builder per Kiwi: pairing another
+replaces it. A Kiwi on macOS builds iOS apps itself: there, every route below answers `409
+builder_unsupported` ("This Kiwi runs on a Mac and builds iOS apps itself.") except `GET`,
+which reports `supported: false`.
+
+### Settings (owner)
+
+These follow the usual owner and CSRF rules.
+
+`GET /api/builder`:
+
+```json
+{"supported": true,
+ "reason": null,
+ "builder": {
+   "name": "Mac Studio", "paired_at": "2026-11-11T09:00:00Z", "last_seen": "2026-11-11T10:02:11Z",
+   "online": true, "compatible": true,
+   "version": "0.2.0", "os": "macOS 26.1 (arm64)",
+   "checks": [{"name": "Mac builder", "ready": true}, {"name": "Mac build tools", "ready": true}],
+   "task": {"job": "<job id>", "app": "youtube", "name": "YouTube", "command": "build",
+            "stage": "Decrypting YouTube", "started_at": "2026-11-11T10:01:30Z"}
+ },
+ "pairing": {"code": "K7QF-9XMD-2PLA", "expires_at": "2026-11-11T10:12:00Z",
+             "command": "./install.sh --builder --server https://kiwi.example.ts.net --pair K7QF-9XMD-2PLA"}}
+```
+
+- `builder` is null while none is paired. `online`: it called within the last 60 s.
+  `compatible`: its runner.py and recipes.json are this Kiwi's (same SHA-256); otherwise iOS
+  jobs wait and Settings should say "Kiwi on <name> is a different version. On the Mac: `git
+  pull && ./install.sh --builder`." `last_seen` may be null after a restart until it calls.
+  `checks` is `GET /api/automation`'s. `task` is the build job it works on (`app` is the
+  recipe id, `command` `plan` or `build`, `stage` the job's), or null; health checks are not
+  shown.
+- `pairing` is the unused code, or null. `command` uses Kiwi's public URL.
+
+| Method | Path | Response |
+|---|---|---|
+| POST | `/api/builder/pairing` | `201 {code, expires_at, command}`: a one-time code of 12 characters from `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` (60 bits), shown as `XXXX-XXXX-XXXX`, valid 10 minutes; replaces an unused code |
+| DELETE | `/api/builder/pairing` | `204`: withdraws the code |
+| DELETE | `/api/builder` | `204`: unpairs (revokes the token, ends its task as a failed, retryable job and cancels queued iOS jobs); `404` when none is paired |
+| POST | `/api/builder/check` | `202`: the builder runs `doctor` at its next poll (while Kiwi Builds is on); `409 conflict` when none is paired |
+
+### The builder's routes
+
+The builder sends `X-Kiwi: 1` and, except to pair, `Authorization: Bearer <token>`; an
+unknown or revoked token is `401 builder_unpaired`. Each request must also pass Kiwi's
+identity rule: through `tailscale serve` from a device of the owner's Tailscale user (not
+this computer's own node), or on the computer itself where it counts as the owner's (a Mac,
+or `--trust-local`; this covers an SSH tunnel to the loopback port); otherwise `403
+not_owner`. The builder is not a device: it never appears in `/api/devices`. These routes
+work while Kiwi Builds is off (there is no work then).
+
+- `POST /api/builder/pair` `{"code","name","version","os","runner_sha256","recipes_sha256"}`
+  (the code in any case, with or without dashes; `name` up to 64 characters) → `201
+  {"token","kiwi","name"}`. `token` is 32 random bytes, base64url (43 characters); Kiwi keeps
+  only its SHA-256. A wrong or expired code is `400 bad_code`; after 5 wrong codes in 10
+  minutes every attempt is `429 rate_limited` until the window passes.
+- `POST /api/builder/poll` `{"version","os","runner_sha256","recipes_sha256","name"}` →
+  waits up to 25 s, then `200 {"task": Task}` or `204`. Records `last_seen` and what the
+  builder reports. A poll means the builder runs no task: a task it had taken fails as lost.
+  `Task = {"id": "<24 hex>", "command": "plan"|"build"|"doctor", "recipe": "youtube"|null,
+  "request": {...}, "deadline": "<RFC 3339>"}`. For `plan` and `build`, `id` is the job's id
+  (the runner's `--job-id`) and `request` is the runner's request file. A `doctor` task (no
+  recipe, `request` `{}`) comes when the builder connects, every 6 hours and after `POST
+  /api/builder/check`, while Kiwi Builds is on and the builder is compatible.
+- `POST /api/builder/tasks/:id/events` `{"events": [<runner events, verbatim>]}` (at most 3
+  MiB per request) → `200 {"cancel": bool}`. An empty list is a heartbeat; send one at least
+  every 30 s while a task runs. Kiwi checks the events as it checks a local runner's: known
+  event names only, `stage` at most 256 bytes, `health` updates `checks`, at most 2 MiB of
+  events per task. An invalid event fails the job and answers `cancel: true`, as does a job
+  that was cancelled (by the owner, by turning Kiwi Builds off or removing the app).
+- `PUT /api/builder/tasks/:id/artifact?sha256=<64 hex>`: the body is the IPA
+  (`Content-Type: application/octet-stream`, `Content-Length` required, at most 4 GiB). Kiwi
+  streams it into `automation/`, hashes it and moves it to `automation/artifacts/<sha256>.ipa`
+  → `204`; `400` when it doesn't match the digest (nothing is kept). Only after the `artifact`
+  event with that digest, in a `build` task (else `409`).
+- `POST /api/builder/tasks/:id/finish` `{"status": "ok"|"failed"|"cancelled", "error":
+  null|string, "provenance": null|object}` → `204`. `ok` for a build needs the upload first
+  (`409`); `provenance` (its `sha256` must be the upload's, else `400`) is written to
+  `automation/artifacts/<sha256>.json`. The job then goes on as after a local run (an
+  `error` event's message wins over `error`; `cancelled` the builder chose itself fails the
+  job as retryable).
+
+A task is gone (`410 task_gone` for its events, upload and finish) once it finished, after
+Kiwi restarted, when its job was cancelled (events answer `cancel: true` first), and when
+the builder made no call for it for 120 s: Kiwi then fails the job, retryable ("Lost
+contact with <name> during the build."), without counting it against the recipe. Kiwi
+enforces the usual deadlines (plan 10 minutes, build 2 hours).
 
 ## Device platforms
 

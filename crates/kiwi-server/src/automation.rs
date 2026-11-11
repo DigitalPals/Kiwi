@@ -1295,7 +1295,14 @@ pub fn valid_sha(value: &str) -> bool {
 /// Retained catalogue/install inputs survive cache eviction. Only unreferenced,
 /// recognizably owned files age out, and never while a candidate is being built.
 pub async fn cleanup(kiwi: &Kiwi) -> ApiResult<()> {
-    if kiwi.automation.snapshot().jobs.iter().any(Job::active) {
+    // Queued jobs have nothing on disk yet (and may wait days for a Mac builder).
+    if kiwi
+        .automation
+        .snapshot()
+        .jobs
+        .iter()
+        .any(|j| j.active() && j.status != "queued")
+    {
         return Ok(());
     }
     let mut keep: HashSet<String> = HashSet::new();

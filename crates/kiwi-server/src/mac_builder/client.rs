@@ -579,6 +579,7 @@ impl Builder {
     /// can't be reached or refuses.
     pub async fn run(&self, stop: &CancellationToken) {
         let mut backoff = Duration::from_secs(1);
+        tidy(&self.data_dir).await;
         while !stop.is_cancelled() {
             let mut body = serde_json::to_value(&self.hello).unwrap_or_default();
             body["name"] = json!(self.name);
@@ -662,6 +663,7 @@ impl Builder {
             }
         }
         tracing::info!("task {}: {outcome}", task.id);
+        tidy(&self.data_dir).await;
     }
 
     async fn execute_task(
@@ -913,6 +915,49 @@ impl Builder {
             }
         }
     }
+}
+
+/// Removes what tasks leave behind on the Mac: build logs (`automation/jobs/<id>`) after 30
+/// days, artifacts a crash kept (`automation/artifacts`) after a day. The toolchain's job
+/// folders are shared with a Kiwi on the same Mac and left to the runner.
+async fn tidy(data: &Path) {
+    let root = data.join("automation");
+    let _ = tokio::task::spawn_blocking(move || {
+        let old = |path: &Path, days: u64| {
+            path.symlink_metadata()
+                .ok()
+                .filter(|m| !m.file_type().is_symlink())
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > Duration::from_secs(days * 86400))
+        };
+        for entry in std::fs::read_dir(root.join("jobs"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.len() == 24
+                && name.bytes().all(|b| b.is_ascii_hexdigit())
+                && old(&entry.path(), 30)
+            {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+        for entry in std::fs::read_dir(root.join("artifacts"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let path = entry.path();
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if valid_sha(stem) && old(&path, 1) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    })
+    .await;
 }
 
 async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

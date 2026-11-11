@@ -39,4 +39,32 @@ could do with it. You'll get an answer within a week.
   there is no sandbox. See
   [How the patcher is contained](docs/kiwi-builds.md#how-the-patcher-is-contained).
 
+### The Mac builder
+
+A Kiwi on Linux or in Docker builds iOS apps on a paired Mac
+([Mac builder](docs/kiwi-builds.md#mac-builder)). What each side trusts:
+
+- **The Mac connects out.** The builder opens no port; it calls Kiwi's Tailscale HTTPS
+  address, verifying the certificate with the system's roots (plain HTTP only to a loopback
+  address, for an SSH tunnel), and follows no redirects. Kiwi gets no shell or other access
+  to the Mac.
+- **The builder runs only its own code.** It runs the `runner.py` and `recipes.json` built
+  into its own `kiwi` program, never code or commands from Kiwi. A task names a command
+  (`plan`, `build` or `doctor`; never `setup` or `enroll`), one of the builder's own iOS
+  recipes and a JSON request; anything else is refused. A Kiwi taken over could make the Mac
+  build the apps of its recipes with your Apple account, nothing more.
+- **Pairing needs the owner and a one-time code.** The code is made in Settings by the
+  owner, has 60 bits, works once for 10 minutes, and five wrong codes in 10 minutes block
+  pairing. The builder's token (256 bits) is stored on the Mac in a 0600 file; Kiwi keeps
+  only its SHA-256. Pairing another Mac or removing it in Settings revokes the token.
+- **A token alone is not enough.** Every builder request also needs `X-Kiwi: 1` and must
+  pass Kiwi's identity rule: through `tailscale serve` from a device of the owner's
+  Tailscale user, not Kiwi's own computer (or, only with `--trust-local`, a connection on
+  Kiwi's computer). A leaked token is useless outside the owner's tailnet devices.
+- **Kiwi doesn't trust what the Mac sends.** Events are checked as a local runner's are
+  (known events, bounded sizes); the IPA must match the SHA-256 the build announced, and
+  Kiwi then validates its bundle id, version and revision and signs it with its own
+  identity before anything is published. The Apple account, ipatool's session and the
+  decryption enrollment stay on the Mac; Kiwi's signing identity stays on Kiwi.
+
 See [the architecture](docs/architecture.md#security) for details.

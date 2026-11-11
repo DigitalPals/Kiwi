@@ -41,7 +41,8 @@ Kiwi also runs on Linux: as the system service `kiwi.service` under its own user
 `deploy/kiwi.service.in`; data in `/var/lib/kiwi`, program in `/opt/kiwi/app`), or in Docker
 (`Dockerfile`, `compose.yaml`) next to a Tailscale container whose network namespace and
 LocalAPI socket it shares. There is no keychain, `devicectl` or iOS build there; Kiwi Builds
-builds Android apps only (see "Kiwi Builds on Linux").
+builds Android apps there and iOS apps on a paired Mac builder (see "Kiwi Builds on Linux"
+and "Mac builder").
 
 ## Repository layout
 
@@ -52,15 +53,18 @@ crates/kiwi-signer      provisioning profiles, identities, IPA re-signing (codes
                         rcodesign's library elsewhere)
 crates/kiwi-device      devicectl wrapper, Tailscale (LocalAPI or CLI), user-agent parsing
 crates/kiwi-push        VAPID keys + Web Push (RFC 8030/8291/8292) sender
-crates/kiwi-server      axum HTTP server, SQLite state, jobs, scheduler; binary `kiwi`
+crates/kiwi-server      axum HTTP server, SQLite state, jobs, scheduler; binary `kiwi` (also
+                        the Mac builder: `kiwi builder run|pair`)
 web/                    Vite + Preact + TypeScript PWA (built to web/dist, served by kiwi-server)
 android/                native Android client (Kotlin, Jetpack Compose); see android/README.md
 automation/             Kiwi Builds: the build runners (Python), pinned app recipes and the pinned
                         release of Kiwi's Android app (kiwi-app.json)
 install.sh              installs or updates Kiwi on a Mac (build, LaunchAgent, tailscale serve)
-                        or on Linux (build, systemd service, tailscale serve)
+                        or on Linux (build, systemd service, tailscale serve); with --builder a
+                        Mac builder (build, pairing, LaunchAgent local.kiwi-builder)
 uninstall.sh            removes it again
-deploy/                 LaunchAgent, log rotation and systemd unit templates; deploy.sh deploys
+deploy/                 LaunchAgent (Kiwi's and the Mac builder's), log rotation and systemd unit
+                        templates; deploy.sh deploys
                         a checkout to a Mac from another machine over SSH
 Dockerfile, compose.yaml  the container image, and Kiwi with a Tailscale sidecar
 docs/                   this file, the HTTP API (api.md) and the guides
@@ -314,7 +318,10 @@ are allowed (`*.push.apple.com`, `fcm.googleapis.com`, `*.mozilla.com`,
   follow the Mac: the App Store country is the region of its locale (`AppleLocale`, else
   `us`). `kiwi_builds` is off unless the owner turns it on; a Kiwi whose Kiwi Builds state
   already had apps added keeps it on.
-- `meta`: also `owner_login` (the last owner Tailscale reported).
+- `meta`: also `owner_login` (the last owner Tailscale reported) and `mac_builder` (the paired
+  Mac builder: name, SHA-256 of its token, paired_at, last_seen (saved at most every 5
+  minutes), and the version, system and runner/recipes SHA-256 it reported; `null` after
+  unpairing). No schema change.
 - Schema 5 dropped the family's `people`, `app_access`, `registrations`, `enrollments` and
   `builds.devices`. Schema 6 added the device platform columns: detected_platform from the
   model (`Android`, `iPhone…`/`iPad…`/`iPod…`) or an iOS OS version source, and
@@ -477,12 +484,62 @@ kills whatever they leave running. Details are in
 ### Kiwi Builds on Linux
 
 The iOS runner needs macOS (Xcode's SDK, FairPlay decryption). `Automation::builds_ios` is
-true on macOS only (tests turn it on with a fake runner); without it, adding or checking an
-iOS recipe answers `409 needs_mac` without starting a runner, the scheduler skips iOS apps
-(an iOS app added on a Mac whose data moved to Linux waits), and the shared setup `checks`
-are a single `{"name":"macOS","ready":false}`. Android recipes build as on a Mac. Both
+true on macOS only (tests turn it on with a fake runner); elsewhere a paired Mac builder
+builds iOS apps (see "Mac builder"). Without either, adding or checking an iOS recipe
+answers `409 needs_mac` without starting a runner, the scheduler skips iOS apps (an iOS app
+added on a Mac whose data moved to Linux waits), and the shared setup `checks` are a single
+`{"name":"macOS","ready":false}`. Android recipes build as on a Mac. Both
 runners run with `--python`; the Android runner stops with a blocked error on Python older
 than 3.12.
+
+### Mac builder
+
+`mac_builder.rs` lets a Kiwi that doesn't run on macOS build iOS apps on a paired Mac
+([kiwi-builds.md](kiwi-builds.md#mac-builder), [api.md](api.md#mac-builder)); `MacBuilder`
+lives in `Automation` (`supported`: not on macOS; tests turn it on).
+
+- **The seam.** `automation::runner` is the one place an iOS runner call happens. Where
+  `Automation::builds_ios` is off (not a Mac), it calls `mac_builder::run_task` instead of a
+  local process: the call becomes a task (`plan`/`build` with the job's id, the recipe and the
+  request; deadlines 600 s / 7200 s as locally) that the builder takes with a long poll. The
+  builder runs its own embedded runner with the same arguments and forwards the event lines;
+  Kiwi applies them with `automation::process::Events`, the same checks and effects as a
+  local run (stage updates the job, `health` the shared `checks`, results collected, an
+  `error` event wins). A build's IPA is streamed into `automation/` while it is hashed, moved
+  to `automation/artifacts/<sha>.ipa` when it matches the `artifact` event's digest, and the
+  provenance written next to it; `finish` then completes the waiting call, so
+  `validate_artifact`, signing and publication continue unchanged. `automation/process.rs`
+  holds the process part too (`run`: process group, 2 MiB of events, deadline, SIGTERM then
+  SIGKILL), shared by the local path and the builder program.
+- **Availability.** `Automation::ios_buildable` (= `Me.host.builds_ios`): on a Mac, or with a
+  builder paired, also while it is offline. `ios_wait` tells why queued iOS jobs can't
+  start: no builder, offline (no call within 60 s), or another runner/recipes SHA-256 than
+  Kiwi's embedded copies. `start_next` then skips them, setting their stage, and starts the
+  jobs behind them; polls and the scheduler's minute (`mac_builder::tick`) start them once
+  the builder can take them. The `checks` get a first `{"name":"Mac builder","ready"}`
+  instead of `macOS`.
+- **Tasks** live in memory: a restart ends them (the builder's next call gets `410`, Kiwi
+  fails the job as interrupted). Cancelling the job marks the task; the builder hears it at
+  its next events call (`cancel: true`) or upload/finish (`410`) and stops its runner's
+  process group. A task without a call for 120 s is lost: the job fails, retryable
+  (`error_kind` `retry`, not counted towards the three-failure limit). A poll means the
+  builder runs nothing, so tasks it had taken are lost at once. Doctor tasks come when the
+  builder (re)connects, every 6 hours and on request, while Kiwi Builds is on.
+- **Pairing**: a one-time code in memory (12 of 32 characters, 10 minutes, 5 failures per
+  10 minutes), a 256-bit token whose SHA-256 is saved in `meta`. A pairing generation keeps
+  a replaced builder's waiting poll from taking a task. Unpairing ends the task and cancels
+  queued iOS jobs.
+- **Identity**: builder routes take `BuilderOrigin` (Kiwi's identity rule for the request,
+  `devices::require_owner_origin`, without making a device) and `BuilderAuth` (also the
+  bearer token). The artifact upload is the one mutating request without a JSON body.
+- **The program** (`mac_builder::client`, `kiwi builder run|pair`): writes its embedded
+  `runner.py` and `recipes.json` into `<data>/automation` at start, links
+  `automation/tools` to `~/.kiwi-builder-tools`, takes `<data>/builder.lock` (never Kiwi's
+  `kiwi.lock`), checks each task (command, an iOS recipe of its own, 24-hex id, a JSON object
+  of at most 1 MiB), runs the runner with `--python`, forwards events in batches with a
+  heartbeat every 10 s, uploads, finishes and deletes its local artifacts, and backs off
+  (1 s to 60 s) while Kiwi can't be reached. rustls with the system's roots (reqwest's
+  platform verifier), no redirects, no proxy; `http://` only to loopback.
 
 ### Community builds
 
@@ -728,6 +785,9 @@ subscriptions made with the old key are deleted (each device subscribes again).
   no private/loopback targets). Push endpoints must pass `endpoint_allowed`.
 - Paths are never built from user input except through validated ids.
 - The signing identity and the Apple sign-in for Kiwi Builds stay on the Mac; the API never returns credentials or private keys.
+- A Mac builder connects out and runs only its own embedded runner; its requests need its
+  token and Kiwi's identity rule, and what it uploads is checked against its digest and
+  validated and signed by Kiwi (see "Mac builder" and SECURITY.md).
 
 ## Web app (web/)
 

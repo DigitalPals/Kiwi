@@ -54,6 +54,8 @@ Each app's page links to its own settings (`/builds/<app>`). Older `/settings/bu
   `sudo -n unfairplay setup`. Builds themselves do not use sudo.
 - Kiwi installed with `./install.sh` (see [install.md](install.md)) and able to sign apps
   (Settings › Signing).
+- A Kiwi on Linux or in Docker builds iOS apps on such a Mac, paired as its
+  [Mac builder](#mac-builder); the requirements above are then the Mac's.
 
 ## How a build works
 
@@ -65,7 +67,9 @@ source in Browse; install it with **View App** through the usual iOS confirmatio
 
 This runs inside the Kiwi service: the web app does not need to stay open, no other
 service is started, and no artifact is reachable from outside Kiwi. Tailscale access and
-Kiwi's normal request protections apply.
+Kiwi's normal request protections apply. A Kiwi that doesn't run on macOS has the Mac
+builder do the App Store, decryption and compile steps ([Mac builder](#mac-builder)); the
+validation, signing and publication stay in Kiwi.
 
 ## What is built locally
 
@@ -465,6 +469,110 @@ moment. It does not need the ipatool sign-in, and it validates the model by decr
 sample. The model stays in the data directory with mode 0600. A macOS or Apple account
 change may require enrolling again. When `doctor` reports every check ready, use
 **Check Now** in Kiwi Builds.
+
+## Mac builder
+
+Kiwi on Linux or in Docker (see [install.md](install.md#linux)) can't run the iOS runner:
+it needs the App Store downloader with your Apple account, UnfairPlay on Apple silicon and
+Xcode. It pairs a Mac instead, which builds the iOS apps for it. The Mac becomes a **Mac
+builder**: the `kiwi` program in builder mode (`kiwi builder run`), a LaunchAgent in your
+login session like Kiwi on a Mac, so ipatool's keychain session, UnfairPlay and Theos work
+as they always have.
+
+How it works:
+
+- The builder connects **out** to Kiwi's Tailscale HTTPS address (certificate verified) and
+  asks for work with a long poll. Nothing listens on the Mac, and Kiwi gets no shell on it.
+- Kiwi sends job parameters only: the command (`plan`, `build` or `doctor`), the recipe id
+  and the runner's request. The builder runs **its own installed** `runner.py` and
+  `recipes.json` (the copies built into its `kiwi` program) exactly as Kiwi runs them on a
+  Mac, and refuses anything else: no `setup`, no `enroll`, no unknown recipe.
+- It forwards the runner's events as they arrive; Kiwi checks them as it checks a local
+  runner's. A build's patched IPA is uploaded with its SHA-256 and provenance, checked
+  against the digest, then validated, signed and published by Kiwi as usual. The Mac then
+  deletes its copy; Apple downloads and decrypted files are removed by the runner as always.
+- Kiwi compares the builder's runner and recipes with its own. While they differ, or while
+  the Mac is offline (asleep, logged out, not on the tailnet), iOS jobs wait in the queue
+  ("Waiting for Mac Studio", "Waiting for an update of Kiwi on Mac Studio") and Android jobs
+  go first. A Mac that goes quiet for 2 minutes mid-build fails that job ("Lost contact with
+  Mac Studio during the build."); it can be checked again and doesn't count towards the
+  three-failure limit.
+- The builder runs `doctor` when it connects, every 6 hours and when you use **Check
+  Again** in Settings › Mac builder: the Mac's checks show up in Kiwi Builds after a first
+  **Mac builder** check (online and the same version).
+- One builder per Kiwi. Pairing another Mac replaces the first; **Remove** in Settings ›
+  Mac builder revokes its token. Kiwi keeps only the token's SHA-256.
+
+### Pair and set up the Mac
+
+The Mac needs what [Requirements](#requirements) lists, Rust ([rustup.rs](https://rustup.rs))
+to build the program, and Tailscale in the same tailnet as Kiwi, signed in as Kiwi's owner.
+Kiwi accepts the builder only through Tailscale from a device of its owner (or, with
+`--trust-local`, on Kiwi's own computer).
+
+1. In Kiwi, **Settings › Mac builder › Pair a Mac** shows a one-time code and the command
+   for it (valid 10 minutes).
+2. On the Mac, logged in to its desktop, in Terminal, from a clone of the repository at the
+   same commit as Kiwi:
+
+   ```sh
+   ./install.sh --builder --check --server https://kiwi.example.ts.net
+   ./install.sh --builder --server https://kiwi.example.ts.net --pair K7QF-9XMD-2PLA
+   ```
+
+   It builds the `kiwi` program (no web app), installs it in
+   `~/Library/Application Support/Kiwi Builder/app`, pairs (a wrong or expired code stops
+   it), and loads the LaunchAgent `local.kiwi-builder`. `--name "Mac Studio"` names the Mac
+   in Kiwi; `--import-enrollment` copies the decryption models from a Kiwi on this Mac
+   (`~/Library/Application Support/Kiwi`, or the data directory you name), so the Mac
+   needn't enroll again. Kiwi's own LaunchAgent and data are never touched.
+3. Set up the build tools, sign in to the App Store and enroll, as in [Set up the
+   Mac](#set-up-the-mac) but against the builder's data directory, in Terminal (setup uses
+   Homebrew and enrollment `sudo -n`; ipatool may ask for a two-factor code):
+
+   ```sh
+   KIWI_DATA="$HOME/Library/Application Support/Kiwi Builder"
+   /opt/homebrew/bin/python3.13 "$KIWI_DATA/automation/runner.py" setup --data-dir "$KIWI_DATA"
+   "$HOME/.kiwi-builder-tools/bin/ipatool" auth login
+   /opt/homebrew/bin/python3.13 "$KIWI_DATA/automation/runner.py" enroll \
+     --data-dir "$KIWI_DATA" --app "/Applications/<App>.app"   # not after --import-enrollment
+   /opt/homebrew/bin/python3.13 "$KIWI_DATA/automation/runner.py" doctor --data-dir "$KIWI_DATA"
+   ```
+
+   The toolchain lives in `~/.kiwi-builder-tools` (the builder links `automation/tools`
+   there), so a Mac that already built apps for its own Kiwi has it, and the ipatool
+   sign-in is shared too: then `doctor` is all that's left, and enrollment unless imported.
+4. In Kiwi, **Settings › Mac builder › Check Again**. When every check is ready, add iOS
+   apps under Kiwi Builds as on a Mac.
+
+The builder's files:
+
+| Location | Purpose |
+|---|---|
+| `~/Library/Application Support/Kiwi Builder/builder.json` | Kiwi's address, the builder's token and name (0600) |
+| `…/Kiwi Builder/automation/runner.py`, `recipes.json` | Written from the program at every start |
+| `…/Kiwi Builder/automation/models/*.bin` | The Mac's decryption enrollment (0600) |
+| `…/Kiwi Builder/automation/jobs/<id>/build.log` | Private build logs, as on a Mac |
+| `…/Kiwi Builder/automation/artifacts/` | A patched IPA only until it is uploaded |
+| `~/Library/Logs/kiwi-builder.log` | The builder's log |
+
+Keep the Mac and Kiwi on the same commit: after `git pull && ./install.sh` on Kiwi's
+computer, run `git pull && ./install.sh --builder` on the Mac (Settings › Mac builder says
+when they differ). `./uninstall.sh --builder` removes the builder and keeps its data
+directory; remove it in Settings too.
+
+To try a builder without installing the LaunchAgent (development), pair and run it by hand
+with a data directory of its own:
+
+```sh
+cargo build --release -p kiwi-server
+target/release/kiwi builder pair --data-dir /tmp/kiwi-builder --server https://kiwi.example.ts.net --code K7QF-9XMD-2PLA
+target/release/kiwi builder run --data-dir /tmp/kiwi-builder
+```
+
+Run it in Terminal on the Mac's desktop (an SSH session may not reach the login keychain
+that ipatool uses). `--server` must be `https://`, or `http://` to a loopback address (an
+SSH tunnel to a test Kiwi started with `--trust-local`).
 
 ## Build behavior
 

@@ -12,7 +12,6 @@ import {
   pairingStep,
   statusDetail,
   statusText,
-  taskTitle,
   UPDATE_COMMAND,
   watchPairing,
   type PairingWatch,
@@ -149,7 +148,6 @@ function Paired({ builder, reload, onRemoved }: { builder: Builder; reload: () =
     if (builder.task?.command === "doctor") setAsked(false);
   }, [builder.task?.command]);
   const checks = builder.checks.filter((c) => c.name !== BUILDER_CHECK);
-  const task = builder.task;
   let checkNote = "Kiwi checks the Mac when it connects and every 6 hours. Apple account sign-in and enrollment stay on the Mac.";
   if (check.error) checkNote = check.error;
   else if (asked) checkNote = status === "offline" ? `${builder.name} checks its setup when it's back online.` : `Asked ${builder.name} to check its setup.`;
@@ -162,7 +160,10 @@ function Paired({ builder, reload, onRemoved }: { builder: Builder; reload: () =
         <div>
           <div class="status-title">{builder.name}</div>
           <div class={status === "online" ? "status-text tone-ok" : "status-text tone-warn"}>{statusText(builder)}</div>
-          <div class="status-text">{statusDetail(builder)}</div>
+          <div class="status-text">
+            {statusDetail(builder)}
+            {builder.task && ` · started ${formatRelative(builder.task.started_at)}`}
+          </div>
         </div>
       </div>
       {!builder.compatible && (
@@ -170,13 +171,6 @@ function Paired({ builder, reload, onRemoved }: { builder: Builder; reload: () =
           Kiwi on {builder.name} is a different version. On the Mac:
           <CommandText command={UPDATE_COMMAND} />
         </Banner>
-      )}
-      {task && (
-        <Section title="Now">
-          <Cell label={taskTitle(task)} sub={`${task.stage} · started ${formatRelative(task.started_at)}`}>
-            <Spinner />
-          </Cell>
-        </Section>
       )}
       <Section title="Setup" footer={check.error ? <span class="danger">{checkNote}</span> : checkNote}>
         {checks.length > 0 ? (

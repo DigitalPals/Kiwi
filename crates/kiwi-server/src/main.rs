@@ -15,6 +15,7 @@ async fn main() -> std::process::ExitCode {
         Some(kiwi_server::config::Command::Builder(command)) => {
             kiwi_server::mac_builder::client::main(command).await
         }
+        Some(kiwi_server::config::Command::Migrate(command)) => kiwi_server::migrate::main(command),
         None => kiwi_server::run(args).await,
     };
     match result {

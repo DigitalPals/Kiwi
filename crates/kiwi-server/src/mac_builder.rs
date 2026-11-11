@@ -751,12 +751,10 @@ pub fn pair(kiwi: &Kiwi, body: PairBody, public_url: &str) -> ApiResult<Value> {
         ));
     }
     body.hello.validate()?;
-    let mut secret = [0u8; 32];
-    getrandom::fill(&mut secret).map_err(ApiError::internal)?;
-    let token = B64.encode(secret);
+    let (token, token_sha256) = new_token().map_err(ApiError::internal)?;
     let paired = Paired {
         name: name.clone(),
-        token_sha256: hex::encode(Sha256::digest(token.as_bytes())),
+        token_sha256,
         paired_at: Utc::now(),
         last_seen: Some(Utc::now()),
         hello: body.hello,
@@ -782,6 +780,55 @@ pub fn pair(kiwi: &Kiwi, body: PairBody, public_url: &str) -> ApiResult<Value> {
     drop(inner);
     mac.wake.notify_waiters();
     Ok(json!({"token": token, "kiwi": public_url, "name": name}))
+}
+
+/// A new builder token and the SHA-256 of it that Kiwi keeps.
+fn new_token() -> Result<(String, String), getrandom::Error> {
+    let mut secret = [0u8; 32];
+    getrandom::fill(&mut secret)?;
+    let token = B64.encode(secret);
+    let sha = hex::encode(Sha256::digest(token.as_bytes()));
+    Ok((token, sha))
+}
+
+/// A pairing made without a code, for a Kiwi that doesn't run yet (`kiwi builder
+/// provision`, used by migrate.sh when Kiwi moves from this Mac to Linux): the token for
+/// the builder's `builder.json`, and the record the new Kiwi imports ([`import_record`]).
+pub fn provision(name: &str, hello: Hello) -> Result<(String, Value), String> {
+    let name = name.trim();
+    if !text_ok(name, 64) {
+        return Err("Name the Mac builder (up to 64 characters).".into());
+    }
+    hello.validate().map_err(|e| e.to_string())?;
+    let (token, token_sha256) = new_token().map_err(|e| e.to_string())?;
+    let paired = Paired {
+        name: name.to_owned(),
+        token_sha256,
+        paired_at: Utc::now(),
+        last_seen: None,
+        hello,
+    };
+    let record = serde_json::to_value(&paired).map_err(|e| e.to_string())?;
+    Ok((token, record))
+}
+
+/// Saves a record from [`provision`] as this Kiwi's paired builder, replacing any; returns
+/// its name. For `kiwi migrate import`, while Kiwi is stopped.
+pub fn import_record(db: &Db, record: &Value) -> Result<String, String> {
+    let paired = Paired::deserialize(record).map_err(|e| format!("Mac builder: {e}"))?;
+    if !text_ok(&paired.name, 64) || !valid_sha(&paired.token_sha256) {
+        return Err("Mac builder: the pairing is invalid".into());
+    }
+    paired
+        .hello
+        .validate()
+        .map_err(|e| format!("Mac builder: {e}"))?;
+    db.set_meta(
+        META,
+        &serde_json::to_string(&Some(&paired)).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(paired.name)
 }
 
 // No `deny_unknown_fields`: serde doesn't support it with `flatten`.

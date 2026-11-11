@@ -1406,6 +1406,18 @@ impl Db {
         })
     }
 
+    /// Points signed apps' files under `old` to the same files under `new` (both ending in
+    /// `/`): the data directory moved to another computer. Returns how many it changed.
+    pub fn move_build_files(&self, old: &str, new: &str) -> rusqlite::Result<usize> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE builds SET ipa_path = ?2 || substr(ipa_path, length(?1) + 1)
+                 WHERE substr(ipa_path, 1, length(?1)) = ?1",
+                [old, new],
+            )
+        })
+    }
+
     pub fn delete_build(&self, id: &str) -> rusqlite::Result<()> {
         self.with(|c| {
             c.execute("DELETE FROM builds WHERE id = ?1", [id])

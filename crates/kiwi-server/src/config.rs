@@ -66,6 +66,9 @@ pub enum Command {
     /// The Mac builder: builds iOS apps on a Mac for a Kiwi that runs elsewhere
     #[command(subcommand)]
     Builder(crate::mac_builder::client::Command),
+    /// Moving Kiwi from a Mac to Linux (migrate.sh, docs/migrate.md)
+    #[command(subcommand)]
+    Migrate(crate::migrate::Command),
 }
 
 /// Which loopback requests speak for whom (architecture.md "Security").

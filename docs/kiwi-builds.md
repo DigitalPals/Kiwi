@@ -557,6 +557,11 @@ The builder's files:
 | `…/Kiwi Builder/automation/artifacts/` | A patched IPA only until it is uploaded |
 | `~/Library/Logs/kiwi-builder.log` | The builder's log |
 
+When Kiwi moves from a Mac to Linux, [migrate.sh](migrate.md) makes that Mac the builder:
+`migrate.sh export` pairs it ahead of time (`kiwi builder provision`) with the new Kiwi's
+address and installs it with the Mac's enrollment and build tools, and the import gives the
+new Kiwi the pairing.
+
 Keep the Mac and Kiwi on the same commit: after `git pull && ./install.sh` on Kiwi's
 computer, run `git pull && ./install.sh --builder` on the Mac (Settings › Mac builder says
 when they differ). `./uninstall.sh --builder` removes the builder and keeps its data

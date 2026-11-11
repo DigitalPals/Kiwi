@@ -662,8 +662,9 @@ ensure_serve() {
 	after=$("$TAILSCALE" serve status --json)
 	cur=$(jq -r --arg k "$key" '.Web[$k].Handlers["/"].Proxy // empty' <<<"$after")
 	[ "$cur" = "$want" ] || die "tailscale serve did not take the / mapping (got '$cur')"
-	others_before=$(jq -cS --arg k "$key" 'del(.Web[$k].Handlers["/"]) | .Web' <<<"$before")
-	others_after=$(jq -cS --arg k "$key" 'del(.Web[$k].Handlers["/"]) | .Web' <<<"$after")
+	# This name's other paths and the other names' handlers; none on a fresh tailscaled.
+	others_before=$(jq -cS --arg k "$key" '[(.Web[$k].Handlers // {} | del(.["/"])), (.Web // {} | del(.[$k]))]' <<<"$before")
+	others_after=$(jq -cS --arg k "$key" '[(.Web[$k].Handlers // {} | del(.["/"])), (.Web // {} | del(.[$k]))]' <<<"$after")
 	[ "$others_before" = "$others_after" ] || die "other tailscale serve handlers changed: $others_before -> $others_after"
 }
 
@@ -979,6 +980,9 @@ check_builder() {
 	elif [ -n "$SERVER" ]; then
 		if curl -fsS --max-time 10 -o /dev/null "$SERVER/api/health"; then
 			good "Kiwi answers at $SERVER"
+		elif [ -z "$PAIR_CODE" ] && [ -f "$B_DATA/builder.json" ]; then
+			# Paired ahead of time (migrate.sh export): Kiwi may not run there yet.
+			note "Kiwi doesn't answer at $SERVER yet; the builder keeps trying until it does"
 		else
 			problem "Kiwi doesn't answer at $SERVER/api/health: check the address, and that this Mac is in Kiwi's tailnet"
 		fi

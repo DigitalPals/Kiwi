@@ -1,4 +1,4 @@
-//! `kiwi builder pair|run`: the Mac builder program, on the Mac (docs/kiwi-builds.md "Mac
+//! `kiwi builder pair|provision|run`: the Mac builder program, on the Mac (docs/kiwi-builds.md "Mac
 //! builder").
 //!
 //! It connects out to a Kiwi (HTTPS with a verified certificate; plain HTTP only to a
@@ -46,6 +46,25 @@ pub enum Command {
     Run(RunArgs),
     /// Pair this Mac with a Kiwi, with the one-time code from its Settings › Mac builder.
     Pair(PairArgs),
+    /// Pair this Mac ahead of time with a Kiwi that doesn't run yet (migrate.sh export):
+    /// saves the pairing here and prints the record for `kiwi migrate import`.
+    Provision(ProvisionArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ProvisionArgs {
+    /// The builder's data directory (as for `run`)
+    #[arg(long, env = "KIWI_BUILDER_DATA_DIR")]
+    pub data_dir: Option<PathBuf>,
+    /// The address the new Kiwi will have: https://kiwi.example.ts.net
+    #[arg(long)]
+    pub server: String,
+    /// How Kiwi names this Mac [default: its computer name]
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Replace an existing pairing
+    #[arg(long)]
+    pub replace: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -87,6 +106,15 @@ pub async fn main(command: Command) -> Result<(), String> {
                 "Paired with Kiwi at {} as \"{}\".",
                 saved.kiwi.as_deref().unwrap_or(saved.server.as_str()),
                 saved.name
+            );
+            Ok(())
+        }
+        Command::Provision(args) => {
+            let data = args.data_dir.unwrap_or_else(default_data_dir);
+            let record = provision(&data, &args.server, args.name, args.replace)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&record).map_err(|e| e.to_string())?
             );
             Ok(())
         }
@@ -439,6 +467,36 @@ pub async fn pair(
         name: body["name"].as_str().unwrap_or(name).to_owned(),
         kiwi: body["kiwi"].as_str().map(str::to_owned),
     })
+}
+
+/// `kiwi builder provision`: saves a pairing with a new token for `server` in `data` and
+/// returns the record the Kiwi there imports.
+pub fn provision(
+    data: &Path,
+    server: &str,
+    name: Option<String>,
+    replace: bool,
+) -> Result<Value, String> {
+    let server = server_url(server)?;
+    if !replace && data.join(SAVED).exists() {
+        return Err(format!(
+            "{} is already paired with a Kiwi; pass --replace to pair it with {server} instead",
+            data.display()
+        ));
+    }
+    let name = name.unwrap_or_else(computer_name);
+    let (token, record) = super::provision(&name, Hello::own(system()))?;
+    let server = server.as_str().trim_end_matches('/').to_owned();
+    save(
+        data,
+        &Saved {
+            server: server.clone(),
+            token,
+            name: name.trim().to_owned(),
+            kiwi: Some(server),
+        },
+    )?;
+    Ok(record)
 }
 
 /// A task Kiwi sent, after checking it.

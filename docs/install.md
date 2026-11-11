@@ -284,6 +284,9 @@ shell on it.
 4. In Kiwi, **Settings › Mac builder** shows the Mac online with its checks; add iOS apps
    under Kiwi Builds as on a Mac.
 
+Moving Kiwi from a Mac to Linux with [migrate.sh](migrate.md) sets this up by itself: the
+Mac Kiwi ran on becomes the Mac builder, paired before the new Kiwi starts.
+
 The Mac needs to be on and logged in for iOS builds; while it is offline, iOS builds wait
 ("Waiting for <Mac>") and Android builds go on. Update it with `git pull && ./install.sh
 --builder` whenever you update Kiwi (Kiwi says when they differ), and remove it with
@@ -413,3 +416,7 @@ your tailnet, with its own name, owner and tags.
 - Start it with its host and keep it running: phones install and update apps from it.
 - Don't run a copy of the VM next to the original. Both would use the same Tailscale
   identity and the same data. To move Kiwi, stop the old VM first.
+
+On **Proxmox VE**, `deploy/proxmox/kiwi-lxc.sh` creates a container for Kiwi (unprivileged
+Debian 13, with what Kiwi's sandbox and Tailscale need), installs Tailscale and Kiwi in it,
+and can import a Kiwi you move from a Mac: [Moving Kiwi from a Mac to Linux](migrate.md).

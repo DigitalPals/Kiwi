@@ -106,7 +106,10 @@ Change them by running `./install.sh` again with other options (see
 
 `kiwi builder run` (the Mac builder) takes `--data-dir` (`KIWI_BUILDER_DATA_DIR`, default
 `~/Library/Application Support/Kiwi Builder`) and `--python` (`KIWI_BUILDER_PYTHON`, default
-`/opt/homebrew/bin/python3.13`); `kiwi builder pair` also `--server`, `--code` and `--name`.
+`/opt/homebrew/bin/python3.13`); `kiwi builder pair` also `--server`, `--code` and `--name`;
+`kiwi builder provision` (used by `migrate.sh export`) `--server`, `--name` and `--replace`.
+`kiwi migrate import --data-dir DIR --bundle DIR` is the last step of
+[moving Kiwi from a Mac](migrate.md), which `migrate.sh import` runs.
 
 Without `--public-url`, Kiwi asks Tailscale for this computer's name at start, and keeps
 asking in the background while tailscaled is still starting. The App Store country starts as the
@@ -220,7 +223,8 @@ Back up these files from the data directory, to another disk:
 | `automation/android/keystore.p12` and `automation/android/keystore.pass` | Kiwi's Android signing key and its password: it signs Kiwi Builds' Android apps and [Kiwi's own Android app](android-app.md). **Android only accepts an update signed with the same key** as the installed app: without these two files, every Android app Kiwi installed, Kiwi's app included, has to be removed from each phone before Kiwi can install it again, losing the app's data |
 | `signing/` | On Linux and in Docker: the uploaded Apple Development identity (`.p12`) and profiles. You can upload them again from your own copies |
 
-The `kiwi.db.bak-*` copies the installer keeps are on the same disk, so they don't count as
+To move Kiwi from a Mac to Linux with all of this, use [migrate.sh](migrate.md). The
+`kiwi.db.bak-*` copies the installer keeps are on the same disk, so they don't count as
 a backup. Everything else in the data directory can be rebuilt. The data directory is
 private (on Linux owned by `kiwi`), so copy it as root and keep the copy private too: it
 holds signing keys.

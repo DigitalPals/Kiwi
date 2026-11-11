@@ -54,12 +54,15 @@ crates/kiwi-signer      provisioning profiles, identities, IPA re-signing (codes
 crates/kiwi-device      devicectl wrapper, Tailscale (LocalAPI or CLI), user-agent parsing
 crates/kiwi-push        VAPID keys + Web Push (RFC 8030/8291/8292) sender
 crates/kiwi-server      axum HTTP server, SQLite state, jobs, scheduler; binary `kiwi` (also
-                        the Mac builder: `kiwi builder run|pair`)
+                        the Mac builder, `kiwi builder run|pair|provision`, and the last
+                        step of moving from a Mac, `kiwi migrate import`)
 web/                    Vite + Preact + TypeScript PWA (built to web/dist, served by kiwi-server)
 android/                native Android client (Kotlin, Jetpack Compose); see android/README.md
 automation/             Kiwi Builds: the build runners (Python), pinned app recipes and the pinned
                         release of Kiwi's Android app (kiwi-app.json)
 install.sh              installs or updates Kiwi on a Mac (build, LaunchAgent, tailscale serve)
+migrate.sh              moves Kiwi from a Mac to Linux: export on the Mac, import on Linux
+deploy/proxmox/         kiwi-lxc.sh: creates Kiwi's container on Proxmox VE and imports a Mac's Kiwi
                         or on Linux (build, systemd service, tailscale serve); with --builder a
                         Mac builder (build, pairing, LaunchAgent local.kiwi-builder)
 uninstall.sh            removes it again
@@ -532,6 +535,10 @@ lives in `Automation` (`supported`: not on macOS; tests turn it on).
 - **Identity**: builder routes take `BuilderOrigin` (Kiwi's identity rule for the request,
   `devices::require_owner_origin`, without making a device) and `BuilderAuth` (also the
   bearer token). The artifact upload is the one mutating request without a JSON body.
+- **Pairing ahead of time** (`kiwi builder provision`, used by `migrate.sh export`): the Mac
+  makes the token and saves it in `builder.json` for a Kiwi that doesn't run yet, and prints
+  the record Kiwi keeps (name, the token's SHA-256, what the builder reports);
+  `kiwi migrate import` saves that record in `meta` as a pairing would.
 - **The program** (`mac_builder::client`, `kiwi builder run|pair`): writes its embedded
   `runner.py` and `recipes.json` into `<data>/automation` at start, links
   `automation/tools` to `~/.kiwi-builder-tools`, takes `<data>/builder.lock` (never Kiwi's

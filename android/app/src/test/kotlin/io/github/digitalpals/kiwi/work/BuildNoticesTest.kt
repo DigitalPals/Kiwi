@@ -46,6 +46,7 @@ class BuildNoticesTest {
                     failed = false,
                     bundleId = "app.morphe.android.youtube",
                     appName = "YouTube",
+                    app = "android-youtube",
                 ),
                 BuildNotice(
                     "build:android-reddit",
@@ -53,6 +54,7 @@ class BuildNoticesTest {
                     "Google Play refused the download.",
                     failed = true,
                     appName = "Reddit",
+                    app = "android-reddit",
                 ),
             ),
             notices,
@@ -72,5 +74,18 @@ class BuildNoticesTest {
         val removed = youTube.copy(added = false)
         val ios = youTube.copy(id = "youtube", platform = "ios")
         assertTrue(BuildNotices.fresh(listOf(removed, ios), seen = emptySet()).first.isEmpty())
+    }
+
+    @Test
+    fun aBuildWaitedForSaysItIsReadyToInstallAndOpensBuilds() {
+        val (notices, _) = BuildNotices.fresh(listOf(youTube, reddit), seen = setOf("y1"), pending = setOf("android-youtube", "android-reddit"))
+        val ready = notices.first { it.app == "android-youtube" }
+        assertEquals("YouTube is ready — tap to install", ready.title)
+        assertEquals("Kiwi built YouTube 21.31.0 and signed it with its own key.", ready.body)
+        assertTrue(ready.install)
+        assertEquals("build:android-youtube", ready.tag)
+        val failed = notices.first { it.app == "android-reddit" }
+        assertTrue(failed.failed)
+        assertEquals("Google Play refused the download.", failed.body)
     }
 }

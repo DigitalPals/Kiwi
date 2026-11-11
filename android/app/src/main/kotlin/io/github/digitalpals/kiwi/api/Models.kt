@@ -352,6 +352,10 @@ data class AutomationJob(
     @SerialName("created_at") val createdAt: String? = null,
     @SerialName("finished_at") val finishedAt: String? = null,
     val preferences: AutomationPreferences? = null,
+    /** Someone asked for it (add, check); it starts before scheduled jobs. */
+    val interactive: Boolean = false,
+    /** A queued job: how many builds run before it starts, the running one included (newer Kiwis). */
+    val ahead: Int? = null,
 ) {
     val isActive: Boolean get() = finishedAt == null
 }

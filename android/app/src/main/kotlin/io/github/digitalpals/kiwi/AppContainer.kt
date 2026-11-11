@@ -6,10 +6,13 @@ import io.github.digitalpals.kiwi.api.KiwiApi
 import io.github.digitalpals.kiwi.api.UserAgent
 import io.github.digitalpals.kiwi.data.SettingsStore
 import io.github.digitalpals.kiwi.install.ApkDownloader
+import io.github.digitalpals.kiwi.install.BuildInstalls
 import io.github.digitalpals.kiwi.install.InstallManager
 import io.github.digitalpals.kiwi.install.SessionInstaller
 import io.github.digitalpals.kiwi.packages.PackageReporter
 import io.github.digitalpals.kiwi.packages.PackageScanner
+import io.github.digitalpals.kiwi.util.ForegroundTracker
+import io.github.digitalpals.kiwi.work.Notifications
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -69,6 +72,24 @@ class AppContainer(val application: Application) {
         report = { packageReporter.report() },
         cacheDir = application.cacheDir,
         ownPackage = application.packageName,
+    )
+
+    /** Installs Kiwi Builds apps once their build is ready ("Build and install"). */
+    val buildInstalls = BuildInstalls(
+        scope = scope,
+        pending = settings.pendingInstalls,
+        forget = { settings.removePendingInstall(it) },
+        api = { api() },
+        install = { app, summary ->
+            // Its "ready — tap to install" notification is done with.
+            Notifications.cancelBuild(application, app)
+            installs.start(summary)
+        },
+        isInstalled = { packageScanner.isInstalled(it) },
+        foreground = ForegroundTracker.foreground,
+        failed = { notice ->
+            if (Notifications.allowed(application)) Notifications.showBuilds(application, listOf(notice))
+        },
     )
 
     @Volatile

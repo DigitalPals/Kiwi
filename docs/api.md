@@ -106,7 +106,11 @@ ids. `name` is only accepted for apps with `names` (omitted, it is the first one
 values or fields return 400. Preferences apply to the next job.
 
 `POST /api/automation/:app/add` saves the preferences, adds the app and queues its first
-build (202). `DELETE /api/automation/:app` removes it: its jobs are cancelled and it leaves
+build (202). It is idempotent, so a one-tap install can send it again: when the app already
+has a queued or running job started with the same preferences, it returns 202 with the
+app's state and queues nothing (a scheduled job still waiting then counts as asked for and
+moves ahead of the other scheduled jobs); when that job has other preferences it returns `409 conflict` and changes nothing.
+`DELETE /api/automation/:app` removes it: its jobs are cancelled and it leaves
 the source; installed copies keep working until they expire. Both return the app's state.
 
 `POST /api/automation/:app/check` accepts `{}` or `{"force":true}` and returns 202. It
@@ -116,12 +120,18 @@ retry limit. Manual checks work when automatic checks are disabled.
 `POST /api/automation/:app/cancel` returns 200: a queued job is cancelled at once; a
 running one completes asynchronously and preserves the published release.
 
-One job runs at a time. Job statuses are `queued` (waiting for another app's job; its
-`stage` names it), `running`, `ready`, `unchanged`, `blocked`, `failed` or `cancelled`. Each
+One job runs at a time. Jobs someone asked for (`POST .../add` and `POST .../check`) start
+before jobs the schedule queued: the worker takes the oldest queued `interactive` job, else
+the oldest scheduled one (signing Kiwi's own Android app, which takes seconds, still goes
+first). Job statuses are `queued` (waiting for another job; its `stage` names the job that
+was running when it was queued), `running`, `ready`, `unchanged`, `blocked`, `failed` or `cancelled`. Each
 job has `id`, `app`, `sequence`, `stage`, `created_at`, nullable `finished_at`, `version`,
 `external_id`, `recipe_key`, `signed_build_id`, a bounded user-facing `error`, and the
 `preferences` it was started with; changing preferences never changes a queued or running
-job. Poll while `finished_at` is null. A `ready` job has passed package and signing checks;
+job. `interactive` is `true` on jobs someone asked for and absent on scheduled ones (state
+saved by older versions loads as scheduled). A queued job also has `ahead`: how many builds
+run before it starts, the running one included (`0` when it starts next and the worker is
+free); show it as its place in the queue. Poll while `finished_at` is null. A `ready` job has passed package and signing checks;
 it does not imply a test on a physical device. An Android job's `external_id` is the
 original app's version code. Its runner signs the app itself, so `signed_build_id` names
 the build Kiwi creates, already `ready`, when it publishes the app, and the job ends at

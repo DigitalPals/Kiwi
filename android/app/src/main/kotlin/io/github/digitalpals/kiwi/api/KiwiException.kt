@@ -23,6 +23,9 @@ sealed class KiwiException(message: String, cause: Throwable? = null) : Exceptio
 
         /** Kiwi Builds is turned off in Kiwi's settings (409 from `/api/automation`). */
         val isBuildsOff: Boolean get() = code == BUILDS_OFF
+
+        /** The request clashes with work already on its way (409), e.g. a build of the app. */
+        val isConflict: Boolean get() = code == CONFLICT
     }
 
     /** The answer was not what Kiwi sends: probably not a Kiwi server, or a proxy's error page. */
@@ -35,6 +38,7 @@ sealed class KiwiException(message: String, cause: Throwable? = null) : Exceptio
         const val DEVICE_UNIDENTIFIED = "device_unidentified"
         const val BAD_HOST = "bad_host"
         const val BUILDS_OFF = "builds_off"
+        const val CONFLICT = "conflict"
     }
 }
 

@@ -672,6 +672,16 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     if (store) view.icon_url = `/__mock/icon/${store.slug}.svg`;
     // Where iOS apps can't be built, only the missing Mac is checked and nothing is scheduled.
     if (app.platform !== "android" && !buildsIos) Object.assign(view, { checks: currentChecks(), next_check_at: null });
+    // Like the server: how many builds run before each queued job (jobs asked for go first).
+    const active = builds.flatMap((b) => b.jobs.filter((j) => !j.finished_at));
+    const busy = active.some((j) => j.status === "running") ? 1 : 0;
+    const queued = active
+      .filter((j) => j.status === "queued")
+      .sort((a, b) => Number(!a.interactive) - Number(!b.interactive) || a.created_at.localeCompare(b.created_at));
+    for (const job of view.jobs) {
+      const index = queued.findIndex((q) => q.id === job.id);
+      if (index >= 0) job.ahead = busy + index;
+    }
     return view;
   }
 
@@ -958,7 +968,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
             id: `mock-${build.id}-${build.sequence}`, app: build.id, sequence: build.sequence, status: "queued",
             stage: running ? `Waiting for ${running.name}` : "Checking build setup", version: null, external_id: null,
             recipe_key: null, signed_build_id: null, error: null, created_at: iso(now), finished_at: null,
-            preferences: structuredClone(build.preferences),
+            preferences: structuredClone(build.preferences), interactive: true,
           });
           build.jobs = build.jobs.slice(0, 30);
           if (force) forcedJobs.add(`mock-${build.id}-${build.sequence}`);
@@ -984,7 +994,22 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       }
       if (is("POST", "automation", undefined, "add")) {
         requireBuildable();
-        build.preferences = preferences();
+        const chosen = preferences();
+        // Like the server: adding again while a build with these choices waits or runs joins it.
+        const active = build.jobs.find((j) => !j.finished_at);
+        if (active) {
+          const same = (p?: AutomationPreferences) => !!p && p.enabled === chosen.enabled
+            && p.interval_minutes === chosen.interval_minutes && (p.name ?? null) === (chosen.name ?? null)
+            && [...p.tweaks].sort().join(",") === [...chosen.tweaks].sort().join(",");
+          if (!same(active.preferences)) {
+            throw new HttpError(409, "conflict", `A ${build.name} build with other choices is already on its way. Cancel it or wait for it first.`);
+          }
+          active.interactive = true;
+          build.added = true;
+          build.preferences = chosen;
+          return ok(automationView(build), 202);
+        }
+        build.preferences = chosen;
         build.added = true;
         check();
         return ok(automationView(build), 202);

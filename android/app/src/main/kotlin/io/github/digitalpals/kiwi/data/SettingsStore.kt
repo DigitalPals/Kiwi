@@ -35,6 +35,12 @@ class SettingsStore(context: Context) {
     /** When the app last checked Kiwi for updates (milliseconds since the epoch), or null. */
     val lastChecked: Flow<Long?> = store.data.map { it[LAST_CHECKED] }.distinctUntilChanged()
 
+    /**
+     * Kiwi Builds apps (by recipe id) to install once their build is ready: "Build and install"
+     * saves the wish here so it survives the app being closed (see BuildInstalls).
+     */
+    val pendingInstalls: Flow<Set<String>> = store.data.map { it[PENDING_INSTALLS] ?: emptySet() }.distinctUntilChanged()
+
     /** Whether the app has asked for the notification permission once already. */
     val askedNotifications: Flow<Boolean> = store.data.map { it[ASKED_NOTIFICATIONS] ?: false }
 
@@ -47,6 +53,7 @@ class SettingsStore(context: Context) {
                 it.remove(NOTIFIED)
                 it.remove(NOTIFIED_BUILDS)
                 it.remove(LAST_CHECKED)
+                it.remove(PENDING_INSTALLS)
             }
         }
     }
@@ -65,6 +72,14 @@ class SettingsStore(context: Context) {
 
     suspend fun setLastChecked(millis: Long) {
         store.edit { it[LAST_CHECKED] = millis }
+    }
+
+    suspend fun addPendingInstall(app: String) {
+        store.edit { it[PENDING_INSTALLS] = (it[PENDING_INSTALLS] ?: emptySet()) + app }
+    }
+
+    suspend fun removePendingInstall(app: String) {
+        store.edit { it[PENDING_INSTALLS] = (it[PENDING_INSTALLS] ?: emptySet()) - app }
     }
 
     suspend fun setAskedNotifications() {
@@ -94,5 +109,6 @@ class SettingsStore(context: Context) {
         val NOTIFY_BUILDS = booleanPreferencesKey("notify_builds")
         val NOTIFIED_BUILDS = stringSetPreferencesKey("notified_builds")
         val LAST_CHECKED = longPreferencesKey("last_checked")
+        val PENDING_INSTALLS = stringSetPreferencesKey("pending_build_installs")
     }
 }

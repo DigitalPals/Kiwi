@@ -78,12 +78,23 @@ object Notifications {
                 .setContentTitle(notice.title)
                 .setContentText(notice.body)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(notice.body))
-                .setContentIntent(if (notice.bundleId != null) openApp(context, notice.bundleId, notice.appName) else open(context, MainActivity.ACTION_OPEN_BUILDS))
+                .setContentIntent(
+                    if (notice.bundleId != null && !notice.install) {
+                        openApp(context, notice.bundleId, notice.appName)
+                    } else {
+                        open(context, MainActivity.ACTION_OPEN_BUILDS)
+                    },
+                )
                 .setAutoCancel(true)
                 .setCategory(NotificationCompat.CATEGORY_STATUS)
                 .build()
             post(context, notice.tag, 0, notification)
         }
+    }
+
+    /** Removes the notification of a Kiwi Builds app's build (its install started). */
+    fun cancelBuild(context: Context, app: String) {
+        NotificationManagerCompat.from(context).cancel("build:$app", 0)
     }
 
     fun showSelfUpdate(context: Context, versionName: String) {

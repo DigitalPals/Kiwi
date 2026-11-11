@@ -1,12 +1,17 @@
 import base64
 from contextlib import redirect_stdout
+import errno
 import hashlib
 import io
 import json
 from pathlib import Path
-import shlex
+import os
+import shutil
+import socket
 import stat
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -14,6 +19,7 @@ import zipfile
 import android
 import apk
 from runner import BuildError, Builder
+import sandbox
 
 P256 = bytes.fromhex("2a8648ce3d030107")
 CURVE = apk.CURVES[P256]
@@ -249,6 +255,12 @@ class AndroidTests(unittest.TestCase):
         self.addCleanup(lambda: (setattr(android, "http", originals[0]), setattr(android, "download", originals[1])))
         android.http = self.offline
         android.download = self.offline
+        # A Linux computer with every sandbox feature; tests that need less say so.
+        self.addCleanup(setattr, sandbox, "_probed", None)
+        self.addCleanup(setattr, sandbox, "PLATFORM", sandbox.PLATFORM)
+        sandbox.PLATFORM, sandbox._probed = "linux", {"landlock": 6, "seccomp": True, "reasons": []}
+        self.addCleanup(setattr, sandbox, "kill_strays", sandbox.kill_strays)
+        sandbox.kill_strays = lambda: 0
 
     def offline(self, url, *_args, **_kwargs):
         raise AssertionError(f"unexpected request to {url}")
@@ -422,38 +434,144 @@ class AndroidTests(unittest.TestCase):
         with self.assertRaisesRegex(BuildError, "Unknown app recipe"):
             self.android.app("youtube")
 
-    def test_the_patcher_reads_the_keystore_password_from_a_private_file(self):
-        app = self.android.app("android-youtube")
+    def stand_in_for_tools(self, app, *, patched=None):
+        """Fakes the pinned tools of a build. The patcher writes `patched(box)` (by default an
+        unsigned app as Morphe's --unsigned makes it); apksigner signs with KIWI_KEY. Returns
+        the calls made, as (command inside the sandbox, sandbox spec, env, options)."""
+        password = 'pass"word\\#1 2'
+        original = self.apk("base.apk", name=app["original_package"], code=app["version_code"], version=app["app_version"])
+        self.android.java = lambda: self.root / "jre" / "bin" / "java"
+        self.android.tool = lambda name: self.root / "tools" / name
+        self.android.apksigner = lambda: self.root / "tools" / "apksigner.jar"
+        store = self.root / "data" / "automation" / "android" / "keystore.p12"
+        self.android.keystore = lambda java: (store, password, KIWI_KEY.fingerprint)
+        self.android.original = lambda app, plan, job_dir: ([original], "Google Play")
+        calls = []
+
+        def unsigned(box):
+            unsigned_package(box / "unsigned.apk", name=app["bundle_id"], version=app["app_version"],
+                             code=app.get("patched_version_code", app["version_code"]))
+
+        def command(args, env=None, **options):
+            args = [str(a) for a in args]
+            self.assertEqual(args[:5], [sys.executable, "-I", "-S", str(Path(sandbox.__file__).resolve()), "--spec"])
+            self.assertEqual(args[6], "--")
+            spec, inner = json.loads(args[5]), args[7:]
+            calls.append((inner, spec, env, options))
+            if "patch" in inner:
+                box = Path(inner[inner.index("--out") + 1]).parent
+                (patched or unsigned)(box)
+                (box / "result.json").write_text(json.dumps({"success": True, "appliedPatches": ["Hide ads"], "failedPatches": []}))
+            elif "sign" in inner:
+                facts = apk.unsigned(inner[-1])
+                package(Path(inner[inner.index("--out") + 1]), KIWI_KEY, name=facts["package"], code=facts["version_code"],
+                        version=facts["version"], abi=None, scheme=(2, 3), compression=zipfile.ZIP_DEFLATED)
+            return ""
+
+        self.builder.command = command
+        return password, store, calls
+
+    def build(self, app):
         with redirect_stdout(io.StringIO()) as out:
             self.android.plan(app, {})
         plan = json.loads(out.getvalue())["plan"]
-        password = 'pass"word\\#1 2'
-        original = self.apk("base.apk")
-        self.android.java = lambda: Path("/jre/bin/java")
-        self.android.tool = lambda name: Path(f"/tools/{name}")
-        self.android.keystore = lambda java: (Path("/keys/keystore.p12"), password, "f" * 64)
-        self.android.original = lambda app, plan, job_dir: ([original], "Google Play")
-        seen = []
-
-        def command(args, **_):
-            args = [str(a) for a in args]
-            # picocli reads "@<file>" as the arguments in that file.
-            secret = Path(next(a for a in args if a.startswith("@"))[1:])
-            seen.append((args, stat.S_IMODE(secret.stat().st_mode), shlex.split(secret.read_text())))
-            raise BuildError("Patching failed")
-
-        self.builder.command = command
-        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(BuildError, "Patching failed"):
+        with redirect_stdout(io.StringIO()) as out:
             self.android.build(app, plan, 1, self.job)
-        [(args, mode, secret)] = seen
-        self.assertNotIn("pass", " ".join(args))
-        self.assertEqual(args[args.index("--keystore") + 1], "/keys/keystore.p12")
-        self.assertEqual(mode, 0o600)
-        self.assertEqual(secret, ["--keystore-password", password, "--keystore-entry-password", password])
-        # The file is gone once the patcher has run.
-        self.assertEqual(list(self.job.glob("*.args")), [])
-        with self.assertRaises(BuildError):
-            android.argument_file(self.job / "other.args", ["line\nbreak"])
+        return [json.loads(line) for line in out.getvalue().splitlines()]
+
+    def test_the_patcher_never_sees_the_key_and_kiwi_signs_its_output(self):
+        app = self.android.app("android-youtube")
+        password, store, calls = self.stand_in_for_tools(app)
+        os.environ["KIWI_TEST_SERVER_SECRET"] = "server-secret"
+        self.addCleanup(os.environ.pop, "KIWI_TEST_SERVER_SECRET")
+        events = self.build(app)
+        artifact = events[-1]
+        self.assertEqual((artifact["event"], artifact["signer"]), ("artifact", KIWI_KEY.fingerprint))
+        (patcher, patcher_spec, patcher_env, patcher_options), (signer, signer_spec, signer_env, _) = calls
+        # The patcher: no keystore, no password, no argument file, an unsigned output.
+        self.assertIn("--unsigned", patcher)
+        self.assertFalse([a for a in patcher if a.startswith("--keystore") or a.startswith("@") or a == "--signer"])
+        self.assertNotIn(str(store), " ".join(patcher))
+        for secret in (password, "server-secret"):
+            self.assertNotIn(secret, " ".join(patcher) + json.dumps(patcher_env) + json.dumps(patcher_spec))
+        # Its environment is the minimal one, inside its own folder; nothing of Kiwi's own.
+        box = self.job / "patch"
+        self.assertEqual(patcher_env, {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "HOME": str(box / "home"),
+                                       "TMPDIR": str(box / "tmp"), "MORPHE_DATA_DIR": str(box / "data")})
+        self.assertEqual(patcher_options["cwd"], box)
+        self.assertIn(f"-Djava.io.tmpdir={box / 'tmp'}", patcher)
+        # The sandbox: it writes only its folder and reads its tools and the original, never Kiwi's data.
+        self.assertEqual(patcher_spec["write"], [str(box)])
+        self.assertTrue(patcher_spec["landlock"] and patcher_spec["seccomp"])
+        mine = [p for p in patcher_spec["read"] + patcher_spec["run"] if p not in sandbox.SYSTEM_READ + sandbox.SYSTEM_RUN]
+        self.assertEqual(sorted(mine), sorted([str(self.root / "tools" / "patcher"), str(self.root / "tools" / "patches"),
+                                               str(self.files / "base.apk"), str(self.root / "jre")]))
+        data = str(self.root / "data")
+        self.assertFalse([p for p in patcher_spec["read"] + patcher_spec["run"] + patcher_spec["write"] if p.startswith(data)])
+        # apksigner signs outside the patcher, with the password in its environment only.
+        self.assertEqual(signer[signer.index("--ks") + 1], str(store))
+        self.assertNotIn(password, " ".join(signer) + json.dumps(signer_spec))
+        self.assertEqual(signer_env["KIWI_KEYSTORE"], password)
+        self.assertNotIn("KIWI_TEST_SERVER_SECRET", signer_env)
+        self.assertEqual([signer[signer.index(f"--v{n}-signing-enabled") + 1] for n in (1, 2, 3, 4)],
+                         ["false", "true", "true", "false"])
+        self.assertEqual(signer[-1], str(self.job / "unsigned.apk"))
+        self.assertNotIn(str(box), signer_spec["write"][0] + signer[-1])
+        self.assertNotIn(password.encode(), self.builder.log.getvalue())
+        published = self.builder.root / "artifacts" / f"{artifact['sha256']}.apk"
+        self.assertEqual(apk.inspect(published)["certificates"], [KIWI_KEY.fingerprint])
+
+    def test_a_patcher_that_signs_or_links_its_output_is_refused(self):
+        app = self.android.app("android-youtube")
+        code = app.get("patched_version_code", app["version_code"])
+
+        def signed(box):
+            package(box / "unsigned.apk", STRANGER, name=app["bundle_id"], code=code, version=app["app_version"], abi=None)
+
+        def jar_signed(box):
+            unsigned_package(box / "unsigned.apk", name=app["bundle_id"], code=code, version=app["app_version"])
+            with zipfile.ZipFile(box / "unsigned.apk", "a") as archive:
+                archive.writestr("META-INF/CERT.RSA", b"signature")
+
+        def linked(box):
+            target = self.root / "data" / "automation" / "android" / "keystore.p12"
+            target.write_bytes(b"key")
+            (box / "unsigned.apk").symlink_to(target)
+
+        for patched, message in ((signed, "not a valid unsigned package"), (jar_signed, "not a valid unsigned package"),
+                                 (linked, "produced no app")):
+            for child in self.job.iterdir():
+                shutil.rmtree(child) if child.is_dir() else child.unlink()
+            _password, _store, calls = self.stand_in_for_tools(app, patched=patched)
+            with self.assertRaisesRegex(BuildError, message):
+                self.build(app)
+            self.assertEqual(len(calls), 1, "nothing was signed")
+
+    def test_a_recipe_can_require_the_sandbox(self):
+        app = dict(self.android.app("android-youtube"), sandbox="required")
+        self.android.recipes["apps"] = [app]
+        self.assertEqual(self.android.sandbox_mode(app), "required")
+        self.assertEqual(self.android.sandbox_mode(self.android.app("android-youtube") | {"sandbox": "best-effort"}), "best-effort")
+        with self.assertRaisesRegex(BuildError, "Unknown sandbox setting"):
+            self.android.sandbox_mode(dict(app, sandbox="off"))
+        _password, _store, calls = self.stand_in_for_tools(app)
+        sandbox._probed = {"landlock": None, "seccomp": True, "reasons": ["the kernel has no Landlock"]}
+        with self.assertRaises(BuildError) as raised:
+            self.build(app)
+        self.assertTrue(raised.exception.blocked)
+        self.assertIn("only inside a sandbox", str(raised.exception))
+        self.assertIn("the kernel has no Landlock", str(raised.exception))
+        self.assertEqual(calls, [])
+        # The official recipes run the patcher confined where the computer allows it.
+        self.assertEqual({self.android.sandbox_mode(a) for a in android.Android(self.builder).recipes["apps"]}, {"best-effort"})
+
+    def test_without_a_sandbox_official_builds_run_and_say_so(self):
+        app = self.android.app("android-youtube")
+        _password, _store, calls = self.stand_in_for_tools(app)
+        sandbox._probed = {"landlock": None, "seccomp": False, "reasons": ["Landlock is blocked here"]}
+        self.assertEqual(self.build(app)[-1]["event"], "artifact")
+        self.assertFalse(calls[0][1]["landlock"] or calls[0][1]["seccomp"])
+        self.assertIn(b"kiwi: sandbox unavailable: Landlock is blocked here", self.builder.log.getvalue())
 
     def test_loading_the_key_records_its_certificate_for_the_server(self):
         certificate = PUBLISHER.certificate
@@ -462,6 +580,8 @@ class AndroidTests(unittest.TestCase):
 
         def command(args, **kwargs):
             commands.append([str(a) for a in args])
+            # keytool gets a minimal environment with the password, nothing of Kiwi's own.
+            self.assertEqual(sorted(kwargs["env"]), ["HOME", "KIWI_KEYSTORE", "LANG", "LC_ALL", "PATH", "TMPDIR"])
             if "-genkeypair" in args:
                 Path(args[args.index("-keystore") + 1]).write_bytes(b"keystore")
             return pem if kwargs.get("capture") else None
@@ -621,9 +741,11 @@ class KiwiAppTests(unittest.TestCase):
                                       "source": "local"})
         self.assertTrue(all(e["event"] in ("stage", "kiwi_app") for e in events))
         # apksigner gets the password through its environment, never on its command line.
-        (sign, env), (verify, _) = self.commands
+        (sign, env), (verify, verify_env) = self.commands
         self.assertEqual(sign[3], "sign")
         self.assertEqual(env["KIWI_KEYSTORE"], "keystore-secret")
+        self.assertEqual(sorted(env), ["HOME", "KIWI_KEYSTORE", "LANG", "LC_ALL", "PATH", "TMPDIR"])
+        self.assertNotIn("KIWI_KEYSTORE", verify_env)
         self.assertNotIn("keystore-secret", " ".join(sign + verify))
         self.assertNotIn(b"keystore-secret", self.builder.log.getvalue())
         self.assertEqual([sign[sign.index(f"--v{n}-signing-enabled") + 1] for n in (1, 2, 3, 4)],
@@ -741,8 +863,9 @@ class KiwiAppTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 android.version_code(bad)
 
-    def test_apksigner_does_not_change_the_build_plans(self):
-        self.assertNotIn("apksigner", self.android.build_toolchain())
+    def test_apksigner_is_part_of_the_build_plans(self):
+        # It signs the patched apps as well, so a new version of it rebuilds them.
+        self.assertEqual(self.android.build_toolchain()["apksigner"], self.android.toolchain["apksigner"])
         self.assertEqual(self.android.toolchain["apksigner"]["member"].rsplit("/", 1)[-1], "apksigner.jar")
 
 
@@ -783,6 +906,196 @@ class TransportTests(unittest.TestCase):
             bundle.write_bytes(b"not a zip")
             with self.assertRaisesRegex(android.SourceError, "unreadable"):
                 android.unpack_bundle(bundle, Path(d) / "bad")
+
+
+
+def run_bpf(code, nr, arch):
+    """Evaluates a classic BPF seccomp filter for one system call."""
+    program = [struct.unpack_from("=HBBI", code, at) for at in range(0, len(code), 8)]
+    data, accumulator, pc = struct.pack("=iI", nr, arch) + bytes(56), 0, 0
+    while True:
+        op, jt, jf, k = program[pc]
+        if op == sandbox.LD_ABS_W:
+            accumulator = struct.unpack_from("=I", data, k)[0]
+        elif op == sandbox.JEQ_K:
+            pc += jt if accumulator == k else jf
+        elif op == sandbox.JGE_K:
+            pc += jt if accumulator >= k else jf
+        elif op == sandbox.RET_K:
+            return k
+        else:
+            raise AssertionError(f"unexpected instruction {op:#x}")
+        pc += 1
+
+
+class SandboxTests(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(setattr, sandbox, "_probed", None)
+        self.addCleanup(setattr, sandbox, "PLATFORM", sandbox.PLATFORM)
+        self.log = io.BytesIO()
+
+    def pretend(self, platform, landlock, seccomp, reasons=()):
+        sandbox.PLATFORM = platform
+        sandbox._probed = {"landlock": landlock, "seccomp": seccomp, "reasons": list(reasons)}
+
+    def test_required_needs_landlock_and_the_system_call_filter(self):
+        for landlock, seccomp, reasons in ((None, True, ["no Landlock"]), (6, False, ["seccomp failed"]),
+                                           (None, False, ["blocked"])):
+            self.pretend("linux", landlock, seccomp, reasons)
+            with self.assertRaisesRegex(sandbox.SandboxError, "only inside a sandbox.*" + reasons[0]):
+                sandbox.command(["/bin/tool"], mode="required", log=self.log)
+        self.pretend("linux", 6, True)
+        argv = sandbox.command(["/bin/tool", "x"], mode="required", read=["/in"], run=["/jre"], write=["/box"], log=self.log)
+        spec = json.loads(argv[5])
+        self.assertEqual(argv[6:], ["--", "/bin/tool", "x"])
+        self.assertEqual((spec["landlock"], spec["seccomp"], spec["write"]), (True, True, ["/box"]))
+        self.assertIn("/in", spec["read"])
+        self.assertIn("/jre", spec["run"])
+        self.assertEqual(spec["limits"], sandbox.LIMITS)
+        self.assertIn(b"kiwi: sandbox: Landlock ABI 6 (writes only to /box; no TCP), seccomp (no sockets)", self.log.getvalue())
+        with self.assertRaises(ValueError):
+            sandbox.command(["/bin/tool"], mode="off")
+
+    def test_best_effort_runs_with_what_there_is_and_records_the_rest(self):
+        self.pretend("linux", None, True, ["Landlock is blocked here"])
+        spec = json.loads(sandbox.command(["/bin/tool"], mode="best-effort", log=self.log)[5])
+        self.assertEqual((spec["landlock"], spec["seccomp"]), (False, True))
+        self.assertIn(b"kiwi: sandbox unavailable: Landlock is blocked here\n", self.log.getvalue())
+        # With nothing available the wrapper still applies its limits and no_new_privs.
+        self.pretend("linux", None, False, ["old kernel"])
+        argv = sandbox.command(["/bin/tool"], mode="best-effort", log=self.log)
+        self.assertEqual(argv[3], str(Path(sandbox.__file__).resolve()))
+        self.assertFalse(json.loads(argv[5])["landlock"])
+
+    def test_macos_has_no_sandbox(self):
+        sandbox.PLATFORM, sandbox._probed = "darwin", None
+        self.assertEqual(sandbox.probe()["landlock"], None)
+        with self.assertRaisesRegex(sandbox.SandboxError, "not running Linux"):
+            sandbox.command(["/bin/tool"], mode="required", log=self.log)
+        self.assertEqual(sandbox.command([Path("/bin/tool"), 1], mode="best-effort", log=self.log), ["/bin/tool", "1"])
+        self.assertIn(b"sandbox unavailable: this computer is not running Linux; the tool runs unconfined", self.log.getvalue())
+        self.assertEqual(sandbox.environment("/h", "/t")["LANG"], "en_US.UTF-8")
+        self.assertEqual((sandbox.adopt_orphans(), sandbox.kill_strays()), (False, 0))
+
+    def test_tools_get_a_minimal_environment(self):
+        os.environ["KIWI_TEST_SERVER_SECRET"] = "x"
+        self.addCleanup(os.environ.pop, "KIWI_TEST_SERVER_SECRET")
+        sandbox.PLATFORM = "linux"
+        self.assertEqual(sandbox.environment(Path("/h"), "/t", MORPHE_DATA_DIR=Path("/d")),
+                         {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "HOME": "/h", "TMPDIR": "/t",
+                          "MORPHE_DATA_DIR": "/d"})
+
+    def test_the_system_call_filter_refuses_sockets_and_foreign_abis(self):
+        allow, kill = sandbox.RET_ALLOW, sandbox.RET_KILL_PROCESS
+        for machine, (audit, refused) in sandbox.SECCOMP.items():
+            code, count = sandbox.seccomp_program(machine)
+            self.assertEqual(len(code), 8 * count)
+            for number, error in refused.items():
+                self.assertEqual(run_bpf(code, number, audit), sandbox.RET_ERRNO | error, (machine, number))
+            socket_call = 41 if machine == "x86_64" else 198
+            self.assertEqual(run_bpf(code, socket_call, audit), sandbox.RET_ERRNO | errno.EACCES)
+            for number in (0, 1, 2, 3, 57, 59, 60, 221, 446, 199 if machine == "x86_64" else 42):
+                if number not in refused:
+                    self.assertEqual(run_bpf(code, number, audit), allow, (machine, number))
+            # Another architecture's calls (such as 32-bit x86) end the process.
+            self.assertEqual(run_bpf(code, 0, 0x40000003), kill)
+        x86_64 = sandbox.SECCOMP["x86_64"][0]
+        self.assertEqual(run_bpf(sandbox.seccomp_program("x86_64")[0], sandbox.X32 | 41, x86_64), kill)
+        self.assertEqual(sandbox.seccomp_program("amd64"), sandbox.seccomp_program("x86_64"))
+        with self.assertRaises(OSError):
+            sandbox.seccomp_program("riscv64")
+
+    def test_landlock_rights_follow_the_kernel(self):
+        self.assertEqual(sandbox.handled_fs(1), (1 << 13) - 1)
+        self.assertEqual(sandbox.handled_fs(3), (1 << 15) - 1)
+        self.assertEqual(sandbox.handled_fs(6), (1 << 16) - 1)
+        self.assertFalse(sandbox.WRITE & (sandbox.MAKE_CHAR | sandbox.MAKE_BLOCK | sandbox.IOCTL_DEV))
+        self.assertFalse(sandbox.READ & (sandbox.WRITE_FILE | sandbox.TRUNCATE | sandbox.EXECUTE))
+
+
+def sandbox_available():
+    if sys.platform != "linux":
+        return False
+    sandbox._probed = None
+    found = sandbox.probe()
+    sandbox._probed = None
+    return found["landlock"] is not None and found["seccomp"]
+
+
+@unittest.skipUnless(sandbox_available(), "this kernel or container cannot sandbox (Landlock ABI 3+ and seccomp)")
+class SandboxLiveTests(unittest.TestCase):
+    """The real thing: a Python program confined like the patcher tries to get out."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.root = Path(self.dir.name)
+        self.addCleanup(setattr, sandbox, "_probed", None)
+        self.box = self.root / "job" / "box"
+        self.box.mkdir(parents=True)
+        self.secret = self.root / "keystore.pass"
+        self.secret.write_text("secret")
+        self.input = self.root / "job" / "original.apk"
+        self.input.write_text("original")
+        self.python = [str(Path(sys.executable).resolve().parent.parent), sys.base_prefix, sys.prefix]
+
+    def confined(self, code, mode="required"):
+        argv = sandbox.command([sys.executable, "-I", "-S", "-c", code], mode=mode, read=[self.input], run=self.python,
+                               write=[self.box], log=io.BytesIO())
+        return subprocess.run(argv, env=sandbox.environment(self.box, self.box), capture_output=True, text=True, timeout=60)
+
+    def test_files_outside_the_allowed_set_are_out_of_reach(self):
+        code = f"""
+import os
+def attempt(fn):
+    try:
+        fn()
+        return "allowed"
+    except PermissionError:
+        return "denied"
+print(attempt(lambda: open({str(self.secret)!r}).read()), attempt(lambda: os.listdir({str(self.root)!r})),
+      attempt(lambda: open({str(self.root / 'job' / 'escape')!r}, "w")), attempt(lambda: os.truncate({str(self.secret)!r}, 0)),
+      attempt(lambda: open({str(self.input)!r}).read()), attempt(lambda: open({str(self.box / 'out')!r}, "w").write("x")))
+"""
+        done = self.confined(code)
+        self.assertEqual(done.stdout.split(), ["denied", "denied", "denied", "denied", "allowed", "allowed"], done.stderr)
+        self.assertEqual(self.secret.read_text(), "secret")
+        self.assertFalse((self.root / "job" / "escape").exists())
+
+    def test_there_is_no_network(self):
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        code = f"""
+import socket
+def attempt(fn):
+    try:
+        fn()
+        return "allowed"
+    except PermissionError:
+        return "denied"
+print(attempt(lambda: socket.create_connection(("127.0.0.1", {listener.getsockname()[1]}), timeout=5)),
+      attempt(lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"x", ("127.0.0.1", 9))),
+      attempt(lambda: socket.socket(socket.AF_UNIX)))
+"""
+        done = self.confined(code)
+        self.assertEqual(done.stdout.split(), ["denied", "denied", "denied"], done.stderr)
+
+    def test_a_detached_process_is_ended(self):
+        # In a child Python, which becomes the reaper of what the confined tool leaves behind.
+        script = f"""
+import json, os, subprocess, sys, time
+sys.path.insert(0, {str(Path(sandbox.__file__).resolve().parent)!r})
+import sandbox
+sandbox.adopt_orphans()
+code = "import os\\nif os.fork() == 0:\\n    os.setsid()\\n    fd = os.open('/dev/null', os.O_RDWR)\\n    [os.dup2(fd, n) for n in (0, 1, 2)]\\n    time = __import__('time')\\n    time.sleep(300)\\n"
+argv = sandbox.command([sys.executable, "-I", "-S", "-c", code], mode="required", run={self.python!r}, write=[{str(self.box)!r}])
+subprocess.run(argv, env=sandbox.environment({str(self.box)!r}, {str(self.box)!r}), timeout=60, start_new_session=True)
+print(sandbox.kill_strays())
+"""
+        done = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.stdout.strip(), "1", done.stderr)
 
 
 if __name__ == "__main__":

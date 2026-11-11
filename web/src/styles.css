@@ -1597,6 +1597,17 @@ a.cell-link:active,
   color: var(--red);
 }
 
+/* Nothing set up yet (no Mac paired): neither good nor bad. */
+.status-card.off .status-icon {
+  background: var(--fill);
+  color: var(--label2);
+}
+
+.status-card .status-icon .spinner {
+  width: 18px;
+  height: 18px;
+}
+
 .status-title {
   font-size: 16px;
   font-weight: 650;
@@ -1648,6 +1659,42 @@ a.cell-link:active,
 
 .error-command span {
   white-space: nowrap;
+}
+
+/* Settings › Mac Builder: the command to run in Terminal on the Mac, and its Copy button. */
+.command-cell {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.command-block {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--fill);
+  color: var(--label);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
+}
+
+.command-block span {
+  white-space: nowrap;
+}
+
+.pairing-code {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.builds-off-link {
+  margin-top: 14px;
+  font-weight: 600;
 }
 
 /* Sources */

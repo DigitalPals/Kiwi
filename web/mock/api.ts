@@ -45,6 +45,7 @@ import {
   type MockStoreApp,
 } from "./fixtures.ts";
 import { buildStages, catalogOf, createBuilds, iconBundleId } from "./builds.ts";
+import { BUILDER_UNSUPPORTED, createMockBuilder, type MockBuilderState } from "./builder.ts";
 
 export interface MockRequest {
   method: string;
@@ -84,6 +85,12 @@ export interface MockOptions {
    * profiles, which the upload endpoints change). Defaults to the host's.
    */
   signing?: SigningBackend;
+  /**
+   * The Mac builder of a Kiwi on Linux (ignored on a Mac, which builds iOS apps itself): none
+   * paired (default), a pairing code out, or a paired Mac online, building, offline or running
+   * another version of Kiwi.
+   */
+  builder?: MockBuilderState;
 }
 
 /** The certificate the mock's Android builds are signed with (`PUT /api/me/packages`). */
@@ -211,8 +218,12 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
   };
   const servesAndroidApp = (options.androidApp ?? true) === true;
   const androidAppFailed = options.androidApp === "failed";
-  /** iOS apps are built only on a Mac (`409 needs_mac` elsewhere). */
-  const buildsIos = host.os === "macos";
+  const publicUrl = host.os === "macos" ? "https://mac-studio.example.ts.net" : "https://kiwi.example.ts.net";
+  /** A Kiwi on Linux builds iOS apps on its paired Mac builder. */
+  const macBuilder = createMockBuilder({ supported: host.os !== "macos", publicUrl, version: VERSION });
+  macBuilder.set(host.os === "macos" ? "none" : (options.builder ?? "none"), clock());
+  /** iOS apps are built on a Mac, or on the paired Mac builder (`409 needs_mac` without one). */
+  const buildsIos = () => host.os === "macos" || macBuilder.availability() !== "none";
   const vapid = vapidPublicKey();
   const builds = createBuilds(iso(clock()));
   const simulated = options.builds === "simulated";
@@ -585,7 +596,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       onboarded: db.onboarded,
       server: {
         version: VERSION,
-        public_url: "https://mac-studio.example.ts.net",
+        public_url: publicUrl,
         team_id: TEAM_ID,
         devicectl_available: host.devicectl,
       },
@@ -613,6 +624,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
 
   /** Completes simulated installs and builds whose time has come. */
   function tick(now: number) {
+    macBuilder.tick(now);
     advanceBuilds(now);
     for (const attempt of db.attempts) {
       if (attempt.manifest_at === null || attempt.completed_at || now - attempt.manifest_at < attempt.install_ms) continue;
@@ -670,8 +682,11 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     // The server shows the App Store icon.
     const store = simulated ? findStore(iconBundleId(app.id)) : undefined;
     if (store) view.icon_url = `/__mock/icon/${store.slug}.svg`;
-    // Where iOS apps can't be built, only the missing Mac is checked and nothing is scheduled.
-    if (app.platform !== "android" && !buildsIos) Object.assign(view, { checks: currentChecks(), next_check_at: null });
+    // Off a Mac, iOS apps show the Mac builder's checks; without one only the missing Mac is
+    // checked and nothing is scheduled.
+    if (app.platform !== "android" && host.os !== "macos") {
+      Object.assign(view, { checks: currentChecks(), ...(buildsIos() ? {} : { next_check_at: null }) });
+    }
     // Like the server: how many builds run before each queued job (jobs asked for go first).
     const active = builds.flatMap((b) => b.jobs.filter((j) => !j.finished_at));
     const busy = active.some((j) => j.status === "running") ? 1 : 0;
@@ -685,16 +700,51 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     return view;
   }
 
-  /** The shared setup checks: the App Store's, or only the missing Mac where iOS apps can't be built. */
-  const currentChecks = (): SetupCheck[] => structuredClone(buildsIos ? setupChecks : NEEDS_MAC_CHECKS);
+  /**
+   * The shared setup checks: the App Store's on a Mac, the paired Mac builder's (itself first)
+   * elsewhere, or only the missing Mac where iOS apps can't be built.
+   */
+  function currentChecks(): SetupCheck[] {
+    if (host.os === "macos") return structuredClone(setupChecks);
+    return buildsIos() ? macBuilder.checks() : structuredClone(NEEDS_MAC_CHECKS);
+  }
+
+  /** Why an iOS job waits off a Mac (the server's stage), or null when the Mac builder can take it. */
+  function builderWait(app: AutomationState): string | null {
+    if (app.platform === "android" || host.os === "macos") return null;
+    const availability = macBuilder.availability();
+    if (availability === "offline") return `Waiting for ${macBuilder.name}`;
+    if (availability === "incompatible") return `Waiting for an update of Kiwi on ${macBuilder.name}`;
+    return null;
+  }
+
+  /** The Mac builder's task: the iOS job a simulated build runs. */
+  function builderTask() {
+    for (const app of builds) {
+      const job = app.jobs.find((j) => j.status === "running");
+      if (!job || app.platform === "android") continue;
+      return {
+        job: job.id, app: app.id, name: app.name, command: job.version ? ("build" as const) : ("plan" as const),
+        stage: job.stage, started_at: iso(jobStarts.get(job.id) ?? Date.parse(job.created_at)),
+      };
+    }
+    return null;
+  }
 
   /** Simulated builds: the Mac's one worker takes the oldest job through its stages, then publishes it. */
   function advanceBuilds(now: number) {
     if (!simulated) return;
     for (;;) {
-      const queue = builds
+      const active = builds
         .flatMap((app) => app.jobs.filter((j) => !j.finished_at).map((job) => ({ app, job })))
         .sort((a, b) => a.job.created_at.localeCompare(b.job.created_at));
+      // Like the server, an iOS job waits while the Mac builder is offline or out of date, and
+      // the jobs behind it start instead.
+      const queue = active.filter(({ app, job }) => {
+        const wait = job.status === "queued" ? builderWait(app) : null;
+        if (wait) job.stage = wait;
+        return !wait;
+      });
       const next = queue[0];
       if (!next) return;
       const { app, job } = next;
@@ -866,6 +916,35 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
     throw new HttpError(400, "bad_request", "Request body must be a JSON object.");
   }
 
+  /** The owner's Mac builder routes (Settings › Mac Builder). */
+  function builderRoute(is: (m: string, ...segments: (string | undefined)[]) => boolean, now: number): MockResponse {
+    const unsupported = () => {
+      if (host.os === "macos") throw new HttpError(409, "builder_unsupported", BUILDER_UNSUPPORTED);
+    };
+    if (is("GET", "builder")) return { status: 200, json: macBuilder.info(now, builderTask()) };
+    if (is("POST", "builder", "pairing")) {
+      unsupported();
+      return { status: 201, json: macBuilder.startPairing(now) };
+    }
+    if (is("DELETE", "builder", "pairing")) {
+      macBuilder.cancelPairing();
+      return { status: 204 };
+    }
+    if (is("DELETE", "builder")) {
+      unsupported();
+      if (!macBuilder.remove()) throw new HttpError(404, "not_found", "No Mac builder is paired.");
+      // Its task ends; iOS jobs behave as without a builder.
+      for (const build of builds) if (build.platform !== "android") cancelBuild(build, now);
+      return { status: 204 };
+    }
+    if (is("POST", "builder", "check")) {
+      unsupported();
+      if (!macBuilder.requestCheck(now)) throw new HttpError(409, "conflict", "No Mac builder is paired.");
+      return { status: 202, text: "", contentType: "text/plain" };
+    }
+    throw new HttpError(404, "not_found", "Not found.");
+  }
+
   function route(req: MockRequest, now: number): MockResponse {
     const { method, path, origin } = req;
     const parts = path.split("/").filter(Boolean).map(decodeURIComponent);
@@ -927,6 +1006,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       method === m && segments.length === parts.length - 1 && segments.every((s, i) => s === undefined || s === parts[i + 1]);
 
     if (is("GET", "health")) return ok({ ok: true, version: VERSION });
+    if (resource === "builder") return builderRoute(is, now);
     if (resource === "automation" && !db.settings.kiwi_builds) {
       throw new HttpError(409, "builds_off", "Kiwi Builds is off. Turn it on in Settings.");
     }
@@ -949,7 +1029,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       };
       // Like the server: an iOS app can't be added or checked where it can't be built.
       const requireBuildable = () => {
-        if (build.platform !== "android" && !buildsIos) throw new HttpError(409, "needs_mac", NEEDS_MAC);
+        if (build.platform !== "android" && !buildsIos()) throw new HttpError(409, "needs_mac", NEEDS_MAC);
       };
       const schedule = () => {
         build.next_check_at = build.added && build.preferences.enabled
@@ -974,6 +1054,18 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
           if (force) forcedJobs.add(`mock-${build.id}-${build.sequence}`);
           schedule();
           advanceBuilds(now);
+          return;
+        }
+        const wait = builderWait(build);
+        if (wait) {
+          // The Mac builder is away: the job waits for it (cancel it to stop waiting).
+          build.jobs.unshift({
+            id: `mock-${build.id}-${build.sequence}`, app: build.id, sequence: build.sequence, status: "queued", stage: wait,
+            version: null, external_id: null, recipe_key: null, signed_build_id: null, error: null, created_at: iso(now),
+            finished_at: null, preferences: structuredClone(build.preferences), interactive: true,
+          });
+          build.jobs = build.jobs.slice(0, 30);
+          schedule();
           return;
         }
         if (build.platform !== "android") build.checks = [{ name: "Mac build tools", ready: false }];
@@ -1390,6 +1482,12 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
         if (error instanceof HttpError) return { status: error.status, json: { error: { code: error.code, message: error.message } } };
         return { status: 500, json: { error: { code: "internal", message: String(error) } } };
       }
+    },
+    /** Switches the Mac builder's state (`POST /__mock/builder`); false on a Mac. */
+    setBuilder(state: MockBuilderState): boolean {
+      if (host.os === "macos") return false;
+      macBuilder.set(state, clock());
+      return true;
     },
     /** A new version of an app on the App Store, so Kiwi Builds has something to update to. */
     releaseOnAppStore(bundleId: string, version: string): boolean {

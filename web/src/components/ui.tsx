@@ -301,3 +301,12 @@ export function ExpandableText({ text, lines = 4 }: { text: string; lines?: numb
     </div>
   );
 }
+
+/** A command to run in Terminal, selectable with one tap; lines break between its words. */
+export function CommandText({ command, class: className = "error-command" }: { command: string; class?: string }) {
+  return (
+    <code class={className}>
+      {command.split(" ").flatMap((part, i) => [i > 0 ? " " : null, <span key={i}>{part}</span>])}
+    </code>
+  );
+}

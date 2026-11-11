@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../api/client";
-import type { AutomationPreferences, AutomationState } from "../api/types";
+import type { AutomationPreferences, AutomationState, BuilderInfo } from "../api/types";
 import { AppIcon } from "../components/AppIcon";
 import { BackBar, Banner, Cell, ErrorState, Loading, Section, Spinner, Toggle } from "../components/ui";
 import {
@@ -9,10 +9,21 @@ import {
 } from "../lib/automation";
 import { formatDateTime, formatRelative, formatVersion } from "../lib/format";
 import { useOnForeground, useResource, useTask } from "../lib/hooks";
-import { BUILDS_PATH } from "../lib/routes";
-import { AndroidTag, ExperimentalTag, SetupCells } from "./Builds";
+import { NEEDS_MAC_CHECK } from "../lib/builder";
+import { BUILDS_PATH, MAC_BUILDER_PATH } from "../lib/routes";
+import { AndroidTag, ExperimentalTag, SetupCells, useBuilderInfo } from "./Builds";
 
 type Edit = (patch: Partial<AutomationPreferences>) => void;
+
+/** An iOS app where no Mac builds it: the way to pair one, instead of a dead end. */
+function NeedsBuilder({ data }: { data: AutomationState }) {
+  if (data.platform === "android" || !data.checks.some((c) => c.name === NEEDS_MAC_CHECK)) return null;
+  return (
+    <Banner level="info" icon="server" href={MAC_BUILDER_PATH}>
+      <strong>iOS apps need a Mac builder.</strong> Pair a Mac in Settings › Mac Builder to build {data.name}.
+    </Banner>
+  );
+}
 
 function Hero({ data }: { data: AutomationState }) {
   return (
@@ -78,6 +89,7 @@ function AddApp({ data, onAdded }: { data: AutomationState; onAdded: (state: Aut
   const edit: Edit = (patch) => setPreferences({ ...preferences, ...patch });
   return (
     <>
+      <NeedsBuilder data={data} />
       {data.warning && <Banner level="warning">{data.warning}</Banner>}
       {add.error && <Banner level="error">{add.error}</Banner>}
       <Limitations data={data} title="Before You Add" />
@@ -97,7 +109,7 @@ function AddApp({ data, onAdded }: { data: AutomationState; onAdded: (state: Aut
   );
 }
 
-function Added({ data, state }: { data: AutomationState; state: ReturnType<typeof useAutomation> }) {
+function Added({ data, state, info }: { data: AutomationState; state: ReturnType<typeof useAutomation>; info?: BuilderInfo }) {
   const [draft, setDraft] = useState<AutomationPreferences | null>(null);
   const check = useTask(async (force: boolean) => {
     state.mutate(await api.checkAutomation(data.id, force));
@@ -132,6 +144,7 @@ function Added({ data, state }: { data: AutomationState; state: ReturnType<typeo
   return (
     <>
       <p class="page-summary">{automationSummary(data)}</p>
+      <NeedsBuilder data={data} />
       {error && <Banner level="error">{error}</Banner>}
       {dirty && <Banner level="info">You have unsaved settings. Save Changes below before starting a build.</Banner>}
 
@@ -171,7 +184,9 @@ function Added({ data, state }: { data: AutomationState; state: ReturnType<typeo
       <form onSubmit={(e) => { e.preventDefault(); if (dirty && !save.pending) void save.run(preferences); }}>
         <Section title="Schedule" footer={android
           ? `The Mac builds the ${data.name} version its pinned patches support, and rebuilds when a Kiwi update changes them. Installation still needs your confirmation on the Android device.`
-          : `The Mac checks Apple for new ${data.name} versions, applies your saved patches and signs the result. Installation still needs your confirmation on the iPhone.`}>
+          : info?.builder
+            ? `${info.builder.name} checks Apple for new ${data.name} versions and applies your saved patches; Kiwi signs the result. Installation still needs your confirmation on the iPhone.`
+            : `The Mac checks Apple for new ${data.name} versions, applies your saved patches and signs the result. Installation still needs your confirmation on the iPhone.`}>
           <Cell label="Build Updates Automatically">
             <Toggle checked={preferences.enabled} onChange={(enabled) => edit({ enabled })} label={`Build ${data.name} updates automatically`} disabled={save.pending} />
           </Cell>
@@ -197,7 +212,7 @@ function Added({ data, state }: { data: AutomationState; state: ReturnType<typeo
       <Limitations data={data} title="Known Limitations" />
 
       {!android && <Section title="Mac Setup" footer="Apple account sign-in and enrollment stay on the Mac. Choose Check Now or Build Now above to refresh these checks.">
-        <SetupCells checks={data.checks} />
+        <SetupCells checks={data.checks} info={info} />
       </Section>}
 
       <Section title="Build History">
@@ -228,6 +243,7 @@ function useAutomation(app: string) {
 
 export function Automation({ app }: { app: string }) {
   const state = useAutomation(app);
+  const { info } = useBuilderInfo();
   const data = state.data;
   const active = !!data && !!activeJob(data);
   useOnForeground(() => void state.reload());
@@ -243,7 +259,7 @@ export function Automation({ app }: { app: string }) {
       <BackBar label="Kiwi Builds" fallback={BUILDS_PATH} />
       {!data ? (state.error ? <ErrorState error={state.error} onRetry={state.reload} /> : <Loading />) : <>
         <Hero data={data} />
-        {data.added ? <Added key={data.id} data={data} state={state} /> : <AddApp key={data.id} data={data} onAdded={state.mutate} />}
+        {data.added ? <Added key={data.id} data={data} state={state} info={info} /> : <AddApp key={data.id} data={data} onAdded={state.mutate} />}
       </>}
     </main>
   );

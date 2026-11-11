@@ -13,6 +13,7 @@ import { Browse } from "./screens/Browse";
 import { MyApps } from "./screens/MyApps";
 import { Onboarding } from "./screens/Onboarding";
 import { DeviceScreen, NotificationsScreen, Settings, SigningScreen } from "./screens/Settings";
+import { MacBuilderScreen } from "./screens/MacBuilder";
 import { SourceApps } from "./screens/SourceApps";
 import { Sources } from "./screens/Sources";
 import { Automation } from "./screens/Automation";
@@ -42,6 +43,8 @@ function Screen({ route }: { route: Route }) {
       return <DeviceScreen />;
     case "notifications":
       return <NotificationsScreen />;
+    case "mac-builder":
+      return <MacBuilderScreen />;
     case "builds":
       return <Builds />;
     case "build":

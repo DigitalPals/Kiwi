@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { api, errorMessage } from "../api/client";
-import type { CoreDevice, Host, Identity, Me, Platform, PlatformSource, Profile, Settings as SettingsData, Signing, Warning } from "../api/types";
+import type { BuilderInfo, CoreDevice, Host, Identity, Me, Platform, PlatformSource, Profile, Settings as SettingsData, Signing, Warning } from "../api/types";
 import { KiwiAppIcon } from "../components/AppIcon";
 import { Icon } from "../components/Icon";
 import { KiwiLogo } from "../components/KiwiLogo";
@@ -16,7 +16,8 @@ import {
   Spinner,
   Toggle,
 } from "../components/ui";
-import { buildsIos, buildsNotice } from "../lib/automation";
+import { buildsNotice } from "../lib/automation";
+import { rowValue } from "../lib/builder";
 import { hasFeature } from "../lib/features";
 import {
   expiryInfo,
@@ -35,10 +36,11 @@ import { useResource, useTask } from "../lib/hooks";
 import { useMe } from "../lib/me";
 import { isUndetected } from "../lib/onboarding";
 import { blockedMessage, pushSupport, subscribe, subscriptionBody, usableSubscription, type PushSupport } from "../lib/push";
-import { BUILDS_PATH, DEVICE_PATH, NOTIFICATIONS_PATH, SIGNING_PATH } from "../lib/routes";
+import { BUILDS_PATH, DEVICE_PATH, MAC_BUILDER_PATH, NOTIFICATIONS_PATH, SIGNING_PATH } from "../lib/routes";
 import { checkUploadSize, readBase64, signingSummary, splitCommand, uploadErrorMessage, UPLOADS, type UploadKind } from "../lib/signing";
 import { countryName } from "../lib/store";
 import { listedSettingsWarnings } from "../lib/warnings";
+import { useBuilderInfo } from "./Builds";
 
 /** Text field that saves on blur or Return when changed. */
 function InlineField(props: {
@@ -851,10 +853,22 @@ function usePreferences() {
 }
 
 /** What Kiwi Builds does for this device, under its switch. */
-function buildsFooter(android: boolean, host: Host): string {
+function buildsFooter(android: boolean, host: Host, info: BuilderInfo | undefined): string {
   if (android) return "Patch Android apps with open-source patches and sign them with this Kiwi's own key.";
-  if (buildsIos(host)) return "Patch App Store apps with open-source tweaks and sign them on this Mac.";
-  return "iPhone apps can only be built on a Mac, and this Kiwi doesn't run on macOS. Here Kiwi Builds patches Android apps.";
+  if (host.os === "macos") return "Patch App Store apps with open-source tweaks and sign them on this Mac.";
+  if (info?.builder) return `Patch App Store apps with open-source tweaks on ${info.builder.name} and sign them here.`;
+  if (!info) return "iOS apps are built on a Mac you pair as Mac Builder.";
+  return "iOS apps need a Mac builder: pair a Mac to build them. Until then, Kiwi Builds patches Android apps here.";
+}
+
+/** Settings › Mac Builder, where a Kiwi that doesn't run on macOS pairs the Mac that builds iOS apps. */
+function MacBuilderCell({ info, error }: { info: BuilderInfo | undefined; error: Error | null }) {
+  let value;
+  if (info) {
+    const { text, tone } = rowValue(info);
+    value = tone ? <span class={`tone-${tone}`}>{text}</span> : text;
+  } else value = error ? "Unknown" : <Spinner />;
+  return <LinkCell href={MAC_BUILDER_PATH} icon="server" label="Mac Builder" value={value} />;
 }
 
 /**
@@ -868,16 +882,20 @@ function BuildsSection(props: {
   android?: boolean;
 }) {
   const { data, update, host, android = false } = props;
+  // A Kiwi that doesn't run on macOS builds iOS apps on a paired Mac (none on Android).
+  const { info, error } = useBuilderInfo();
+  const builderRow = !android && host.os !== "macos" && info?.supported !== false;
   const toggle = (on: boolean) => {
-    if (on && !window.confirm(buildsNotice(android, host))) return;
+    if (on && !window.confirm(buildsNotice(android, host, info))) return;
     void update({ kiwi_builds: on });
   };
   return (
-    <Section title="Kiwi Builds" footer={buildsFooter(android, host)}>
+    <Section title="Kiwi Builds" footer={buildsFooter(android, host, info)}>
       <Cell label="Kiwi Builds" icon="wrench" sub={data.kiwi_builds ? undefined : "Off"}>
         <Toggle label="Kiwi Builds" checked={data.kiwi_builds} onChange={toggle} />
       </Cell>
       {data.kiwi_builds && !android && <LinkCell href={BUILDS_PATH} label="Apps, Patches and Schedules" />}
+      {builderRow && <MacBuilderCell info={info} error={error} />}
     </Section>
   );
 }

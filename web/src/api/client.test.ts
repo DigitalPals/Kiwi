@@ -237,3 +237,35 @@ describe("api client", () => {
     await expect(client.forget("x")).resolves.toBeUndefined();
   });
 });
+
+describe("Mac builder routes", () => {
+  it("reads, pairs, cancels, checks and removes the Mac builder", async () => {
+    const pairing = { code: "K7QF-9XMD-2PLA", expires_at: "2026-11-11T12:10:00Z", command: "./install.sh --builder" };
+    const { calls, client } = await primed((call) => {
+      if (call.init.method === "DELETE") return new Response(null, { status: 204 });
+      if (call.input === "/api/builder/check") return new Response(null, { status: 202 });
+      if (call.input === "/api/builder/pairing") return json(pairing, 201);
+      return json({ supported: true, reason: null, builder: null, pairing: null });
+    });
+    expect(await client.builder()).toEqual({ supported: true, reason: null, builder: null, pairing: null });
+    expect(await client.pairBuilder()).toEqual(pairing);
+    expect(await client.cancelBuilderPairing()).toBeUndefined();
+    // 202 Accepted without a JSON body is no "unexpected response".
+    expect(await client.checkBuilder()).toBeUndefined();
+    expect(await client.removeBuilder()).toBeUndefined();
+    expect(calls.map((c) => `${c.init.method} ${c.input}`)).toEqual([
+      "GET /api/builder",
+      "POST /api/builder/pairing",
+      "DELETE /api/builder/pairing",
+      "POST /api/builder/check",
+      "DELETE /api/builder",
+    ]);
+    expect(calls.slice(1).every((c) => headers(c)["X-Kiwi"] === "1")).toBe(true);
+  });
+
+  it("reports the builder error codes", async () => {
+    const { client } = await primed(() =>
+      json({ error: { code: "builder_unsupported", message: "This Kiwi runs on a Mac and builds iOS apps itself." } }, 409));
+    await expect(client.pairBuilder()).rejects.toMatchObject({ status: 409, code: "builder_unsupported" });
+  });
+});

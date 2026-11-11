@@ -497,3 +497,49 @@ export interface AutomationOverview {
   apps: AutomationState[];
   checks: SetupCheck[];
 }
+
+/** What the Mac builder is doing now: a build or plan for an app, or a check of the Mac. */
+export interface BuilderTask {
+  /** The Kiwi Builds job (plan and build); a doctor task has none. */
+  job: string | null;
+  /** The recipe, e.g. "ios-youtube". */
+  app: string | null;
+  /** The app's name, e.g. "YouTube". */
+  name: string | null;
+  command: "plan" | "build" | "doctor";
+  stage: string;
+  started_at: string;
+}
+
+/** The Mac paired as this Kiwi's builder of iOS apps. */
+export interface Builder {
+  name: string;
+  paired_at: string;
+  last_seen: string | null;
+  /** It polled or reported on a task within the last minute. */
+  online: boolean;
+  /** It runs the same Kiwi (runner and recipes) as this server; iOS jobs wait while it doesn't. */
+  compatible: boolean;
+  version: string;
+  os: string;
+  /** "Mac builder" first, then the Mac's own setup checks. */
+  checks: SetupCheck[];
+  task: BuilderTask | null;
+}
+
+/** A one-time code for pairing a Mac, valid for 10 minutes. */
+export interface BuilderPairing {
+  code: string;
+  expires_at: string;
+  /** What to run in Terminal on the Mac. */
+  command: string;
+}
+
+/** `GET /api/builder`: Settings › Mac Builder. */
+export interface BuilderInfo {
+  /** false on a Kiwi that runs on a Mac: it builds iOS apps itself (`reason` says so). */
+  supported: boolean;
+  reason: string | null;
+  builder: Builder | null;
+  pairing: BuilderPairing | null;
+}

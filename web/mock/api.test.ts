@@ -5,6 +5,8 @@ import type {
   AutomationOverview,
   AutomationState,
   Build,
+  BuilderInfo,
+  BuilderPairing,
   Me,
   Settings,
   Signing,
@@ -557,5 +559,91 @@ describe("mock signing", () => {
     const android = signingSetup("files", "android");
     android("DELETE", "/api/signing/identity");
     expect(signingWarnings(android)).toEqual([]);
+  });
+});
+
+describe("mock Mac builder", () => {
+  const builderOf = (request: ReturnType<typeof setup>["request"]) => request("GET", "/api/builder").json as BuilderInfo;
+
+  it("is not supported on a Mac", () => {
+    const { request } = setup();
+    expect(builderOf(request)).toEqual({
+      supported: false, reason: "This Kiwi runs on a Mac and builds iOS apps itself.", builder: null, pairing: null,
+    });
+    const pair = request("POST", "/api/builder/pairing");
+    expect(pair.status).toBe(409);
+    expect((pair.json as { error: { code: string } }).error.code).toBe("builder_unsupported");
+  });
+
+  it("pairs a Mac with a one-time code, after which iOS apps can be added", () => {
+    const { request, advance } = setup({ host: "linux" });
+    expect(builderOf(request)).toEqual({ supported: true, reason: null, builder: null, pairing: null });
+    const pair = request("POST", "/api/builder/pairing");
+    expect(pair.status).toBe(201);
+    const pairing = pair.json as BuilderPairing;
+    expect(pairing.code).toMatch(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
+    expect(pairing.command).toBe(`./install.sh --builder --server https://kiwi.example.ts.net --pair ${pairing.code}`);
+    expect(Date.parse(pairing.expires_at) - Date.parse("2026-10-29T12:00:00Z")).toBe(10 * 60_000);
+    expect(builderOf(request).pairing).toEqual(pairing);
+    // The imitated Mac runs the command.
+    advance(15_000);
+    const paired = builderOf(request);
+    expect(paired.pairing).toBeNull();
+    expect(paired.builder).toMatchObject({ name: "Mac Studio", online: true, compatible: true, task: null });
+    expect(paired.builder?.checks[0]).toEqual({ name: "Mac builder", ready: true });
+    const overview = request("GET", "/api/automation").json as AutomationOverview;
+    expect(overview.checks.map((c) => c.name)).toEqual(["Mac builder", "Mac build tools", "Tweak toolchain", "App Store sign-in", "Private decryption enrollment"]);
+    const twitch = request("GET", "/api/automation/twitch").json as AutomationState;
+    expect(request("POST", "/api/automation/twitch/add", twitch.preferences).status).toBe(202);
+  });
+
+  it("drops a code when it expires or is cancelled", () => {
+    const { api, request, advance } = setup({ host: "linux", builder: "pairing" });
+    expect(builderOf(request).pairing).not.toBeNull();
+    advance(10 * 60_000);
+    expect(builderOf(request)).toMatchObject({ builder: null, pairing: null });
+    api.setBuilder("pairing");
+    expect(request("DELETE", "/api/builder/pairing").status).toBe(204);
+    expect(builderOf(request).pairing).toBeNull();
+  });
+
+  it("lets queued iOS jobs wait while the Mac is offline or out of date", () => {
+    const { api, request } = setup({ host: "linux", builder: "offline", builds: "simulated" });
+    const offline = builderOf(request).builder!;
+    expect(offline).toMatchObject({ online: false, task: null });
+    expect(builderOf(request).builder?.checks[0]).toEqual({ name: "Mac builder", ready: false });
+    const youtube = request("GET", "/api/automation/youtube").json as AutomationState;
+    const added = request("POST", "/api/automation/youtube/add", youtube.preferences).json as AutomationState;
+    expect(added.jobs[0]).toMatchObject({ status: "queued", stage: "Waiting for Mac Studio" });
+    api.setBuilder("incompatible");
+    const waiting = request("GET", "/api/automation/youtube").json as AutomationState;
+    expect(waiting.jobs[0]?.stage).toBe("Waiting for an update of Kiwi on Mac Studio");
+    api.setBuilder("online");
+    const running = request("GET", "/api/automation/youtube").json as AutomationState;
+    expect(running.jobs[0]?.status).toBe("running");
+    expect(builderOf(request).builder?.task).toMatchObject({ app: "youtube", name: "YouTube" });
+  });
+
+  it("checks the Mac again and unpairs it", () => {
+    const { request, advance } = setup({ host: "linux", builder: "online" });
+    const check = request("POST", "/api/builder/check");
+    expect(check.status).toBe(202);
+    advance(2000);
+    expect(builderOf(request).builder?.task).toMatchObject({ command: "doctor" });
+    advance(6000);
+    expect(builderOf(request).builder?.task).toBeNull();
+    expect(request("DELETE", "/api/builder").status).toBe(204);
+    expect(builderOf(request).builder).toBeNull();
+    expect(request("DELETE", "/api/builder").status).toBe(404);
+    expect(request("POST", "/api/builder/check").status).toBe(409);
+    const overview = request("GET", "/api/automation").json as AutomationOverview;
+    expect(overview.checks).toEqual([{ name: "macOS", ready: false }]);
+  });
+
+  it("shows a running build and a different version", () => {
+    const building = setup({ host: "linux", builder: "building" });
+    expect(builderOf(building.request).builder?.task).toMatchObject({ command: "build", name: "YouTube", stage: "Decrypting YouTube" });
+    const old = setup({ host: "linux", builder: "incompatible" });
+    expect(builderOf(old.request).builder).toMatchObject({ online: true, compatible: false, task: null });
   });
 });

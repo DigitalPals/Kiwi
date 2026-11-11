@@ -1,22 +1,15 @@
 import { useEffect } from "preact/hooks";
 import { api, ApiError } from "../api/client";
-import type { AutomationState, SetupCheck } from "../api/types";
+import type { AutomationState, BuilderInfo, SetupCheck } from "../api/types";
 import { AppIcon } from "../components/AppIcon";
 import { Icon } from "../components/Icon";
-import { BackBar, Cell, Empty, ErrorState, LinkCell, Loading, Page, Section, Spinner } from "../components/ui";
-import { activeJob, appsForDevice, BUILD_SOURCE_ID, buildsIos, buildsNotice, statusLine } from "../lib/automation";
-import { useFeatures } from "../lib/features";
+import { BackBar, Banner, Cell, CommandText, Empty, ErrorState, LinkCell, Loading, Page, Section, Spinner } from "../components/ui";
+import { activeJob, appsForDevice, BUILD_SOURCE_ID, buildsNotice, statusLine } from "../lib/automation";
+import { checkView, iosBuilds, NEEDS_MAC_CHECK } from "../lib/builder";
+import { hasFeature, useFeatures } from "../lib/features";
 import { useOnForeground, useResource, useTask } from "../lib/hooks";
 import { useMe } from "../lib/me";
-import { buildPath, sourcePath } from "../lib/routes";
-
-export const SETUP_HELP: Record<string, string> = {
-  "Mac build tools": "Install Xcode and Kiwi's build tools on the Mac.",
-  "Tweak toolchain": "Install the patch compiler using Kiwi's Mac setup instructions.",
-  "App Store sign-in": "Sign in to Kiwi's App Store downloader on the Mac. Apple may ask for a verification code.",
-  "Private decryption enrollment": "Install and open an iPhone or iPad app from the Mac App Store, then enroll the Mac.",
-  macOS: "iOS apps can only be built on a Mac. This Kiwi doesn't run on macOS, so it builds Android apps only.",
-};
+import { buildPath, MAC_BUILDER_PATH, sourcePath } from "../lib/routes";
 
 export function ExperimentalTag() {
   return <span class="tag tag-warn">Experimental</span>;
@@ -45,17 +38,51 @@ function BuildRow({ app }: { app: AutomationState }) {
   );
 }
 
-export function SetupCells({ checks }: { checks: SetupCheck[] }) {
-  if (checks.length === 0) return <Cell label="Setup has not been checked" sub="Start a build to check the Mac." />;
+/**
+ * The setup checks, each with its fix. The missing or unavailable Mac builder links to
+ * Settings › Mac Builder, except on that page itself (`link` false).
+ */
+export function CheckCells({ checks, info, link = false }: { checks: SetupCheck[]; info?: BuilderInfo; link?: boolean }) {
   return (
     <>
-      {checks.map((item) => (
-        <Cell key={item.name} label={item.name} sub={!item.ready ? SETUP_HELP[item.name] : undefined}>
-          <span class={item.ready ? "tone-ok" : "danger"}>{item.ready ? "Ready" : "Setup needed"}</span>
-        </Cell>
-      ))}
+      {checks.map((check) => {
+        const view = checkView(check, info);
+        const status = <span class={view.ready ? "tone-ok" : view.settings ? "tone-warn" : "danger"}>{view.status}</span>;
+        const sub = view.hint && (
+          <>
+            {view.hint}
+            {view.command && <CommandText command={view.command} />}
+          </>
+        );
+        if (view.settings && link) return <LinkCell key={check.name} href={MAC_BUILDER_PATH} label={view.label} sub={sub} value={status} />;
+        return <Cell key={check.name} label={view.label} sub={sub}>{status}</Cell>;
+      })}
     </>
   );
+}
+
+export function SetupCells({ checks, info }: { checks: SetupCheck[]; info?: BuilderInfo }) {
+  if (checks.length === 0) return <Cell label="Setup has not been checked" sub="Start a build to check the Mac." />;
+  return <CheckCells checks={checks} info={info} link />;
+}
+
+/**
+ * `GET /api/builder` where iOS apps are built on a paired Mac (a Kiwi not on macOS, on an
+ * iPhone): whether one is paired and how it is doing. Undefined elsewhere or until known.
+ */
+export function useBuilderInfo(): { info: BuilderInfo | undefined; error: Error | null } {
+  const { me } = useMe();
+  const wanted = !!me && me.host.os !== "macos" && !hasFeature(me, "android_apps");
+  const resource = useResource<BuilderInfo | null>(wanted ? "builder" : "builder:none", () => (wanted ? api.builder() : Promise.resolve(null)));
+  useOnForeground(() => void resource.reload());
+  return wanted ? { info: resource.data ?? undefined, error: resource.error } : { info: undefined, error: null };
+}
+
+/** The line under Kiwi Builds' title on an iPhone: where its apps are built. */
+function summary(builds: ReturnType<typeof iosBuilds>, needsBuilder: boolean, builder: string | undefined): string {
+  if (needsBuilder) return "iOS apps need a Mac builder";
+  if (builder) return `Patched on ${builder}, signed by Kiwi`;
+  return builds === "unknown" ? "Patched App Store apps" : "Patched and signed on your Mac";
 }
 
 /**
@@ -64,14 +91,18 @@ export function SetupCells({ checks }: { checks: SetupCheck[] }) {
  */
 export function Builds() {
   const android = useFeatures().has("android_apps");
-  // An iPhone on a Kiwi that doesn't run on macOS: its apps can't be built here.
   const host = useMe().me?.host;
-  const noMac = !android && !!host && !buildsIos(host);
+  // An iPhone on a Kiwi that doesn't run on macOS: its apps are built on the paired Mac builder.
+  const { info } = useBuilderInfo();
+  const builder = info?.builder ?? null;
   const overview = useResource("automation", api.automationOverview);
   const sources = useResource("sources", api.sources);
   const source = sources.data?.find((s) => s.id === BUILD_SOURCE_ID);
   const data = overview.data;
   const active = !!data?.apps.some((a) => activeJob(a));
+  const builds = android || !host ? "local" : iosBuilds(host, info);
+  // Until `GET /api/builder` answers, the missing Mac shows in the checks.
+  const needsBuilder = builds === "none" || (builds === "unknown" && !!data?.checks.some((c) => c.name === NEEDS_MAC_CHECK));
   useOnForeground(() => void overview.reload());
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -94,7 +125,7 @@ export function Builds() {
           type="button"
           class="button"
           disabled={turnOn.pending}
-          onClick={() => window.confirm(buildsNotice(true, host ?? { os: "other" })) && void turnOn.run()}
+          onClick={() => window.confirm(buildsNotice(true, host ?? { os: "other" }, info)) && void turnOn.run()}
         >
           {turnOn.pending ? <Spinner /> : "Turn On Kiwi Builds"}
         </button>
@@ -104,13 +135,20 @@ export function Builds() {
       <Empty
         icon="wrench"
         title="Kiwi Builds Is Off"
-        message={noMac
-          ? "iPhone apps can only be built on a Mac. Turn it on in Settings to patch Android apps on this Kiwi."
-          : "Turn it on in Settings to patch App Store apps on this Mac."}
+        message={needsBuilder
+          ? "Turn it on in Settings. iOS apps also need a Mac builder, which you pair in Settings › Mac Builder."
+          : builder
+            ? `Turn it on in Settings to patch App Store apps on ${builder.name}.`
+            : "Turn it on in Settings to patch App Store apps on this Mac."}
       >
         <a class="button" href="/settings">
           Open Settings
         </a>
+        {needsBuilder && (
+          <a class="link builds-off-link" href={MAC_BUILDER_PATH}>
+            Pair a Mac
+          </a>
+        )}
       </Empty>
     );
   } else if (!data) {
@@ -122,6 +160,11 @@ export function Builds() {
     const ready = data.checks.length > 0 && data.checks.every((c) => c.ready);
     content = (
       <>
+        {!android && needsBuilder && (
+          <Banner level="info" icon="server" href={MAC_BUILDER_PATH}>
+            <strong>iOS apps need a Mac builder.</strong> Pair a Mac in Settings › Mac Builder to build them.
+          </Banner>
+        )}
         {added.length > 0 && (
           <Section title="Your Apps" footer="One build runs at a time. Each app keeps its own schedule.">
             {added.map((app) => <BuildRow key={app.id} app={app} />)}
@@ -132,7 +175,9 @@ export function Builds() {
             title={android ? "Add an Android App" : "Add an App"}
             footer={android
               ? "Downloaded from Google Play, patched with pinned open-source patches and signed with this Kiwi's own key."
-              : "Downloaded with your Apple account, patched from pinned open-source tweaks and signed on the Mac."}
+              : builder
+                ? `Downloaded with your Apple account and patched from pinned open-source tweaks on ${builder.name}, then signed by this Kiwi.`
+                : "Downloaded with your Apple account, patched from pinned open-source tweaks and signed on the Mac."}
           >
             {available.map((app) => <BuildRow key={app.id} app={app} />)}
           </Section>
@@ -148,12 +193,12 @@ export function Builds() {
           </Section>
         )}
         {!android && (
-          <Section title="Mac" footer="Apple account sign-in and enrollment stay on the Mac.">
+          <Section title={builder ? builder.name : "Mac"} footer="Apple account sign-in and enrollment stay on the Mac.">
             {ready ? (
               <Cell label="Mac Setup" sub="Build tools, App Store sign-in, enrollment" icon="server">
                 <span class="tone-ok">Ready</span>
               </Cell>
-            ) : <SetupCells checks={data.checks} />}
+            ) : <SetupCells checks={data.checks} info={info} />}
           </Section>
         )}
       </>
@@ -172,7 +217,7 @@ export function Builds() {
       <header class="page-header">
         <h1 class="large-title">Kiwi Builds</h1>
       </header>
-      <p class="page-summary">{noMac ? "iPhone apps can only be built on a Mac" : "Patched and signed on your Mac"}</p>
+      <p class="page-summary">{summary(builds, needsBuilder, builder?.name)}</p>
       {content}
     </main>
   );

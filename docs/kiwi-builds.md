@@ -534,7 +534,7 @@ Kiwi accepts the builder only through Tailscale from a device of its owner (or, 
    ```sh
    KIWI_DATA="$HOME/Library/Application Support/Kiwi Builder"
    /opt/homebrew/bin/python3.13 "$KIWI_DATA/automation/runner.py" setup --data-dir "$KIWI_DATA"
-   "$HOME/.kiwi-builder-tools/bin/ipatool" auth login
+   "$KIWI_DATA/automation/tools/bin/ipatool" auth login
    /opt/homebrew/bin/python3.13 "$KIWI_DATA/automation/runner.py" enroll \
      --data-dir "$KIWI_DATA" --app "/Applications/<App>.app"   # not after --import-enrollment
    /opt/homebrew/bin/python3.13 "$KIWI_DATA/automation/runner.py" doctor --data-dir "$KIWI_DATA"

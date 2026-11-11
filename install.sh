@@ -1102,7 +1102,7 @@ Next, once, in Terminal on this Mac (docs/kiwi-builds.md, "Mac builder"):
   # 1. The build tools
   $B_PYTHON "\$KIWI_DATA/automation/runner.py" setup --data-dir "\$KIWI_DATA"
   # 2. The App Store sign-in
-  "\$HOME/.kiwi-builder-tools/bin/ipatool" auth login
+  "\$KIWI_DATA/automation/tools/bin/ipatool" auth login
   # 3. Decryption (not needed after --import-enrollment)
   $B_PYTHON "\$KIWI_DATA/automation/runner.py" enroll --data-dir "\$KIWI_DATA" --app "/Applications/<App>.app"
   # 4. Check, then use Check Again in Kiwi's Settings › Mac builder

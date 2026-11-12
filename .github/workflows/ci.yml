@@ -1,10 +1,11 @@
 name: CI
 
+# Not on every push: `fast-test` checks each change (AGENTS.md) and The Beast runs the full suite every night.
+# By hand from the Actions tab, and weekly, so newly published advisories (Dependency audit), toolchain drift and
+# the macOS and Docker jobs, which nothing else runs, still show up. The Android app has its own workflow
+# (android.yml).
 on:
-  push:
-  pull_request:
-  # Weekly, so newly published advisories (Dependency audit) and toolchain drift show up
-  # without a push.
+  workflow_dispatch:
   schedule:
     - cron: "23 5 * * 1"
 
@@ -123,29 +124,3 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - run: docker compose config --quiet
-
-  android:
-    name: Android app
-    # Always GitHub-hosted: ubuntu-latest comes with an Android SDK, while the Beast runner VMs
-    # have no JDK or Android SDK and the Kiwi lane (2 vCPUs, 3 GiB) is too small for Gradle and R8.
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: android
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      # The committed gradle-wrapper.jar must be one Gradle published.
-      - uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
-      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: gradle
-          cache-dependency-path: |
-            android/gradle/libs.versions.toml
-            android/gradle/wrapper/gradle-wrapper.properties
-            android/**/*.gradle.kts
-      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
-        with:
-          packages: "platforms;android-37.0 build-tools;36.0.0"
-      - run: ./gradlew --no-daemon --console=plain test assembleRelease

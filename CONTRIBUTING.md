@@ -15,8 +15,8 @@ Thanks for helping. Kiwi is a small project, so a short conversation first saves
 1. Set up a checkout as described in [docs/development.md](docs/development.md).
 2. Keep each pull request to one change, with tests for new behaviour.
 3. Make sure everything passes before you push. These are the checks CI runs
-   (`.github/workflows/ci.yml`), apart from the Docker image, the macOS job and the
-   Android app:
+   (`.github/workflows/ci.yml`), apart from the Docker image and the macOS job (the
+   Android app has its own workflow, `android.yml`):
 
    ```sh
    cargo fmt --all --check

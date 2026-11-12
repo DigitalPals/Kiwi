@@ -90,8 +90,8 @@ Without them a build is 0.1.0 (code 1), which every release replaces.
 
 ## Releasing a new version
 
-1. Merge the app's changes to `main` and wait for CI (the "Android app" job builds and
-   tests it).
+1. Merge the app's changes to `main` and wait for the "Android app" workflow
+   (`.github/workflows/android.yml`, which builds and tests it on every change to `android/`).
 2. Tag the commit and push the tag:
 
    ```sh

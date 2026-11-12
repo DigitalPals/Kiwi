@@ -28,7 +28,7 @@ concurrency:
 jobs:
   release:
     name: Unsigned release APK
-    # GitHub-hosted like ci.yml's Android job: ubuntu-latest comes with an Android SDK.
+    # GitHub-hosted like android.yml: ubuntu-latest comes with an Android SDK.
     runs-on: ubuntu-latest
     permissions:
       contents: write

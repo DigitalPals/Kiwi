@@ -43,7 +43,8 @@ cd android
 cd ..
 ```
 
-The same checks run in CI (`.github/workflows/ci.yml`). Keep them passing.
+`fast-test` runs the ones a change touches, The Beast runs them all every night, and CI
+(`.github/workflows/ci.yml`) runs them weekly and by hand. Keep them passing.
 
 ### Tests that need a Mac
 
@@ -148,7 +149,7 @@ the catalogue, settings and the API work. Every flag is also an environment vari
 (`KIWI_LISTEN`, `KIWI_DATA_DIR`, `KIWI_PUBLIC_URL`, ...; see `kiwi --help`).
 
 To try the container image: `docker build -t kiwi .`, and `docker compose config` checks
-`compose.yaml`. CI builds the image on every push without publishing it.
+`compose.yaml`. CI builds the image (weekly and by hand) without publishing it.
 
 Requests must name the public URL's host or the listen address (see "Security" in
 [architecture.md](architecture.md)), so when the Vite dev server proxies to a real Kiwi, pass

@@ -35,21 +35,21 @@
         "category": "photo-video"
       },
       "packages": [
-        {"id": "youmod", "repo": ["Tonwalter888/YouMod", "fb6a9f6f3bbfcbe8aa8b92debda6405f2b7be2d7"],
+        {"id": "youmod", "repo": ["Tonwalter888/YouMod", "fb6a9f6f3bbfcbe8aa8b92debda6405f2b7be2d7"], "follow": {"branch": "main"},
          "name": "YouMod", "description": "Ad removal, background playback, downloads and SponsorBlock"},
-        {"id": "ygs", "repo": ["PoomSmart/YouGroupSettings", "4697fb3e277303e0d611362982d9ddaea0424485"]},
-        {"id": "ytvo", "repo": ["PoomSmart/YTVideoOverlay", "8fd630b455fa49050638b126034406705ba9a191"]},
-        {"id": "uncapped", "repo": ["PoomSmart/UncappedAVPlayer", "d3a64ff35cb4af9046ded3f2864d236cbeef9681"]},
-        {"id": "youpip", "repo": ["PoomSmart/YouPiP", "034477a48c8ec18736e26d054106df88c1f0deb3"],
+        {"id": "ygs", "repo": ["PoomSmart/YouGroupSettings", "4697fb3e277303e0d611362982d9ddaea0424485"], "follow": {"branch": "main"}},
+        {"id": "ytvo", "repo": ["PoomSmart/YTVideoOverlay", "8fd630b455fa49050638b126034406705ba9a191"], "follow": {"branch": "main"}},
+        {"id": "uncapped", "repo": ["PoomSmart/UncappedAVPlayer", "d3a64ff35cb4af9046ded3f2864d236cbeef9681"], "follow": {"branch": "main"}},
+        {"id": "youpip", "repo": ["PoomSmart/YouPiP", "034477a48c8ec18736e26d054106df88c1f0deb3"], "follow": {"branch": "main"},
          "optional": true, "default": true, "name": "Picture in Picture",
          "description": "Keep watching in a floating player while using other apps."},
-        {"id": "ryd", "repo": ["PoomSmart/Return-YouTube-Dislikes", "3347d770d699653fae6597bfe3b36ee896fbc9e8"],
+        {"id": "ryd", "repo": ["PoomSmart/Return-YouTube-Dislikes", "3347d770d699653fae6597bfe3b36ee896fbc9e8"], "follow": {"branch": "main"},
          "optional": true, "default": true, "name": "Return YouTube Dislikes",
          "description": "Show estimated dislike counts below videos."},
-        {"id": "ytabconfig", "repo": ["PoomSmart/YTABConfig", "b171adb9f1595484eca2ecf9d53e6eb7612c95f3"],
+        {"id": "ytabconfig", "repo": ["PoomSmart/YTABConfig", "b171adb9f1595484eca2ecf9d53e6eb7612c95f3"], "follow": {"branch": "main"},
          "optional": true, "default": true, "name": "YouTube Experiment Settings",
          "description": "Add controls for YouTube's experimental features."},
-        {"id": "youquality", "repo": ["PoomSmart/YouQuality", "3199d594bbec58f419107fc7b1d9c28f209bcd04"],
+        {"id": "youquality", "repo": ["PoomSmart/YouQuality", "3199d594bbec58f419107fc7b1d9c28f209bcd04"], "follow": {"branch": "main"},
          "optional": true, "default": true, "name": "Video Quality Controls",
          "description": "Choose default video quality for Wi-Fi and mobile data."}
       ],
@@ -78,18 +78,18 @@
         "category": "music"
       },
       "packages": [
-        {"id": "ytmusicultimate", "repo": ["mrdrvt99/YTMusicUltimate", "5d87a092b957a85dc69ffb4424d63de949404472"],
+        {"id": "ytmusicultimate", "repo": ["mrdrvt99/YTMusicUltimate", "5d87a092b957a85dc69ffb4424d63de949404472"], "follow": {"branch": "main"},
          "make": ["SIDELOADING=1"],
          "name": "YTMusicUltimate", "description": "No ads, background play, downloads, OLED theme"},
-        {"id": "rymd", "repo": ["PoomSmart/Return-YouTube-Music-Dislikes", "81d252f2f226591c3675e17d63cd0feea4a9ebc8"],
+        {"id": "rymd", "repo": ["PoomSmart/Return-YouTube-Music-Dislikes", "81d252f2f226591c3675e17d63cd0feea4a9ebc8"], "follow": {"branch": "main"},
          "siblings": [["PoomSmart/Return-YouTube-Dislikes", "3347d770d699653fae6597bfe3b36ee896fbc9e8"]],
          "optional": true, "default": true, "name": "Return YouTube Music Dislikes",
          "description": "Show dislike counts. Uses returnyoutubedislikeapi.com."},
-        {"id": "youmusicpip", "repo": ["PoomSmart/YouMusicPiP", "bf7750f18cb1564fbe7156d50d029da5288e08a4"],
+        {"id": "youmusicpip", "repo": ["PoomSmart/YouMusicPiP", "bf7750f18cb1564fbe7156d50d029da5288e08a4"], "follow": {"branch": "main"},
          "siblings": [["PoomSmart/YouPiP", "034477a48c8ec18736e26d054106df88c1f0deb3"]],
          "optional": true, "default": false, "name": "Picture in Picture",
          "description": "Floating player for music videos."},
-        {"id": "ytmabconfig", "repo": ["PoomSmart/YTMABConfig", "9812e03ba5cd7210d2a313239682648d9d257fee"],
+        {"id": "ytmabconfig", "repo": ["PoomSmart/YTMABConfig", "9812e03ba5cd7210d2a313239682648d9d257fee"], "follow": {"branch": "main"},
          "optional": true, "default": false, "name": "Experiment Settings",
          "description": "Controls for YouTube Music's hidden experiments."}
       ],
@@ -118,7 +118,7 @@
         "category": "entertainment"
       },
       "packages": [
-        {"id": "twitchadblock", "repo": ["wkangg/TwitchAdBlock", "35a70e8c1da135516f4619e4d279670108763aeb"],
+        {"id": "twitchadblock", "repo": ["wkangg/TwitchAdBlock", "35a70e8c1da135516f4619e4d279670108763aeb"], "follow": {"branch": "master"},
          "submodules": true, "make": ["SIDELOADED=1"],
          "patches": [{"file": "Makefile", "find": "ifeq ($(SIDELOADED),1)\nMODULES = jailed\nendif\n", "replace": ""}],
          "name": "TwitchAdBlock", "description": "Blocks ads. Turn it off in the app's settings."}
@@ -152,7 +152,7 @@
         "category": "social"
       },
       "packages": [
-        {"id": "neofreebird", "repo": ["NeoFreeBird/app", "734e7e0a16d77787f3e04b7389c8ce06e1c0ef31"],
+        {"id": "neofreebird", "repo": ["NeoFreeBird/app", "734e7e0a16d77787f3e04b7389c8ce06e1c0ef31"], "follow": {"release": {"tag": "v{version}", "version_prefix": "7.", "asset": "NeoFreeBird-sideloaded-X_{version}_{app_version}.ipa"}},
          "submodules": true, "make": ["SIDELOADED=1", "TARGET=iphone:clang:latest:15.0"], "timeout": 2400,
          "target": "all",
          "products": [".theos/obj/zxPluginsInject.dylib", ".theos/obj/libbhFLEX.dylib", ".theos/obj/BHTwitter.dylib",
@@ -170,7 +170,7 @@
       "limitations": [
         {"icon": "key", "title": "Sign In on x.com", "detail": "In-app web login. Passkeys don't work."},
         {"icon": "bell", "title": "No Push, Widgets or Share Sheet", "detail": "Re-signed apps lose these."},
-        {"icon": "clock", "title": "Follows NeoFreeBird", "detail": "Can trail the App Store by a few days."}
+        {"icon": "clock", "title": "Follows NeoFreeBird", "detail": "Builds the X version the newest NeoFreeBird release supports, as soon as it is released. Can trail the App Store by a few days."}
       ]
     },
     {
@@ -194,7 +194,7 @@
         "category": "social"
       },
       "packages": [
-        {"id": "redditfilter", "repo": ["and101/RedditFilter", "c0365e2af10df1c41f59b047122aa0291c40236f"],
+        {"id": "redditfilter", "repo": ["and101/RedditFilter", "c0365e2af10df1c41f59b047122aa0291c40236f"], "follow": {"release": {"tag": "v{app_version}-{version}"}},
          "submodules": true, "make": ["SIDELOADED=1", "SAFARI_EXTENSION=0"],
          "target": "all",
          "products": [".theos/obj/RedditFilter.dylib", ".theos/obj/RedditSideloadFix.dylib"],
@@ -216,7 +216,7 @@
       "limitations": [
         {"icon": "key", "title": "Sign In May Use a Web Sheet", "detail": "Sign in with your username and password as usual. If Reddit turns that down, a reddit.com sheet opens and finishes the sign-in; complete any 2FA there. Other options → Log in with browser and emailed login links also work."},
         {"icon": "bell", "title": "No Push, Widgets or Share Sheet", "detail": "Re-signed apps lose these."},
-        {"icon": "clock", "title": "Follows RedditFilter", "detail": "Builds the Reddit version supported by the pinned tweak. Newer versions follow after a compatibility update."}
+        {"icon": "clock", "title": "Follows RedditFilter", "detail": "Builds the Reddit version the newest RedditFilter release supports, as soon as it is released."}
       ]
     }
   ]

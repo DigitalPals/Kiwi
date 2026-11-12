@@ -895,6 +895,12 @@ function BuildsSection(props: {
         <Toggle label="Kiwi Builds" checked={data.kiwi_builds} onChange={toggle} />
       </Cell>
       {data.kiwi_builds && !android && <LinkCell href={BUILDS_PATH} label="Apps, Patches and Schedules" />}
+      {data.kiwi_builds && !android && (
+        <Cell label="Follow Tweak Updates" sub="Build newer tweak releases for iOS apps by themselves">
+          <Toggle label="Follow Tweak Updates" checked={data.follow_tweak_updates}
+            onChange={(on) => void update({ follow_tweak_updates: on })} />
+        </Cell>
+      )}
       {builderRow && <MacBuilderCell info={info} error={error} />}
     </Section>
   );

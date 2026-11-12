@@ -79,6 +79,7 @@ pub async fn tick(kiwi: &Arc<Kiwi>, timers: &mut Timers) {
     crate::automation::tick(kiwi);
     crate::mac_builder::tick(kiwi);
     crate::community::kick(kiwi);
+    crate::automation::follow::kick(kiwi);
     crate::kiwi_app::tick(kiwi).await;
     crate::owner::tick(kiwi).await;
     if let Err(e) = crate::android::settle_reports(kiwi, Utc::now()) {

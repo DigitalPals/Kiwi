@@ -64,6 +64,41 @@ def recipe_key(plan):
     return hashlib.sha256(canonical(plan)).hexdigest()
 
 
+PIN_KEYS = {"packages", "app_version", "tweak"}
+
+
+def apply_pins(app, pins):
+    """The recipe with newer tweak sources Kiwi found upstream (its `automation::follow`):
+    commits of packages the recipe lets follow, the app version a followed release supports
+    and the tweak's name with that release's version. No pins: the recipe as it is."""
+    if not pins:
+        return app
+    invalid = BuildError("Kiwi sent invalid tweak update pins")
+    if not isinstance(pins, dict) or not set(pins) <= PIN_KEYS:
+        raise invalid
+    app = json.loads(json.dumps(app))
+    packages = {p["id"]: p for p in app["packages"]}
+    commits = pins.get("packages") or {}
+    if not isinstance(commits, dict):
+        raise invalid
+    for package_id, revision in commits.items():
+        package = packages.get(package_id)
+        if not package or "follow" not in package or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise invalid
+        package["repo"] = [package["repo"][0], revision]
+    version = pins.get("app_version")
+    if version is not None:
+        if not app.get("app_version") or not isinstance(version, str) or not re.fullmatch(r"\d+(?:\.\d+){0,3}", version):
+            raise invalid
+        app["app_version"] = version
+    tweak = pins.get("tweak")
+    if tweak is not None:
+        if not isinstance(tweak, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._+-]{0,59}", tweak):
+            raise invalid
+        app["tweak"] = tweak
+    return app
+
+
 def read_json_output(raw):
     """ipatool logs JSON records; select its last successful result."""
     records = []
@@ -491,6 +526,8 @@ class Builder:
         return tweaks, name if app.get("names") else None
 
     def plan(self, app, options):
+        pins = options.get("pins") or None
+        app = apply_pins(app, pins)
         health = self.doctor()
         emit("health", **health)
         if not health["ready"]:
@@ -518,6 +555,8 @@ class Builder:
                 "recipe": {"toolchain": self.toolchain, "app": app}, "tweaks": tweaks, "name": name,
                 "runner_sha256": digest(Path(__file__)),
                 "toolchain": json.loads((self.tools / "setup.json").read_text())}
+        if pins:
+            plan["pins"] = pins
         plan["key"] = recipe_key(plan)
         emit("plan", plan=plan)
 
@@ -600,6 +639,7 @@ class Builder:
         return products
 
     def build(self, app, plan, sequence, job_dir):
+        app = apply_pins(app, plan.get("pins"))
         expected_key = plan["key"]
         if (expected_key != recipe_key({k: v for k, v in plan.items() if k != "key"}) or plan.get("app") != app["id"]
                 or plan["recipe"] != {"toolchain": self.toolchain, "app": app} or plan["runner_sha256"] != digest(Path(__file__))):

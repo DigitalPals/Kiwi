@@ -74,6 +74,10 @@ pub struct AppView {
     /// Only on community apps: the bundle, how it was chosen and any offered update.
     #[serde(skip_serializing_if = "Option::is_none")]
     community: Option<crate::community::View>,
+    /// iOS packages Kiwi follows upstream, with the sources builds use now.
+    tweak_sources: Vec<super::follow::SourceView>,
+    /// Whether Kiwi follows tweak updates (Settings).
+    follow_tweak_updates: bool,
 }
 
 #[derive(Serialize)]
@@ -181,6 +185,9 @@ fn build_view(
             last + Duration::minutes(i64::from(state.preferences.interval_minutes))
         })
     });
+    let following = kiwi.settings().follow_tweak_updates;
+    let (tweak, app_version) = super::follow::shown(recipe, &state.follow, following);
+    let tweak_sources = super::follow::sources(recipe, &state.follow, following);
     AppView {
         id: recipe.id.clone(),
         platform: recipe.platform,
@@ -189,12 +196,12 @@ fn build_view(
         icon_url: store_icon(kiwi, recipe.icon_id())
             .or_else(|| app.and_then(|a| a.icon_url.as_ref().map(Url::to_string)))
             .map(|u| crate::linked::client_icon(&u)),
-        tweak: recipe.tweak.clone(),
+        tweak,
         summary: recipe.summary.clone(),
         experimental: recipe.experimental,
         warning: recipe.warning.clone(),
         names: recipe.names.clone(),
-        app_version: recipe.app_version.clone(),
+        app_version,
         limitations: recipe.limitations.clone(),
         included: features(recipe.packages.iter().filter(|p| !p.optional)),
         available_tweaks: features(recipe.optional()),
@@ -206,6 +213,8 @@ fn build_view(
         configuration_changed,
         next_check_at,
         community: None,
+        tweak_sources,
+        follow_tweak_updates: following,
     }
 }
 
@@ -270,6 +279,8 @@ fn community_view(kiwi: &Kiwi, id: &str) -> ApiResult<AppView> {
         configuration_changed: false,
         next_check_at: None,
         community: Some(shown.view),
+        tweak_sources: Vec::new(),
+        follow_tweak_updates: false,
     })
 }
 

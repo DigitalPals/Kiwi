@@ -19,6 +19,9 @@ pub struct Settings {
     pub app_store_country: String,
     /// Kiwi Builds: patch App Store apps on the Mac. Off until the owner turns it on.
     pub kiwi_builds: bool,
+    /// Kiwi Builds follows new releases of the iOS apps' tweaks by itself (`automation::follow`);
+    /// off, builds use the sources this Kiwi version pins.
+    pub follow_tweak_updates: bool,
 }
 
 impl Default for Settings {
@@ -33,6 +36,7 @@ impl Default for Settings {
             strip_watch_apps: true,
             app_store_country: "us".into(),
             kiwi_builds: false,
+            follow_tweak_updates: true,
         }
     }
 }
@@ -87,6 +91,7 @@ impl Settings {
                 "devicectl_sync" => next.devicectl_sync = flag()?,
                 "strip_watch_apps" => next.strip_watch_apps = flag()?,
                 "kiwi_builds" => next.kiwi_builds = flag()?,
+                "follow_tweak_updates" => next.follow_tweak_updates = flag()?,
                 "app_store_country" => {
                     next.app_store_country = value
                         .as_str()
@@ -129,7 +134,7 @@ mod tests {
             serde_json::to_value(&s).unwrap(),
             json!({"refresh_interval_minutes":60,"auto_prepare_updates":true,"notify_updates":true,
                    "notify_expiry":true,"devicectl_sync":true,"devicectl_sync_minutes":10,"strip_watch_apps":true,
-                   "app_store_country":"us","kiwi_builds":false})
+                   "app_store_country":"us","kiwi_builds":false,"follow_tweak_updates":true})
         );
     }
 

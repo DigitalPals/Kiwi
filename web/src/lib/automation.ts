@@ -1,6 +1,8 @@
-import type { AutomationJob, AutomationOverview, AutomationPreferences, AutomationState, BuilderInfo, Host } from "../api/types";
+import type {
+  AutomationJob, AutomationOverview, AutomationPreferences, AutomationState, BuilderInfo, Host, TweakPins, TweakSource,
+} from "../api/types";
 import type { IconName } from "../components/Icon";
-import { formatVersion, plural } from "./format";
+import { formatDate, formatVersion, plural } from "./format";
 import { appPath } from "./routes";
 
 /** The built-in source; its id predates the apps other than YouTube. */
@@ -124,4 +126,31 @@ export function buildsNotice(android: boolean, host: Pick<Host, "os">, info?: Pi
 /** Kiwi Builds' apps for this device: Android recipes on Android, the iPhone's elsewhere. */
 export function appsForDevice(apps: readonly AutomationState[], android: boolean): AutomationState[] {
   return apps.filter((app) => (app.platform === "android") === android);
+}
+
+/** A commit as people read it. */
+export const shortSha = (sha: string): string => sha.slice(0, 7);
+
+/**
+ * Where a followed package's source comes from, e.g. "Release v2026.45.0-1.3.8 · 10 Nov" or
+ * "main · 217c79f · 10 Nov"; sources this Kiwi version pins say so.
+ */
+export function sourceLine(source: TweakSource): string {
+  if (!source.updated) {
+    const follows = source.follows === "release" ? "follows releases" : `follows ${source.branch ?? "its branch"}`;
+    return `Kiwi's pinned commit ${shortSha(source.sha)} · ${follows}`;
+  }
+  const date = source.date ? ` · ${formatDate(source.date)}` : "";
+  return source.follows === "release" && source.tag
+    ? `Release ${source.tag}${date}`
+    : `${source.branch ?? "Branch"} · ${shortSha(source.sha)}${date}`;
+}
+
+/** The packages newer sources change, by name: "RedditFilter 1.4.0", "YouMod a1b2c3d". */
+export function pinsLabel(state: AutomationState, pins: TweakPins): string {
+  const names = (state.tweak_sources ?? []).flatMap((s) => {
+    const pin = pins[s.id];
+    return pin && pin.sha !== s.sha ? [`${s.name} ${pin.version ?? shortSha(pin.sha)}`] : [];
+  });
+  return names.length ? names.join(", ") : "Newer sources";
 }

@@ -679,6 +679,7 @@ export function createMockApi(clock: () => number = Date.now, options: MockOptio
       [...(published.tweaks ?? [])].sort().join(",") !== [...app.preferences.tweaks].sort().join(",")
       || (app.names.length > 0 && published.name !== null && published.name !== (app.preferences.name ?? null)));
     view.source_enabled = db.sources.find((s) => s.id === BUILD_SOURCE)?.enabled ?? null;
+    view.follow_tweak_updates = db.settings.follow_tweak_updates;
     // The server shows the App Store icon.
     const store = simulated ? findStore(iconBundleId(app.id)) : undefined;
     if (store) view.icon_url = `/__mock/icon/${store.slug}.svg`;

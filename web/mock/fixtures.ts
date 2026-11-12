@@ -882,6 +882,7 @@ export function createDb(now: number, platform: Platform = "ios", signing: Signi
       strip_watch_apps: true,
       app_store_country: "nl",
       kiwi_builds: true,
+      follow_tweak_updates: true,
     },
     sources,
     apps,

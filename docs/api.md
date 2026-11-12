@@ -106,6 +106,16 @@ runner last reported. Android apps build everywhere.
   Mac builder).
 - `checks`: the shared Mac setup checks. They concern iOS builds only: an Android job
   never changes them and is never blocked by them.
+- Tweak updates (iOS apps; see [Kiwi Builds](kiwi-builds.md#tweak-updates)):
+  `follow_tweak_updates` (the setting), `tweak_sources` (the packages Kiwi follows:
+  `{id,name,repo,follows,branch,sha,tag,version,date,updated}[]`, `follows` is `"release"` or
+  `"branch"`, `sha` the commit builds use now and `updated` true when it is newer than the
+  one this Kiwi version pins; empty for Android apps) and `follow`:
+  `{current,candidate?,tried?,attempts?,failed?,checked_at,error}`. `current` holds the newer
+  sources builds use by package id (`{sha,base,tag?,version?,app_version?,date?,found_at}`;
+  packages absent use the recipe's), `candidate` newer sources being tried, `failed`
+  `{pins,error,at}` the sources Kiwi gave up on, `error` why the last look on GitHub didn't
+  finish. With newer sources, `tweak` and `app_version` name what builds use now.
 
 Preferences, for `PATCH /api/automation/:app` (replaces them) and `POST .../add`:
 
@@ -142,7 +152,8 @@ was running when it was queued), `running`, `ready`, `unchanged`, `blocked`, `fa
 job has `id`, `app`, `sequence`, `stage`, `created_at`, nullable `finished_at`, `version`,
 `external_id`, `recipe_key`, `signed_build_id`, a bounded user-facing `error`, and the
 `preferences` it was started with; changing preferences never changes a queued or running
-job. `interactive` is `true` on jobs someone asked for and absent on scheduled ones (state
+job. A job built with newer tweak sources has `pins` (as `follow.current`), and `trial: true`
+when they were the candidate. `interactive` is `true` on jobs someone asked for and absent on scheduled ones (state
 saved by older versions loads as scheduled). A queued job also has `ahead`: how many builds
 run before it starts, the running one included (`0` when it starts next and the worker is
 free); show it as its place in the queue. `error_kind` says what the owner can do about a
@@ -583,6 +594,8 @@ interface Settings {
   app_store_country: string;        // default: the Mac's region, else "us"; two letters (stored
                                     // lowercase): the App Store storefront originals are looked up in
   kiwi_builds: boolean;             // default false: Kiwi Builds (see above)
+  follow_tweak_updates: boolean;    // default true: build newer tweak releases of iOS apps by
+                                    // themselves (Kiwi Builds › Tweak updates)
 }
 ```
 

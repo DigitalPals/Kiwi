@@ -29,7 +29,7 @@ import sys,json,pathlib,zipfile,plistlib,hashlib,time
 command=sys.argv[1]
 recipe=sys.argv[sys.argv.index('--recipe')+1]
 bundle=dict(youtube='com.google.ios.youtube',twitch='tv.twitch',x='com.atebits.Tweetie2',reddit='com.reddit.Reddit')[recipe]
-version='2026.43.0' if recipe=='reddit' else '21.44.1'
+version='2026.45.0' if recipe=='reddit' else '21.44.1'
 root=pathlib.Path(sys.argv[sys.argv.index('--data-dir')+1])/'automation'
 request=json.loads(pathlib.Path(sys.argv[sys.argv.index('--request')+1]).read_text())
 def emit(kind,**data):print(json.dumps(dict(event=kind,**data)),flush=True)
@@ -651,7 +651,7 @@ async fn reddit_is_supported_and_publishes_signed_updates_with_its_original_bund
     let initial = phone.ok("/api/automation/reddit").await;
     assert_eq!(initial["experimental"], false);
     assert_eq!(initial["added"], false);
-    assert_eq!(initial["app_version"], "2026.43.0");
+    assert_eq!(initial["app_version"], "2026.45.0");
     assert!(initial["available_tweaks"].as_array().unwrap().is_empty());
 
     // Ad removal and sideload fixes are required, not optional build selections.
@@ -668,7 +668,7 @@ async fn reddit_is_supported_and_publishes_signed_updates_with_its_original_bund
     assert_eq!(added.status, StatusCode::ACCEPTED, "{}", added.body);
     let ready = finished_app(&k, "reddit").await;
     assert_eq!(ready["jobs"][0]["status"], "ready", "{ready}");
-    assert_eq!(ready["published"]["version"], "2026.43.0");
+    assert_eq!(ready["published"]["version"], "2026.45.0");
     assert_eq!(ready["published"]["revision"], 1);
     assert_eq!(ready["published"]["tweaks"], json!([]));
     assert_eq!(ready["configuration_changed"], false);
@@ -677,7 +677,7 @@ async fn reddit_is_supported_and_publishes_signed_updates_with_its_original_bund
     let app = phone.ok(path).await;
     assert_eq!(app["name"], "Reddit");
     assert_eq!(app["bundle_id"], "com.reddit.Reddit");
-    assert_eq!(app["releases"][0]["version"], "2026.43.0");
+    assert_eq!(app["releases"][0]["version"], "2026.45.0");
     assert!(app["state"]["install_url"].is_string());
     assert_eq!(k.signer.signed.load(Ordering::SeqCst), 1);
 

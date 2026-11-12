@@ -178,8 +178,8 @@
       "name": "Reddit",
       "app_id": "1064216828",
       "bundle_id": "com.reddit.Reddit",
-      "app_version": "2026.43.0",
-      "tweak": "RedditFilter 1.3.0",
+      "app_version": "2026.45.0",
+      "tweak": "RedditFilter 1.3.8",
       "summary": "No promoted posts or comment ads",
       "experimental": false,
       "interval_minutes": 360,
@@ -189,13 +189,13 @@
         "name": "Reddit",
         "developer": "Private Kiwi build",
         "subtitle": "Reddit with ad removal",
-        "description": "Built privately from the original App Store app and pinned RedditFilter sources. Promoted feed posts and comment ads are hidden by default. Extra filters are available under Profile → Settings → RedditFilter. Sign in using Other options → Log in with browser on the email or username login screen, or use an emailed login link. Each release records its patch recipe.",
+        "description": "Built privately from the original App Store app and pinned RedditFilter sources. Promoted feed posts and comment ads are hidden by default. Extra filters are available under Profile → Settings → RedditFilter. Sign in with your username and password as usual; if Reddit turns that down, a reddit.com sheet finishes the sign-in. Each release records its patch recipe.",
         "tint_color": "#FF4500",
         "category": "social"
       },
       "packages": [
-        {"id": "redditfilter", "repo": ["and101/RedditFilter", "cdae1c0a7cd410a619b908033b48d415fdbac4c6"],
-         "submodules": true, "make": ["SIDELOADED=1"],
+        {"id": "redditfilter", "repo": ["and101/RedditFilter", "c0365e2af10df1c41f59b047122aa0291c40236f"],
+         "submodules": true, "make": ["SIDELOADED=1", "SAFARI_EXTENSION=0"],
          "target": "all",
          "products": [".theos/obj/RedditFilter.dylib", ".theos/obj/RedditSideloadFix.dylib"],
          "patches": [
@@ -205,12 +205,16 @@
             "replace": "      void (^loginHandler)(NSData *, NSURLResponse *, NSError *) =\n          ^(NSData *data, NSURLResponse *_, NSError *error) {\n            completionHandler([@\"{}\" dataUsingEncoding:NSUTF8StringEncoding], response, nil);\n          };\n      NSURLRequest *loginRequest = [NSURLRequest requestWithURL:[NSURL URLWithString:@\"data:application/json,%7B%7D\"]];\n      return %orig(loginRequest, loginHandler);"},
            {"file": "Tweak.xm",
             "find": "    if ([request.URL.path isEqualToString:@\"/auth/v2/oauth/access-token/session\"])\n      return %orig(request, ^(NSData *data, NSURLResponse *response, NSError *error) {\n        if ([response isKindOfClass:NSHTTPURLResponse.class] &&\n            ((NSHTTPURLResponse *)response).statusCode == 200)\n          RFClearPendingWebSession();\n        completionHandler(data, response, error);\n      });",
-            "replace": "    if ([request.URL.path isEqualToString:@\"/auth/v2/oauth/access-token/session\"]) {\n      void (^tokenHandler)(NSData *, NSURLResponse *, NSError *) =\n          ^(NSData *data, NSURLResponse *response, NSError *error) {\n            if ([response isKindOfClass:NSHTTPURLResponse.class] &&\n                ((NSHTTPURLResponse *)response).statusCode == 200)\n              RFClearPendingWebSession();\n            completionHandler(data, response, error);\n          };\n      return %orig(request, tokenHandler);\n    }"}
+            "replace": "    if ([request.URL.path isEqualToString:@\"/auth/v2/oauth/access-token/session\"]) {\n      void (^tokenHandler)(NSData *, NSURLResponse *, NSError *) =\n          ^(NSData *data, NSURLResponse *response, NSError *error) {\n            if ([response isKindOfClass:NSHTTPURLResponse.class] &&\n                ((NSHTTPURLResponse *)response).statusCode == 200)\n              RFClearPendingWebSession();\n            completionHandler(data, response, error);\n          };\n      return %orig(request, tokenHandler);\n    }"},
+           {"file": "Tweak.xm", "find": "    return %orig(request, ^(NSData *data, NSURLResponse *response, NSError *error) {\n      NSInteger status", "replace": "    void (^passwordHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {\n      NSInteger status"},
+           {"file": "Tweak.xm", "find": "        else answer();\n      });\n    });\n  }\n#endif", "replace": "        else answer();\n      });\n    };\n    return %orig(request, passwordHandler);\n  }\n#endif"},
+           {"file": "Tweak.xm", "find": "    kRedditFilterCheckUpdates : @YES,\n", "replace": "    kRedditFilterCheckUpdates : @NO,\n"},
+           {"file": "UpdateChecker.m", "find": "registerDefaults:@{kRedditFilterCheckUpdates : @YES}]", "replace": "registerDefaults:@{kRedditFilterCheckUpdates : @NO}]"}
          ],
          "name": "RedditFilter", "description": "Removes promoted posts and comment ads by default. Includes sideload sign-in fixes and optional filters in Reddit's settings."}
       ],
       "limitations": [
-        {"icon": "key", "title": "Sign In with Browser or Email Link", "detail": "On the email or username login screen, tap Other options → Log in with browser, or paste an emailed login link. Use your Reddit username and password; Google sign-in may fail."},
+        {"icon": "key", "title": "Sign In May Use a Web Sheet", "detail": "Sign in with your username and password as usual. If Reddit turns that down, a reddit.com sheet opens and finishes the sign-in; complete any 2FA there. Other options → Log in with browser and emailed login links also work."},
         {"icon": "bell", "title": "No Push, Widgets or Share Sheet", "detail": "Re-signed apps lose these."},
         {"icon": "clock", "title": "Follows RedditFilter", "detail": "Builds the Reddit version supported by the pinned tweak. Newer versions follow after a compatibility update."}
       ]

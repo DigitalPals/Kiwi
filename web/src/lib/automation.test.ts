@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { AutomationJob, AutomationState, Builder } from "../api/types";
+import type { AutomationJob, AutomationState, Builder, TweakSource } from "../api/types";
 import {
-  appsForDevice, automationSummary, buildsIos, buildsNotice, heroLine, intervalLabel, overviewSummary, samePreferences, selectedFeatures, statusLine,
+  appsForDevice, automationSummary, buildsIos, buildsNotice, heroLine, intervalLabel, overviewSummary, pinsLabel, samePreferences, selectedFeatures,
+  sourceLine, statusLine,
 } from "./automation";
 
 const job = (over: Partial<AutomationJob> = {}): AutomationJob => ({
@@ -121,5 +122,32 @@ describe("buildsIos", () => {
     expect(buildsIos({ os: "other" })).toBe(false);
     expect(buildsIos({ os: "linux" }, { builder: null })).toBe(false);
     expect(buildsIos({ os: "linux" }, { builder: { name: "Mac Studio" } as Builder })).toBe(true);
+  });
+});
+
+describe("tweak updates", () => {
+  const source = (over: Partial<TweakSource> = {}): TweakSource => ({
+    id: "redditfilter", name: "RedditFilter", repo: "and101/RedditFilter", follows: "release", branch: null,
+    sha: "c0365e2af10df1c41f59b047122aa0291c40236f", tag: null, version: null, date: null, updated: false, ...over,
+  });
+
+  it("says where each followed tweak's source comes from", () => {
+    expect(sourceLine(source())).toBe("Kiwi's pinned commit c0365e2 · follows releases");
+    expect(sourceLine(source({ follows: "branch", branch: "master" }))).toBe("Kiwi's pinned commit c0365e2 · follows master");
+    const release = sourceLine(source({ updated: true, tag: "v2026.46.0-1.3.9", date: "2026-11-10T11:26:42Z" }));
+    expect(release).toMatch(/^Release v2026\.46\.0-1\.3\.9 · /);
+    expect(sourceLine(source({ updated: true, follows: "branch", branch: "main", sha: "217c79fc46".padEnd(40, "0") })))
+      .toBe("main · 217c79f");
+  });
+
+  it("names the tweaks newer sources change", () => {
+    const pin = (sha: string, version?: string) => ({ sha, base: "c".repeat(40), found_at: "2026-11-12T00:00:00Z", ...(version ? { version } : {}) });
+    const app = state({
+      tweak_sources: [source(), source({ id: "youmod", name: "YouMod", follows: "branch", branch: "main", sha: "a".repeat(40) })],
+    });
+    expect(pinsLabel(app, { redditfilter: pin("b".repeat(40), "1.4.0"), youmod: pin("d".repeat(40)) }))
+      .toBe("RedditFilter 1.4.0, YouMod ddddddd");
+    // Sources builds already use are not news.
+    expect(pinsLabel(app, { youmod: pin("a".repeat(40)) })).toBe("Newer sources");
   });
 });

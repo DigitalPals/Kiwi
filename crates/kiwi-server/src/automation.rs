@@ -40,6 +40,7 @@ const APK_READER: &str = include_str!("../../../automation/apk.py");
 const SANDBOX: &str = include_str!("../../../automation/sandbox.py");
 const COMMUNITY_RUNNER: &str = include_str!("../../../automation/community.py");
 
+pub mod follow;
 pub(crate) mod process;
 mod view;
 pub use view::{AppView, Overview, app_view, overview};
@@ -125,6 +126,12 @@ pub struct Package {
     pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// An iOS package's repository and pinned commit.
+    #[serde(default)]
+    pub repo: Option<(String, String)>,
+    /// How Kiwi follows newer sources of it ([`follow`]).
+    #[serde(default)]
+    pub follow: Option<follow::Spec>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -275,6 +282,12 @@ pub struct Job {
     /// What a community build was asked to do.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub community: Option<crate::community::JobIntent>,
+    /// Newer tweak sources the build used ([`follow`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pins: Option<follow::Pins>,
+    /// Whether those were newly found sources on trial.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trial: bool,
 }
 fn legacy_app() -> String {
     "youtube".into()
@@ -312,6 +325,8 @@ pub struct AppState {
     pub failed_attempts: u32,
     /// The last Kiwi revision handed out; never reused, also after removing the app.
     pub sequence: u64,
+    /// Newer tweak sources found upstream ([`follow`]).
+    pub follow: follow::Follow,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -354,6 +369,7 @@ impl From<LegacyState> for State {
             failed_recipe: old.failed_recipe,
             failed_attempts: old.failed_attempts,
             sequence: old.sequence,
+            follow: follow::Follow::default(),
         };
         Self {
             apps: BTreeMap::from([("youtube".into(), youtube)]),
@@ -380,6 +396,8 @@ pub struct Automation {
     pub mac: crate::mac_builder::MacBuilder,
     /// Signing Kiwi's own Android app, which shares the worker with the builds.
     pub kiwi_app: Mutex<crate::kiwi_app::Status>,
+    /// Looking upstream for newer tweak sources.
+    pub follow: follow::Follower,
 }
 impl Automation {
     pub fn load(db: &Db, data: &std::path::Path) -> Result<Self, String> {
@@ -413,13 +431,14 @@ impl Automation {
             });
         }
         for recipe in recipes() {
-            state
+            let app = state
                 .apps
                 .entry(recipe.id.clone())
                 .or_insert_with(|| AppState {
                     preferences: recipe.default_preferences(),
                     ..AppState::default()
                 });
+            follow::prune(recipe, &mut app.follow);
         }
         for job in &mut state.jobs {
             if job.active() {
@@ -474,6 +493,7 @@ impl Automation {
             android_runner: RwLock::new(root.join("android.py")),
             builds_ios: AtomicBool::new(cfg!(target_os = "macos")),
             kiwi_app: Mutex::default(),
+            follow: follow::Follower::default(),
         })
     }
     pub fn snapshot(&self) -> State {
@@ -723,6 +743,8 @@ pub(crate) fn push_job(
         interactive: true,
         error_kind: None,
         community: intent,
+        pins: None,
+        trial: false,
     };
     insert_job(s, job);
     Ok(())
@@ -818,6 +840,8 @@ pub fn queue(kiwi: &Arc<Kiwi>, id: &str, force: bool, interactive: bool) -> ApiR
             interactive,
             error_kind: None,
             community: None,
+            pins: None,
+            trial: false,
         };
         insert_job(s, job);
         Ok(())
@@ -925,10 +949,12 @@ pub fn tick(kiwi: &Arc<Kiwi>) {
         return;
     }
     let state = kiwi.automation.snapshot();
+    let following = kiwi.settings().follow_tweak_updates;
     for (id, app) in &state.apps {
+        // Newer tweak sources build as soon as they are found.
         let due = app.last_checked_at.is_none_or(|t| {
             Utc::now() - t >= chrono::Duration::minutes(i64::from(app.preferences.interval_minutes))
-        });
+        }) || follow::pending(&app.follow, following);
         // An iOS app added on a Mac whose data moved to Linux waits for a Mac quietly.
         if app.added
             && app.preferences.enabled
@@ -988,6 +1014,12 @@ async fn work(kiwi: Arc<Kiwi>, job: Job, token: CancellationToken) {
         job.error = error;
         job.error_kind = kind.map(str::to_owned);
         job.finished_at = Some(Utc::now());
+        if job.trial
+            && let Some(app) = s.apps.get_mut(&job.app)
+        {
+            let pins = job.pins.clone().unwrap_or_default();
+            follow::finish(&mut app.follow, &pins, status, job.error.as_deref(), !lost);
+        }
         if status == "failed"
             && !lost
             && let Some(key) = job.recipe_key.clone()
@@ -1154,14 +1186,28 @@ async fn execute(
 ) -> Result<bool, Failure> {
     let id = &job.id;
     let preferences = job.preferences.clone().unwrap_or_default();
-    let events = runner(
-        kiwi,
-        job,
-        "plan",
-        &json!({"app": recipe.id, "tweaks": preferences.tweaks, "name": preferences.name}),
-        token,
-    )
-    .await?;
+    // Newer tweak sources: the candidate when there is one, else those that last built.
+    let following = kiwi.settings().follow_tweak_updates;
+    let (pins, trial) = kiwi
+        .automation
+        .app(&kiwi.db, &recipe.id, |a| {
+            let (pins, trial) = follow::for_build(&a.follow, following);
+            a.follow.tried |= trial;
+            Ok((pins, trial))
+        })
+        .map_err(failed)?;
+    kiwi.automation
+        .job(&kiwi.db, id, |j| {
+            j.pins = (!pins.is_empty()).then(|| pins.clone());
+            j.trial = trial;
+        })
+        .map_err(failed)?;
+    let mut request =
+        json!({"app": recipe.id, "tweaks": preferences.tweaks, "name": preferences.name});
+    if let Some(pins) = follow::request(recipe, &pins) {
+        request["pins"] = pins;
+    }
+    let events = runner(kiwi, job, "plan", &request, token).await?;
     let plan = events
         .iter()
         .find(|e| e["event"] == "plan")
@@ -1842,6 +1888,8 @@ mod tests {
             interactive,
             error_kind: None,
             community: None,
+            pins: None,
+            trial: false,
         }
     }
 
@@ -1928,6 +1976,8 @@ mod tests {
             interactive: false,
             error_kind: None,
             community: None,
+            pins: None,
+            trial: false,
         };
         automation
             .change(&db, |s| {

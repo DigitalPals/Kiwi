@@ -7,6 +7,8 @@ interface RecipePackage {
   default?: boolean;
   name?: string;
   description?: string;
+  repo?: [string, string];
+  follow?: { branch?: string; release?: { tag: string } };
 }
 
 /** What the built-in Kiwi Builds source lists for an app; `{name}` is the chosen app name. */
@@ -78,6 +80,12 @@ export function createBuilds(now: string): AutomationState[] {
       jobs: [], checks: [], last_checked_at: null, last_success_key: null, failed_recipe: null, failed_attempts: 0,
       sequence: 0, published: null, source_enabled: null, configuration_changed: false,
       next_check_at: r.id === "youtube" ? now : null,
+      follow_tweak_updates: true,
+      follow: { current: {}, checked_at: null, error: null },
+      tweak_sources: r.platform === "android" ? [] : r.packages.flatMap((p) => p.follow && p.repo ? [{
+        id: p.id, name: p.name ?? p.repo[0].split("/")[1] ?? p.repo[0], repo: p.repo[0], follows: p.follow.release ? "release" as const : "branch" as const,
+        branch: p.follow.branch ?? null, sha: p.repo[1], tag: null, version: null, date: null, updated: false,
+      }] : []),
     };
     app.preferences = defaultPreferences(app);
     return app;

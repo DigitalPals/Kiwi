@@ -76,9 +76,10 @@ validation, signing and publication stay in Kiwi.
 - The original app comes from Apple with your account; nothing comes from a third-party
   AltStore feed. Builds are never published outside Kiwi.
 - Tweaks and tools are compiled on the Mac from sources pinned to full commit hashes in
-  `automation/recipes.json`. Each pinned source is fetched from GitHub once into
-  `~/.kiwi-builder-tools/sources` (setup fetches them all) and builds copy it from there,
-  so builds do not contact GitHub. A recipe update fetches only the new pins.
+  `automation/recipes.json`, or from newer commits of the tweaks Kiwi found itself
+  ([Tweak updates](#tweak-updates)). Each source is fetched from GitHub once into
+  `~/.kiwi-builder-tools/sources` (setup fetches the recipe's) and builds copy it from there.
+  A new commit is fetched once, by the first build that needs it.
 - NeoFreeBird's build script downloads the newest OpenSSL; Kiwi stages a pinned OpenSSL
   (4.1.0) and FFmpeg (n8.1.2) instead and caches the compiled result.
 - Not compiled by Kiwi: the `CydiaSubstrate.framework` hooking runtime that cyan bundles and
@@ -89,6 +90,36 @@ validation, signing and publication stay in Kiwi.
   (`returnyoutubedislikeapi.com`), YTMusicUltimate's SponsorBlock option, and NeoFreeBird's
   Tenor GIF option. TwitchAdBlock only talks to Twitch.
 
+## Tweak updates
+
+Kiwi follows the iOS apps' tweaks on GitHub by itself: **Settings › Kiwi Builds › Follow
+Tweak Updates**, on by default. Every three hours it asks GitHub, without an account (about
+15 requests a round), for:
+
+- **RedditFilter and NeoFreeBird (v7):** the newest published release (no drafts or
+  pre-releases). Its tag (RedditFilter's `v2026.45.0-1.3.8`) or its IPA's file name
+  (NeoFreeBird's `NeoFreeBird-sideloaded-X_7.3.1_12.39.ipa`) names the App Store version it
+  supports, and Kiwi builds that version of Reddit or X.
+- **The other tweaks** (YouMod and the PoomSmart tweaks, YTMusicUltimate and its extras,
+  TwitchAdBlock): the newest commit on their branch that is at least a day old, so a series
+  pushed in one go settles first. These apps already build the newest App Store version.
+
+A newer commit must descend from the one in use (GitHub's compare), so rewritten history is
+not followed. Newer sources build at once, with the recipe's build flags and Kiwi's own
+source patches. When the build succeeds, the release is published like any other update and
+later builds keep those sources. When it fails twice, Kiwi gives them up, keeps building with
+the sources that last built and tries again only when upstream moves on. A build that
+breaks only at runtime is not caught: keep a working version until a new one runs, as for
+any new build. The app's page in Kiwi Builds shows each followed tweak with its source, and
+newer tweaks being built or given up.
+
+**What this trusts.** Newer tweak code is built and installed without anyone reviewing it,
+inside apps you are signed in to: a tweak repository that is taken over could ship code
+that reads those sessions. With Follow Tweak Updates off, builds use only the sources this
+Kiwi version pins (reviewed when the recipe was changed) and go back to them at the next
+build. A Kiwi update that moves a recipe's pin drops what Kiwi found against the old one;
+the next round finds it again if it is still newer.
+
 ## Apps
 
 | App | Tweak (pinned) | Notes |
@@ -96,12 +127,12 @@ validation, signing and publication stay in Kiwi.
 | YouTube | YouMod with YouPiP, Return YouTube Dislikes, YTABConfig, YouQuality, YouGroupSettings, YTVideoOverlay, UncappedAVPlayer | Optional tweaks are choices |
 | YouTube Music | YTMusicUltimate 2.4.1 ([mrdrvt99 fork](https://github.com/mrdrvt99/YTMusicUltimate): upstream plus a download crash fix), optional Return YouTube Music Dislikes, YouMusicPiP, YTMABConfig | Built with `SIDELOADING=1` (Google sign-in and keychain fixes). Sign-in may need a second try |
 | Twitch | TwitchAdBlock 0.3.0 ([wkangg fork](https://github.com/wkangg/TwitchAdBlock); upstream is abandoned and crashes on Twitch 24.5+) | Experimental. Sideload fixes are built without theos-jailed (one Makefile line removed). No proxy; no live notifications |
-| X | NeoFreeBird 7.3.0 (v7) | Experimental. Built on the X version NeoFreeBird supports (12.38.1), not the newest. Sign in through x.com in the app (X blocks native login for re-signed apps; passkeys don't work). Choose "Twitter" or "X" as the Home Screen name. X's terms forbid modified clients |
+| X | NeoFreeBird 7.3.0 (v7) | Experimental. Built on the X version the NeoFreeBird release supports (12.38.1 for 7.3.0), not the newest. Sign in through x.com in the app (X blocks native login for re-signed apps; passkeys don't work). Choose "Twitter" or "X" as the Home Screen name. X's terms forbid modified clients |
 | Reddit | RedditFilter 1.3.8 ([and101 fork](https://github.com/and101/RedditFilter)) with RedditSideloadFix | Builds Reddit 2026.45.0. Promoted posts and comment ads are hidden by default. Sign in with your username and password as usual; if Reddit turns that down, a reddit.com sheet finishes the sign-in (**Other options → Log in with browser** and emailed login links also work). Built without the Safari extension, and RedditFilter's own GitHub update alert is off by default because Kiwi delivers updates. Extra filters are under **Profile → Settings → RedditFilter** |
 
 RedditFilter and its sideload fix are compiled together with `SIDELOADED=1`. Kiwi removes
 the Makefile's theos-jailed module selection and injects both compiled dylibs with cyan.
-Two login callbacks are assigned to local block variables before `%orig` calls so the
+Three login callbacks are assigned to local block variables before `%orig` calls so the
 pinned Logos parser can compile them; their behavior is preserved. Ad removal needs no
 proxy or Reddit API credentials. Optional keyword, recommendation and other filters are
 configured in the app; Direct-play RedGIFs, when enabled there, connects to RedGIFs
@@ -593,7 +624,7 @@ SSH tunnel to a test Kiwi started with `--trust-local`).
   per-app monotonic `revision` (also stamped as `KiwiBuildRevision` in the main plist) makes
   changed patches on the same version visible as updates. Kiwi shows `21.43.5 · Kiwi 7`, and
   its history selector includes it.
-- For X and Reddit, Kiwi builds the App Store version the pinned tweak release targets. It
+- For X and Reddit, Kiwi builds the App Store version the tweak release targets. It
   finds Apple's build of that version among the newest 40 and remembers the lookups.
 - The builder checks the bundle id and version, archive paths, all Mach-O executable slices
   for remaining encryption (except extensions, which injection removes), and that the main
@@ -652,7 +683,12 @@ yourself if you no longer need them.
 
 To update a tweak or the build tooling, review and change the full commit hashes in
 `automation/recipes.json` (and the tweak's version in `tweak`; for X and Reddit also
-`app_version`), compile it (below), and install Kiwi again with `./install.sh`. Run setup
+`app_version`), compile it (below), and install Kiwi again with `./install.sh`. A package's
+`follow` says how Kiwi follows it by itself: `{"branch": "main"}`, or
+`{"release": {"tag": "v{app_version}-{version}"}}` with optional `version_prefix` (a major
+version line) and `asset` (a release file name that names `{app_version}`, when the tag
+doesn't). `{version}` and `{app_version}` match dotted version numbers; a recipe with an
+`app_version` must follow releases that name one. Run setup
 again when the toolchain changed. Existing releases stay usable. The runner and recipes are
 built into the Kiwi binary, so editing the installed copies alone does not last.
 

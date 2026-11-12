@@ -4,8 +4,8 @@ import type { AutomationPreferences, AutomationState, BuilderInfo } from "../api
 import { AppIcon } from "../components/AppIcon";
 import { BackBar, Banner, Cell, ErrorState, Loading, Section, Spinner, Toggle } from "../components/ui";
 import {
-  activeJob, automationSummary, builtAppPath, heroLine, intervalLabel, JOB_LABELS, limitationIcon, samePreferences,
-  selectedFeatures,
+  activeJob, automationSummary, builtAppPath, heroLine, intervalLabel, JOB_LABELS, limitationIcon, pinsLabel, samePreferences,
+  selectedFeatures, sourceLine,
 } from "../lib/automation";
 import { formatDateTime, formatRelative, formatVersion } from "../lib/format";
 import { useOnForeground, useResource, useTask } from "../lib/hooks";
@@ -78,6 +78,45 @@ function Options({ data, preferences, edit, disabled, footer }: {
             })} />
         </Cell>
       ))}
+    </Section>
+  );
+}
+
+/**
+ * An iOS app's tweak sources on GitHub: what builds use, newer sources on trial and those Kiwi
+ * gave up on. Kiwi follows them by itself unless Settings turns it off.
+ */
+function TweakUpdates({ data }: { data: AutomationState }) {
+  const sources = data.tweak_sources ?? [];
+  if (data.platform === "android" || sources.length === 0) return null;
+  const follow = data.follow;
+  const on = data.follow_tweak_updates !== false;
+  const footer = on
+    ? `Kiwi looks for newer tweaks on GitHub every few hours and builds them by itself: releases right away, branch commits once they are a day old. If newer tweaks fail to build twice, ${data.name} keeps the ones that last built.`
+    : "Off in Settings › Kiwi Builds: builds use the tweak versions this Kiwi version pins.";
+  return (
+    <Section title="Tweak Updates" footer={footer}>
+      {on && follow?.candidate && (
+        <Cell label="Building Newer Tweaks" sub={`${pinsLabel(data, follow.candidate)}${follow.attempts ? " · trying again" : ""}`}>
+          <Spinner />
+        </Cell>
+      )}
+      {on && follow?.failed && (
+        <div class="cell cell-stacked">
+          <div class="cell-label">Newer Tweaks Didn't Build</div>
+          <div class="cell-sub">{pinsLabel(data, follow.failed.pins)} · {formatDateTime(follow.failed.at)}</div>
+          <div class="cell-sub danger">{follow.failed.error}</div>
+          <div class="cell-sub">{data.name} keeps the tweaks that last built until a newer version appears.</div>
+        </div>
+      )}
+      {sources.map((source) => (
+        <Cell key={source.id} label={source.name} sub={sourceLine(source)}>
+          {source.updated ? <span class="tag tag-tint">Updated</span> : undefined}
+        </Cell>
+      ))}
+      {on && <Cell label="Last Looked" sub={follow?.error ?? undefined}>
+        {follow?.checked_at ? formatRelative(follow.checked_at) : "Not yet"}
+      </Cell>}
     </Section>
   );
 }
@@ -180,6 +219,8 @@ function Added({ data, state, info }: { data: AutomationState; state: ReturnType
           {active ? "After this job" : data.next_check_at ? formatDateTime(data.next_check_at) : "Off"}
         </Cell>
       </Section>
+
+      <TweakUpdates data={data} />
 
       <form onSubmit={(e) => { e.preventDefault(); if (dirty && !save.pending) void save.run(preferences); }}>
         <Section title="Schedule" footer={android

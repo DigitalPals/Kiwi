@@ -348,6 +348,8 @@ export interface Settings {
   strip_watch_apps: boolean;
   app_store_country: string; // two letters, lowercase; default: the Mac's region
   kiwi_builds: boolean; // Kiwi Builds; off until the owner turns it on
+  /** Kiwi Builds follows new releases of the iOS apps' tweaks by itself. */
+  follow_tweak_updates: boolean;
 }
 
 export interface ApiErrorBody {
@@ -451,6 +453,47 @@ export interface SetupCheck {
   ready: boolean;
 }
 
+/** A newer tweak source Kiwi found upstream (`automation::follow::Pin`). */
+export interface TweakPin {
+  sha: string;
+  /** The recipe's commit it was found against. */
+  base: string;
+  tag?: string;
+  version?: string;
+  app_version?: string;
+  date?: string | null;
+  found_at: string;
+}
+
+/** Newer tweak sources by package id. */
+export type TweakPins = Record<string, TweakPin>;
+
+/** An app's tweak updates: what builds use, what is on trial and what was given up. */
+export interface TweakFollow {
+  current: TweakPins;
+  candidate?: TweakPins;
+  tried?: boolean;
+  attempts?: number;
+  failed?: { pins: TweakPins; error: string; at: string };
+  checked_at: string | null;
+  error: string | null;
+}
+
+/** A package Kiwi follows upstream, with the source builds use now. */
+export interface TweakSource {
+  id: string;
+  name: string;
+  repo: string;
+  follows: "release" | "branch";
+  branch: string | null;
+  sha: string;
+  tag: string | null;
+  version: string | null;
+  date: string | null;
+  /** Newer than the sources this Kiwi version pins. */
+  updated: boolean;
+}
+
 /** One app Kiwi can patch and sign on the Mac (`GET /api/automation/:app`). */
 export interface AutomationState {
   id: string;
@@ -492,6 +535,11 @@ export interface AutomationState {
   source_enabled: boolean | null;
   configuration_changed: boolean;
   next_check_at: string | null;
+  /** iOS apps: the tweak sources Kiwi follows upstream (empty for Android apps). */
+  tweak_sources?: TweakSource[];
+  /** Whether Kiwi follows tweak updates (Settings). */
+  follow_tweak_updates?: boolean;
+  follow?: TweakFollow;
 }
 
 /** Every app Kiwi can build, with its latest jobs (`GET /api/automation`). */

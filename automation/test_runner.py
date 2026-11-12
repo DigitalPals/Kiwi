@@ -125,6 +125,60 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(plan["external_id"], "123")
             self.assertEqual(plan["key"], runner.recipe_key({k: v for k, v in plan.items() if k != "key"}))
 
+    def test_tweak_update_pins_move_only_followed_packages_and_enter_the_plan(self):
+        from unittest.mock import patch
+        builder_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(builder_dir.cleanup)
+        builder = runner.Builder(builder_dir.name)
+        reddit = builder.app("reddit")
+        new = "b" * 40
+        pinned = runner.apply_pins(reddit, {"packages": {"redditfilter": new}, "app_version": "2026.46.0",
+                                            "tweak": "RedditFilter 1.3.9"})
+        self.assertEqual(pinned["packages"][0]["repo"], ["and101/RedditFilter", new])
+        self.assertEqual((pinned["app_version"], pinned["tweak"]), ("2026.46.0", "RedditFilter 1.3.9"))
+        self.assertNotEqual(reddit["packages"][0]["repo"][1], new, "the recipe itself is unchanged")
+        self.assertIs(runner.apply_pins(reddit, None), reddit)
+        self.assertIs(runner.apply_pins(reddit, {}), reddit)
+        for pins in ({"packages": {"nope": new}}, {"packages": {"redditfilter": "main"}}, {"other": 1},
+                     {"tweak": "x; rm -rf /"}, {"app_version": "../1"}, ["redditfilter"]):
+            with self.assertRaisesRegex(runner.BuildError, "invalid tweak update pins"):
+                runner.apply_pins(reddit, pins)
+        # YouTube follows the App Store: there is no supported version to move.
+        with self.assertRaisesRegex(runner.BuildError, "invalid tweak update pins"):
+            runner.apply_pins(builder.app("youtube"), {"app_version": "21.46.1"})
+        (builder.tools / "setup.json").write_text('{}')
+        answers = [{"externalVersionIdentifiers": ["7"], "latestExternalVersionID": "7"}, {"displayVersion": "2026.46.0"}]
+        pins = {"packages": {"redditfilter": new}, "app_version": "2026.46.0"}
+        with patch.object(builder, "doctor", return_value={"ready": True, "checks": []}), \
+             patch.object(builder, "ipa", side_effect=answers), patch.object(runner, "emit") as emit:
+            builder.plan(reddit, {"tweaks": [], "pins": pins})
+        plan = emit.call_args.kwargs["plan"]
+        self.assertEqual((plan["pins"], plan["version"]), (pins, "2026.46.0"))
+        self.assertEqual(plan["recipe"]["app"]["packages"][0]["repo"][1], new)
+        self.assertEqual(plan["key"], runner.recipe_key({k: v for k, v in plan.items() if k != "key"}))
+        # Building checks the plan against the recipe with the same pins.
+        with patch.object(builder, "ipa", side_effect=runner.BuildError("downloading")):
+            with self.assertRaisesRegex(runner.BuildError, "downloading"):
+                builder.build(reddit, plan, 1, Path(builder_dir.name))
+            with self.assertRaisesRegex(runner.BuildError, "plan changed"):
+                builder.build(reddit, {**plan, "pins": {"packages": {"redditfilter": "c" * 40}}}, 1, Path(builder_dir.name))
+
+    def test_followed_packages_say_how(self):
+        recipes = runner.json.loads(runner.RECIPES_PATH.read_text())
+        for app in recipes["apps"]:
+            for package in app["packages"]:
+                follow = package.get("follow")
+                if follow is None:
+                    continue
+                self.assertEqual(len(follow), 1, package["id"])
+                if "release" in follow:
+                    tag = follow["release"]["tag"]
+                    self.assertIn("{version}", tag)
+                    names = tag + follow["release"].get("asset", "")
+                    self.assertEqual("{app_version}" in names, bool(app.get("app_version")), package["id"])
+                else:
+                    self.assertRegex(follow["branch"], r"^[A-Za-z0-9._/-]+$")
+
     def test_native_enrollment_preserves_original_binary_and_license(self):
         with tempfile.TemporaryDirectory() as d:
             wrapper = Path(d) / "Sample.app"

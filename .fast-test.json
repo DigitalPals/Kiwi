@@ -1,5 +1,5 @@
 {
-  "about": "What `fast-test` runs for a change (see ~/Code/fast-test). Quick steps run on The Dragon; a wide change also runs the full suite on The Beast. The Android app isn't here: build-in-docker.sh or GitHub's Android job covers it.",
+  "about": "What `fast-test` runs for a change (see ~/Code/fast-test). Quick steps run on The Dragon; Clippy and the Rust tests run on The Beast, and a wide change also runs the full suite there. The Android app isn't here: build-in-docker.sh or GitHub's Android job covers it.",
   "steps": [
     {
       "name": "rust-fmt",
@@ -8,8 +8,9 @@
     },
     {
       "name": "rust",
-      "about": "Clippy and tests of the changed crates, and of kiwi-server, which uses all the others.",
+      "about": "Clippy and tests of the changed crates, and of kiwi-server, which uses all the others, on The Beast: they compile most of the workspace.",
       "when": ["crates/**"],
+      "where": "beast",
       "run": "set --; for c in {crates}; do set -- \"$@\" -p \"$c\"; done; case \" $* \" in *' kiwi-server '*) ;; *) set -- \"$@\" -p kiwi-server ;; esac; cargo clippy --locked --all-targets \"$@\" -- -D warnings && cargo test --locked \"$@\"",
       "timeout": 30
     },

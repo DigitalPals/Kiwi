@@ -29,6 +29,6 @@ url = { version = "2", features = ["serde"] }
 plist = { version = "~1.10.3", features = ["enable_unstable_features_that_may_break_with_minor_version_bumps"] }
 sha2 = "0.11"
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 tempfile = "3"
 zip = "9.5"
